@@ -34,12 +34,38 @@ Multi-source price oracle that fetches and caches USD prices for Stellar assets.
 ### Prerequisites
 
 - Node.js >= 20.9.0
-- Redis server
+- Redis server (local or remote)
 
 ### Installation
 
 ```bash
 npm install
+```
+
+### Redis Setup
+
+**macOS (Homebrew):**
+```bash
+brew install redis
+brew services start redis
+```
+
+**Linux (Ubuntu/Debian):**
+```bash
+sudo apt-get install redis-server
+sudo systemctl start redis
+sudo systemctl enable redis
+```
+
+**Docker:**
+```bash
+docker run -d -p 6379:6379 redis:alpine
+```
+
+**Verify Redis is running:**
+```bash
+redis-cli ping
+# Should return: PONG
 ```
 
 ### Configuration
@@ -50,9 +76,23 @@ Copy `.env.example` to `.env` and configure:
 cp .env.example .env
 ```
 
-Required environment variables:
-- `REDIS_HOST` - Redis server host (default: localhost)
-- `COINMARKETCAP_API_KEY` - API key for CoinMarketCap (optional)
+**Environment Variables:**
+
+| Variable | Description | Default | Required |
+|----------|-------------|---------|----------|
+| `PORT` | Server port | 3000 | No |
+| `REDIS_HOST` | Redis server host | localhost | No |
+| `REDIS_PORT` | Redis server port | 6379 | No |
+| `REDIS_PASSWORD` | Redis password | undefined | No |
+| `STELLAR_HORIZON_URL` | Horizon API URL | https://horizon.stellar.org | No |
+| `USDC_ISSUER` | USDC issuer address | GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA | No |
+| `COINGECKO_API_KEY` | CoinGecko API key | undefined | No |
+| `COINMARKETCAP_API_KEY` | CoinMarketCap API key | undefined | No |
+| `PRICE_CACHE_TTL` | Cache TTL in seconds | 60 | No |
+| `PRICE_REFRESH_INTERVAL` | Refresh interval in seconds | 30 | No |
+| `PRICE_STALE_THRESHOLD` | Stale threshold in minutes | 5 | No |
+| `PRICE_ANOMALY_THRESHOLD` | Anomaly detection threshold % | 10 | No |
+| `LOG_LEVEL` | Logging level | info | No |
 
 ### Running
 
@@ -63,6 +103,8 @@ npm run dev
 # Production
 npm start
 ```
+
+The server will start on the configured port (default: 3000) and automatically begin the background price refresh job.
 
 ## API Endpoints
 
@@ -98,7 +140,56 @@ GET /api/v1/prices/:asset_code/refresh?issuer=<issuer_address>
 GET /health
 ```
 
-## Architecture
+**Response:**
+```json
+{
+  "status": "ok",
+  "timestamp": "2024-01-15T10:30:00.000Z"
+}
+```
+
+## Usage Examples
+
+### Fetch XLM Price
+```bash
+curl http://localhost:3000/api/v1/prices/XLM
+```
+
+### Fetch Custom Asset Price
+```bash
+curl "http://localhost:3000/api/v1/prices/USDC?issuer=GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA"
+```
+
+### Force Price Refresh
+```bash
+curl http://localhost:3000/api/v1/prices/XLM/refresh
+```
+
+### Check Service Health
+```bash
+curl http://localhost:3000/health
+```
+
+## Error Handling
+
+The API returns appropriate HTTP status codes:
+
+- `200` - Success
+- `400` - Invalid request parameters
+- `404` - Price not available
+- `500` - Internal server error
+
+**Error Response Format:**
+```json
+{
+  "error": "Error type",
+  "message": "Detailed error message"
+}
+```
+
+## Development
+
+### Project Structure
 
 ```
 src/
@@ -117,6 +208,74 @@ src/
 └── jobs/
     └── priceRefresh.js   # Background price refresh job
 ```
+
+### Adding New Price Sources
+
+To add a new price source:
+
+1. Create a new file in `src/services/sources/`
+2. Implement a `fetchPrice(assetCode, issuer)` function that returns a price or `null`
+3. Add the source to the `SOURCES` array in `src/services/priceOracle.js`
+
+Example:
+```javascript
+// src/services/sources/customSource.js
+const axios = require('axios');
+const logger = require('../../logger');
+
+async function fetchPrice(assetCode, issuer) {
+  try {
+    // Fetch price from your source
+    const response = await axios.get('https://api.example.com/price', {
+      params: { asset: assetCode }
+    });
+    return response.data.price;
+  } catch (err) {
+    logger.warn('Custom source fetch failed', { assetCode, error: err.message });
+    return null;
+  }
+}
+
+module.exports = { fetchPrice };
+```
+
+## Troubleshooting
+
+### Redis Connection Issues
+
+If you see "Redis connection error" in logs:
+- Verify Redis is running: `redis-cli ping`
+- Check Redis host and port in `.env`
+- If using a password, ensure `REDIS_PASSWORD` is set correctly
+
+### Price Not Available
+
+If prices return `null`:
+- Check that at least one price source is configured
+- Verify API keys for CoinGecko/CoinMarketCap if using those sources
+- Check logs for specific source errors
+- Stellar DEX may have no liquidity for the asset
+
+### Rate Limiting
+
+External APIs may rate limit requests:
+- CoinGecko: Free tier has rate limits
+- CoinMarketCap: Requires API key for production use
+- The service handles rate limits gracefully and falls back to other sources
+
+## Monitoring
+
+The service logs important events:
+- Price fetches from each source
+- Price anomalies (>10% changes)
+- Stale price warnings
+- Cache refresh cycles
+- API errors
+
+Monitor logs for:
+- Frequent source failures
+- Price anomalies (may indicate market volatility or data issues)
+- Stale prices (may indicate cache or source issues)
 
 ## License
 

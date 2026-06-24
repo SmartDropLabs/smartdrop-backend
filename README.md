@@ -92,6 +92,7 @@ cp .env.example .env
 | `PRICE_REFRESH_INTERVAL` | Refresh interval in seconds | 30 | No |
 | `PRICE_STALE_THRESHOLD` | Stale threshold in minutes | 5 | No |
 | `PRICE_ANOMALY_THRESHOLD` | Anomaly detection threshold % | 10 | No |
+| `ADMIN_API_KEY` | Bootstrap admin bearer token for API key management | undefined | Yes, for protected endpoints |
 | `LOG_LEVEL` | Logging level | info | No |
 
 ### Running
@@ -134,6 +135,24 @@ GET /api/v1/prices/:asset_code?issuer=<issuer_address>
 GET /api/v1/prices/:asset_code/refresh?issuer=<issuer_address>
 ```
 
+Requires `Authorization: Bearer <api_key>`.
+
+### API Keys
+
+Protected endpoints use `Authorization: Bearer <api_key>`. Set `ADMIN_API_KEY`
+to a 32-byte hex token for bootstrap access, then create scoped API keys with
+the key-management endpoints.
+
+```
+GET /api/v1/keys
+POST /api/v1/keys
+DELETE /api/v1/keys/:id
+```
+
+`POST /api/v1/keys` returns the raw `api_key` only once. Stored keys are hashed
+with SHA-256 and listed with metadata only (`label`, `created_at`,
+`last_used_at`, `scopes`, and `key_prefix`).
+
 ### Health Check
 
 ```
@@ -162,7 +181,16 @@ curl "http://localhost:3000/api/v1/prices/USDC?issuer=GA5ZSEJYB37JRC5AVCIA5MOP4R
 
 ### Force Price Refresh
 ```bash
-curl http://localhost:3000/api/v1/prices/XLM/refresh
+curl http://localhost:3000/api/v1/prices/XLM/refresh \
+  -H "Authorization: Bearer $API_KEY"
+```
+
+### Create API Key
+```bash
+curl -X POST http://localhost:3000/api/v1/keys \
+  -H "Authorization: Bearer $ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"label":"alerts worker","scopes":["alerts"]}'
 ```
 
 ### Check Service Health

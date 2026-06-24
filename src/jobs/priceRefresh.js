@@ -1,5 +1,6 @@
 const cron = require('node-cron');
 const priceOracle = require('../services/priceOracle');
+const alertsService = require('../services/alerts');
 const config = require('../config');
 const logger = require('../logger');
 
@@ -13,6 +14,7 @@ function start() {
     try {
       logger.info('Starting scheduled price refresh');
       await priceOracle.refreshAllCachedPrices();
+      await alertsService.evaluateAll();
     } catch (err) {
       logger.error('Scheduled price refresh failed', { error: err.message });
     }

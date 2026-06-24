@@ -5,6 +5,7 @@ const logger = require('./logger');
 const cache = require('./services/cache');
 const priceRefreshJob = require('./jobs/priceRefresh');
 const pricesRouter = require('./routes/prices');
+const alertsRouter = require('./routes/alerts');
 
 const app = express();
 
@@ -16,6 +17,7 @@ app.get('/health', (req, res) => {
 });
 
 app.use('/api/v1', pricesRouter);
+app.use('/api/v1', alertsRouter);
 
 app.use((err, req, res, _next) => {
   logger.error('Unhandled error', { error: err.message, stack: err.stack });

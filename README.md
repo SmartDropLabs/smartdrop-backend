@@ -31,6 +31,31 @@ Multi-source price oracle that fetches and caches USD prices for Stellar assets.
 
 ## Setup
 
+### Quick Start With Docker
+
+Run the local API, Redis, and Postgres stack with Docker Compose:
+
+```bash
+docker compose up --build
+```
+
+The API listens on port `4000` in the compose environment:
+
+```bash
+curl http://localhost:4000/health
+```
+
+The compose stack mounts `./src` into the API container and runs
+`npm run dev`, so source changes restart the Node process automatically. Redis
+and Postgres include health checks, and `docker-compose.override.yml` is ignored
+for local-only secrets or service tweaks.
+
+To remove containers and the local Postgres volume:
+
+```bash
+docker compose down -v
+```
+
 ### Prerequisites
 
 - Node.js >= 20.9.0

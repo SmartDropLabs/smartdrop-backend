@@ -6,8 +6,7 @@ let client = null;
 
 function getClient() {
   if (!client) {
-    client = new Redis({
-      ...config.redis,
+    client = new Redis(config.redis.url, {
       lazyConnect: true,
       enableOfflineQueue: false,
     });

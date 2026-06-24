@@ -26,7 +26,7 @@ Multi-source price oracle that fetches and caches USD prices for Stellar assets.
 - Redis caching with configurable TTL (default: 60s)
 - Background job refreshes prices every 30 seconds
 - Stale price detection (>5 minutes)
-- Price anomaly logging (>10% changes)
+- Price anomaly logging (>20% changes)
 - Fallback chain: DEX → CoinGecko → CoinMarketCap → cached
 
 ## Setup
@@ -80,19 +80,19 @@ cp .env.example .env
 
 | Variable | Description | Default | Required |
 |----------|-------------|---------|----------|
+| `NODE_ENV` | Runtime environment: `development`, `test`, or `production` | development | No |
 | `PORT` | Server port | 3000 | No |
-| `REDIS_HOST` | Redis server host | localhost | No |
-| `REDIS_PORT` | Redis server port | 6379 | No |
-| `REDIS_PASSWORD` | Redis password | undefined | No |
+| `REDIS_URL` | Redis connection URL | redis://localhost:6379 in development/test | Yes in production |
+| `DATABASE_URL` | Database connection URL reserved for persistence-backed features | postgres://localhost/smartdrop in development, postgres://localhost/smartdrop_test in test | Yes in production |
 | `STELLAR_HORIZON_URL` | Horizon API URL | https://horizon.stellar.org | No |
 | `USDC_ISSUER` | USDC issuer address | GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA | No |
-| `COINGECKO_API_KEY` | CoinGecko API key | undefined | No |
-| `COINMARKETCAP_API_KEY` | CoinMarketCap API key | undefined | No |
-| `PRICE_CACHE_TTL` | Cache TTL in seconds | 60 | No |
-| `PRICE_REFRESH_INTERVAL` | Refresh interval in seconds | 30 | No |
-| `PRICE_STALE_THRESHOLD` | Stale threshold in minutes | 5 | No |
-| `PRICE_ANOMALY_THRESHOLD` | Anomaly detection threshold % | 10 | No |
-| `LOG_LEVEL` | Logging level | info | No |
+| `COINGECKO_API_KEY` | CoinGecko API key | empty | No |
+| `COINMARKETCAP_API_KEY` | CoinMarketCap API key | empty | No |
+| `PRICE_CACHE_TTL_SECONDS` | Cache TTL in seconds | 60 | No |
+| `PRICE_REFRESH_INTERVAL_SECONDS` | Refresh interval in seconds | 30 | No |
+| `PRICE_STALE_THRESHOLD_MINUTES` | Stale threshold in minutes | 5 | No |
+| `PRICE_ANOMALY_THRESHOLD_PCT` | Anomaly detection threshold % | 20 | No |
+| `LOG_LEVEL` | Logging level: `debug`, `info`, `warn`, or `error` | info | No |
 
 ### Running
 
@@ -245,8 +245,8 @@ module.exports = { fetchPrice };
 
 If you see "Redis connection error" in logs:
 - Verify Redis is running: `redis-cli ping`
-- Check Redis host and port in `.env`
-- If using a password, ensure `REDIS_PASSWORD` is set correctly
+- Check `REDIS_URL` in `.env`
+- If Redis requires a password, include it in the connection URL
 
 ### Price Not Available
 
@@ -267,7 +267,7 @@ External APIs may rate limit requests:
 
 The service logs important events:
 - Price fetches from each source
-- Price anomalies (>10% changes)
+- Price anomalies (>20% changes)
 - Stale price warnings
 - Cache refresh cycles
 - API errors

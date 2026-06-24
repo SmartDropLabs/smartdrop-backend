@@ -35,10 +35,21 @@ function buildHistoryKey(assetCode, issuer) {
 
 async function detectAnomaly(currentPrice, assetCode, issuer) {
   const historyKey = buildHistoryKey(assetCode, issuer);
-  const history = await cache.get(historyKey);
+
+  let history = null;
+  try {
+    history = await cache.get(historyKey);
+  } catch (err) {
+    logger.warn('Cache read failed in anomaly detection, skipping', { error: err.message });
+    return false;
+  }
 
   if (!history || !history.price || history.price <= 0) {
-    await cache.set(historyKey, { price: currentPrice, timestamp: Date.now() }, 3600);
+    try {
+      await cache.set(historyKey, { price: currentPrice, timestamp: Date.now() }, 3600);
+    } catch (err) {
+      logger.warn('Cache write failed in anomaly detection', { error: err.message });
+    }
     return false;
   }
 
@@ -54,7 +65,12 @@ async function detectAnomaly(currentPrice, assetCode, issuer) {
     });
   }
 
-  await cache.set(historyKey, { price: currentPrice, timestamp: Date.now() }, 3600);
+  try {
+    await cache.set(historyKey, { price: currentPrice, timestamp: Date.now() }, 3600);
+  } catch (err) {
+    logger.warn('Cache write failed in anomaly detection', { error: err.message });
+  }
+
   return changePercent > config.price.anomalyThresholdPercent;
 }
 
@@ -77,31 +93,38 @@ async function fetchFromAllSources(assetCode, issuer) {
 
 async function getPrice(assetCode, issuer = null) {
   const cacheKey = buildCacheKey(assetCode, issuer);
+  let redisUnavailable = false;
 
-  const cached = await cache.get(cacheKey);
-  if (cached) {
-    const ageMs = Date.now() - cached.fetchedAt;
-    const ageMinutes = ageMs / 60000;
-    const isStale = ageMinutes > config.price.staleThresholdMinutes;
+  try {
+    const cached = await cache.get(cacheKey);
+    if (cached) {
+      const ageMs = Date.now() - cached.fetchedAt;
+      const ageMinutes = ageMs / 60000;
+      const isStale = ageMinutes > config.price.staleThresholdMinutes;
 
-    return {
-      asset_code: assetCode,
-      issuer: issuer || null,
-      price_usd: cached.price,
-      source: cached.source,
-      fetched_at: new Date(cached.fetchedAt).toISOString(),
-      is_stale: isStale,
-      stale_warning: isStale
-        ? `Price is ${ageMinutes.toFixed(1)} minutes old (threshold: ${config.price.staleThresholdMinutes} min)`
-        : null,
-      sources_attempted: cached.sourcesAttempted || [],
-    };
+      return {
+        asset_code: assetCode,
+        issuer: issuer || null,
+        price_usd: cached.price,
+        source: cached.source,
+        fetched_at: new Date(cached.fetchedAt).toISOString(),
+        is_stale: isStale,
+        stale_warning: isStale
+          ? `Price is ${ageMinutes.toFixed(1)} minutes old (threshold: ${config.price.staleThresholdMinutes} min)`
+          : null,
+        sources_attempted: cached.sourcesAttempted || [],
+        redis_unavailable: false,
+      };
+    }
+  } catch (err) {
+    logger.warn('Cache read failed, falling back to source fetch', { error: err.message });
+    redisUnavailable = true;
   }
 
-  return fetchFreshPrice(assetCode, issuer);
+  return fetchFreshPrice(assetCode, issuer, redisUnavailable);
 }
 
-async function fetchFreshPrice(assetCode, issuer = null) {
+async function fetchFreshPrice(assetCode, issuer = null, redisUnavailable = false) {
   const sourceResults = await fetchFromAllSources(assetCode, issuer);
   const sourcesAttempted = sourceResults.map((r) => r.name);
   const prices = sourceResults.map((r) => r.price);
@@ -119,24 +142,34 @@ async function fetchFreshPrice(assetCode, issuer = null) {
       is_stale: true,
       stale_warning: 'No price data available from any source',
       sources_attempted: sourcesAttempted,
+      redis_unavailable: redisUnavailable,
     };
   }
 
   const primarySource = sourceResults.length > 0 ? sourceResults[0].source : 'aggregated';
 
-  await detectAnomaly(aggregatedPrice, assetCode, issuer);
+  if (!redisUnavailable) {
+    await detectAnomaly(aggregatedPrice, assetCode, issuer);
+  }
 
-  const cacheKey = buildCacheKey(assetCode, issuer);
-  await cache.set(
-    cacheKey,
-    {
-      price: aggregatedPrice,
-      source: primarySource,
-      fetchedAt: Date.now(),
-      sourcesAttempted,
-    },
-    config.price.cacheTtl
-  );
+  if (!redisUnavailable) {
+    try {
+      const cacheKey = buildCacheKey(assetCode, issuer);
+      await cache.set(
+        cacheKey,
+        {
+          price: aggregatedPrice,
+          source: primarySource,
+          fetchedAt: Date.now(),
+          sourcesAttempted,
+        },
+        config.price.cacheTtl
+      );
+    } catch (err) {
+      logger.warn('Cache write failed, continuing without caching', { error: err.message });
+      redisUnavailable = true;
+    }
+  }
 
   return {
     asset_code: assetCode,
@@ -147,19 +180,30 @@ async function fetchFreshPrice(assetCode, issuer = null) {
     is_stale: false,
     stale_warning: null,
     sources_attempted: sourcesAttempted,
+    redis_unavailable: redisUnavailable,
   };
 }
 
 async function refreshAllCachedPrices() {
+  if (!cache.isConnected()) {
+    logger.warn('Redis unavailable, skipping scheduled price refresh cycle');
+    return;
+  }
+
   const redis = cache.getClient();
   const keys = [];
   let cursor = '0';
 
-  do {
-    const result = await redis.scan(cursor, 'MATCH', `${CACHE_PREFIX}*`, 'COUNT', 100);
-    cursor = result[0];
-    keys.push(...result[1]);
-  } while (cursor !== '0');
+  try {
+    do {
+      const result = await redis.scan(cursor, 'MATCH', `${CACHE_PREFIX}*`, 'COUNT', 100);
+      cursor = result[0];
+      keys.push(...result[1]);
+    } while (cursor !== '0');
+  } catch (err) {
+    logger.warn('Redis scan failed during price refresh, aborting cycle', { error: err.message });
+    return;
+  }
 
   const refreshPromises = keys
     .filter((key) => !key.includes(':history:'))

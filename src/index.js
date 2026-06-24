@@ -15,7 +15,13 @@ app.use(buildCorsMiddleware(config.corsAllowedOrigins));
 app.use(express.json());
 
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  const redisConnected = cache.isConnected();
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    redis_connected: redisConnected,
+    redis_unavailable: !redisConnected,
+  });
 });
 
 app.use('/api/v1', pricesRouter);

@@ -7,6 +7,7 @@ const priceRefreshJob = require('./jobs/priceRefresh');
 const buildCorsMiddleware = require('./middleware/cors');
 const pricesRouter = require('./routes/prices');
 const alertsRouter = require('./routes/alerts');
+const webhooksRouter = require('./routes/webhooks');
 
 const app = express();
 
@@ -26,6 +27,7 @@ app.get('/health', (req, res) => {
 
 app.use('/api/v1', pricesRouter);
 app.use('/api/v1', alertsRouter);
+app.use('/api/v1', webhooksRouter);
 
 app.use((err, req, res, _next) => {
   const status = err.status || 500;

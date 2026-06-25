@@ -9,7 +9,15 @@ module.exports = {
   },
   stellar: {
     horizonUrl: process.env.STELLAR_HORIZON_URL || 'https://horizon.stellar.org',
+    sorobanRpcUrl: process.env.SOROBAN_RPC_URL || 'https://soroban-rpc.mainnet.stellar.gateway.fm',
     usdcIssuer: process.env.USDC_ISSUER || 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA',
+  },
+  indexer: {
+    enabled: process.env.INDEXER_ENABLED !== 'false',
+    contractId: process.env.SMARTDROP_CONTRACT_ID || '',
+    pollIntervalMs: parseInt(process.env.INDEXER_POLL_INTERVAL_MS, 10) || 5000,
+    pollLimit: parseInt(process.env.INDEXER_POLL_LIMIT, 10) || 100,
+    startLedger: parseInt(process.env.INDEXER_START_LEDGER, 10) || 0,
   },
   coingecko: {
     apiKey: process.env.COINGECKO_API_KEY || '',

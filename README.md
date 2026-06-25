@@ -29,6 +29,23 @@ Multi-source price oracle that fetches and caches USD prices for Stellar assets.
 - Price anomaly logging (>10% changes)
 - Fallback chain: DEX → CoinGecko → CoinMarketCap → cached
 
+### Soroban Event Indexer
+
+Polls Soroban RPC for SmartDrop contract events and stores decoded event state in Redis so the API can answer claim-status queries without live RPC calls on every request.
+
+**Indexed events:**
+- `airdrop_created`
+- `recipient_added`
+- `token_claimed`
+- `airdrop_expired`
+
+**Features:**
+- Configurable contract ID, RPC URL, poll interval, poll limit, and start ledger
+- Last indexed ledger checkpoint persisted in Redis
+- Raw XDR and decoded event data retained for each indexed event
+- Aggregated airdrop status, recipient lists, recipient claim history, and indexer status endpoints
+- RPC errors are logged and the poller continues on the next interval
+
 ## Setup
 
 ### Prerequisites
@@ -85,6 +102,12 @@ cp .env.example .env
 | `REDIS_PORT` | Redis server port | 6379 | No |
 | `REDIS_PASSWORD` | Redis password | undefined | No |
 | `STELLAR_HORIZON_URL` | Horizon API URL | https://horizon.stellar.org | No |
+| `SOROBAN_RPC_URL` | Soroban RPC URL for contract event polling | https://soroban-rpc.mainnet.stellar.gateway.fm | No |
+| `SMARTDROP_CONTRACT_ID` | SmartDrop contract ID to index | undefined | Yes, for indexer |
+| `INDEXER_ENABLED` | Enable Soroban event polling | true | No |
+| `INDEXER_POLL_INTERVAL_MS` | Soroban event polling interval in milliseconds | 5000 | No |
+| `INDEXER_POLL_LIMIT` | Maximum events requested per poll | 100 | No |
+| `INDEXER_START_LEDGER` | First ledger to scan when no checkpoint exists | 0 | No |
 | `USDC_ISSUER` | USDC issuer address | GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA | No |
 | `COINGECKO_API_KEY` | CoinGecko API key | undefined | No |
 | `COINMARKETCAP_API_KEY` | CoinMarketCap API key | undefined | No |
@@ -146,6 +169,15 @@ GET /health
   "status": "ok",
   "timestamp": "2024-01-15T10:30:00.000Z"
 }
+```
+
+### Indexed Airdrop Data
+
+```
+GET /api/v1/airdrops/:id/status
+GET /api/v1/airdrops/:id/recipients
+GET /api/v1/recipients/:address/claims
+GET /api/v1/indexer/status
 ```
 
 ## Usage Examples

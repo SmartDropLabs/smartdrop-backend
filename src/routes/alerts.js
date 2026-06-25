@@ -1,6 +1,7 @@
 const express = require('express');
 const alertsService = require('../services/alerts');
 const logger = require('../logger');
+const { parsePagination, paginateResponse } = require('../utils/pagination');
 
 const router = express.Router();
 
@@ -53,8 +54,10 @@ router.post('/alerts', async (req, res) => {
 
 router.get('/alerts', async (req, res) => {
   try {
+    const pagination = parsePagination(req.query);
     const alerts = await alertsService.list();
-    return res.json({ alerts });
+    const page = alerts.slice(pagination.offset, pagination.offset + pagination.limit);
+    return res.json(paginateResponse(page, alerts.length, pagination));
   } catch (err) {
     logger.error('List alerts error', { error: err.message });
     return res.status(500).json({ error: 'Internal server error' });

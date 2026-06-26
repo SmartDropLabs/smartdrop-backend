@@ -73,7 +73,7 @@ const cache = require('../src/services/cache');
 let app;
 
 beforeAll(() => {
-  app = require('../src/index');
+  app = require('../src/index').app;
 });
 
 beforeEach(() => {

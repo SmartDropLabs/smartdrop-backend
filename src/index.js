@@ -41,8 +41,10 @@ app.use((err, req, res, _next) => {
   res.status(status).json({ error: err.message || 'Internal server error' });
 });
 
+let server;
+
 if (require.main === module) {
-  const server = app.listen(config.port, () => {
+  server = app.listen(config.port, () => {
     logger.info(`SmartDrop backend running on port ${config.port}`);
     priceRefreshJob.start();
   });

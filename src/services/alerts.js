@@ -63,6 +63,20 @@ async function list() {
   return alerts.filter(Boolean);
 }
 
+async function listPaginated({ offset = 0, limit = 20 } = {}) {
+  const redis = cache.getClient();
+  const ids = await redis.smembers(IDS_KEY);
+  const total = ids.length;
+  const paginatedIds = ids.slice(offset, offset + limit);
+  const alerts = await Promise.all(
+    paginatedIds.map((id) => cache.get(alertKey(id)))
+  );
+  return {
+    alerts: alerts.filter(Boolean),
+    total
+  };
+}
+
 async function remove(id) {
   const redis = cache.getClient();
   const existing = await cache.get(alertKey(id));
@@ -124,4 +138,4 @@ async function evaluateAll() {
   }
 }
 
-module.exports = { create, list, remove, evaluateForAsset, evaluateAll };
+module.exports = { create, list, listPaginated, remove, evaluateForAsset, evaluateAll };

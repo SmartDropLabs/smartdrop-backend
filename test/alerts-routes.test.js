@@ -20,15 +20,24 @@ jest.mock('../src/logger', () => ({
 }));
 
 const request = require('supertest');
-const app = require('../src');
+
+const { app, server } = require('../src');
+const priceRefreshJob = require('../src/jobs/priceRefresh');
 
 
 describe('GET /api/v1/alerts pagination', () => {
+
+  afterAll((done) => {
+    priceRefreshJob.stop();
+    server.close(done);
+  });
+
 
   test('returns pagination envelope', async () => {
 
     const response = await request(app)
       .get('/api/v1/alerts');
+
 
     expect(response.statusCode).toBe(200);
 

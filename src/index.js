@@ -7,6 +7,8 @@ const priceRefreshJob = require('./jobs/priceRefresh');
 const buildCorsMiddleware = require('./middleware/cors');
 const pricesRouter = require('./routes/prices');
 const alertsRouter = require('./routes/alerts');
+const webhooksRouter = require('./routes/webhooks');
+const webhookRetryWorker = require('./jobs/webhookRetryWorker');
 
 const app = express();
 
@@ -26,6 +28,7 @@ app.get('/health', (req, res) => {
 
 app.use('/api/v1', pricesRouter);
 app.use('/api/v1', alertsRouter);
+app.use('/api/v1', webhooksRouter);
 
 app.use((err, req, res, _next) => {
   const status = err.status || 500;
@@ -36,11 +39,13 @@ app.use((err, req, res, _next) => {
 const server = app.listen(config.port, () => {
   logger.info(`SmartDrop backend running on port ${config.port}`);
   priceRefreshJob.start();
+  webhookRetryWorker.start();
 });
 
 process.on('SIGTERM', async () => {
   logger.info('SIGTERM received, shutting down');
   priceRefreshJob.stop();
+  webhookRetryWorker.stop();
   server.close();
   await cache.disconnect();
   process.exit(0);
@@ -49,6 +54,7 @@ process.on('SIGTERM', async () => {
 process.on('SIGINT', async () => {
   logger.info('SIGINT received, shutting down');
   priceRefreshJob.stop();
+  webhookRetryWorker.stop();
   server.close();
   await cache.disconnect();
   process.exit(0);

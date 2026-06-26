@@ -41,8 +41,12 @@ app.use((err, req, res, _next) => {
   res.status(status).json({ error: err.message || 'Internal server error' });
 });
 
+// 1. Declaramos la variable server aquí afuera usando let (para que tenga alcance global en el archivo)
+let server;
+
 if (require.main === module) {
-  const server = app.listen(config.port, () => {
+  // 2. Aquí adentro solo la asignamos (quitamos el 'const')
+  server = app.listen(config.port, () => {
     logger.info(`SmartDrop backend running on port ${config.port}`);
     priceRefreshJob.start();
   });
@@ -50,7 +54,7 @@ if (require.main === module) {
   process.on('SIGTERM', async () => {
     logger.info('SIGTERM received, shutting down');
     priceRefreshJob.stop();
-    server.close();
+    if (server) server.close();
     await cache.disconnect();
     process.exit(0);
   });
@@ -58,10 +62,11 @@ if (require.main === module) {
   process.on('SIGINT', async () => {
     logger.info('SIGINT received, shutting down');
     priceRefreshJob.stop();
-    server.close();
+    if (server) server.close();
     await cache.disconnect();
     process.exit(0);
   });
 }
 
-module.exports = {app, server};
+// 3. Ahora el export funcionará perfectamente, tanto si corre directo como en modo test
+module.exports = { app, server };

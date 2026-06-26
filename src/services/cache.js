@@ -6,15 +6,29 @@ let client = null;
 
 function getClient() {
   if (!client) {
-    client = new Redis(config.redis);
+    client = new Redis({
+      ...config.redis,
+      lazyConnect: true,
+      enableOfflineQueue: false,
+    });
     client.on('error', (err) => {
       logger.error('Redis connection error', { error: err.message });
     });
     client.on('connect', () => {
       logger.info('Redis connected');
     });
+    client.on('ready', () => {
+      logger.info('Redis ready');
+    });
+    // Kick off the initial connection without blocking or throwing here;
+    // errors are surfaced via the 'error' event above.
+    client.connect().catch(() => {});
   }
   return client;
+}
+
+function isConnected() {
+  return client !== null && client.status === 'ready';
 }
 
 async function get(key) {
@@ -50,4 +64,4 @@ async function disconnect() {
   }
 }
 
-module.exports = { get, set, del, disconnect, getClient };
+module.exports = { get, set, del, disconnect, getClient, isConnected };

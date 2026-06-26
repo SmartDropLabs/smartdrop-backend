@@ -29,6 +29,24 @@ Multi-source price oracle that fetches and caches USD prices for Stellar assets.
 - Price anomaly logging (>10% changes)
 - Fallback chain: DEX → CoinGecko → CoinMarketCap → cached
 
+### Webhook Delivery System
+
+Registers subscriber endpoints for SmartDrop lifecycle events and delivers signed JSON payloads with retry tracking.
+
+**Events:**
+- `airdrop.created`
+- `airdrop.executing`
+- `airdrop.completed`
+- `airdrop.failed`
+- `recipient.claimed`
+
+**Features:**
+- Webhook endpoint CRUD with secrets kept out of list responses
+- Timestamped HMAC-SHA256 request signatures
+- At-least-once delivery attempts with exponential backoff
+- Delivery logs with response code, error, duration, and attempt count
+- Dead-letter storage after retry exhaustion
+
 ## Setup
 
 ### Prerequisites
@@ -152,6 +170,16 @@ DELETE /api/v1/keys/:id
 `POST /api/v1/keys` returns the raw `api_key` only once. Stored keys are hashed
 with SHA-256 and listed with metadata only (`label`, `created_at`,
 `last_used_at`, `scopes`, and `key_prefix`).
+
+### Webhook Endpoints
+
+```
+POST   /api/v1/webhooks
+GET    /api/v1/webhooks
+DELETE /api/v1/webhooks/:id
+POST   /api/v1/webhooks/:id/test
+GET    /api/v1/webhooks/:id/deliveries
+```
 
 ### Health Check
 

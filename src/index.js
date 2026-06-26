@@ -5,8 +5,10 @@ const logger = require('./logger');
 const cache = require('./services/cache');
 const priceRefreshJob = require('./jobs/priceRefresh');
 const buildCorsMiddleware = require('./middleware/cors');
+const { requireApiKey } = require('./middleware/auth');
 const pricesRouter = require('./routes/prices');
 const alertsRouter = require('./routes/alerts');
+const keysRouter = require('./routes/keys');
 const webhooksRouter = require('./routes/webhooks');
 const airdropsRouter = require('./routes/airdrops');
 
@@ -27,6 +29,8 @@ app.get('/health', (req, res) => {
 });
 
 app.use('/api/v1', pricesRouter);
+app.use('/api/v1', keysRouter);
+app.use('/api/v1', requireApiKey(), alertsRouter);
 app.use('/api/v1', alertsRouter);
 app.use('/api/v1', webhooksRouter);
 app.use('/api/v1', airdropsRouter);

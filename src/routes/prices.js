@@ -1,4 +1,5 @@
 const express = require('express');
+const { requireApiKey } = require('../middleware/auth');
 const priceOracle = require('../services/priceOracle');
 const logger = require('../logger');
 
@@ -56,7 +57,7 @@ router.get('/prices/:asset_code', async (req, res) => {
   }
 });
 
-router.get('/prices/:asset_code/refresh', async (req, res) => {
+router.get('/prices/:asset_code/refresh', requireApiKey(), async (req, res) => {
   try {
     const { asset_code } = req.params;
     const { issuer } = req.query;

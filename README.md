@@ -1,5 +1,7 @@
 # SmartDrop backend
 
+[![CI](https://github.com/SmartDropLabs/smartdrop-backend/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/SmartDropLabs/smartdrop-backend/actions/workflows/ci.yml)
+
 HTTP APIs, webhooks, and **indexing** for SmartDrop. This repository contains Node.js services that talk to **Horizon**, **Soroban RPC**, and external APIs.
 
 ## Related repositories
@@ -28,6 +30,24 @@ Multi-source price oracle that fetches and caches USD prices for Stellar assets.
 - Stale price detection (>5 minutes)
 - Price anomaly logging (>10% changes)
 - Fallback chain: DEX → CoinGecko → CoinMarketCap → cached
+
+### Webhook Delivery System
+
+Registers subscriber endpoints for SmartDrop lifecycle events and delivers signed JSON payloads with retry tracking.
+
+**Events:**
+- `airdrop.created`
+- `airdrop.executing`
+- `airdrop.completed`
+- `airdrop.failed`
+- `recipient.claimed`
+
+**Features:**
+- Webhook endpoint CRUD with secrets kept out of list responses
+- Timestamped HMAC-SHA256 request signatures
+- At-least-once delivery attempts with exponential backoff
+- Delivery logs with response code, error, duration, and attempt count
+- Dead-letter storage after retry exhaustion
 
 ## Setup
 
@@ -92,6 +112,7 @@ cp .env.example .env
 | `PRICE_REFRESH_INTERVAL` | Refresh interval in seconds | 30 | No |
 | `PRICE_STALE_THRESHOLD` | Stale threshold in minutes | 5 | No |
 | `PRICE_ANOMALY_THRESHOLD` | Anomaly detection threshold % | 10 | No |
+| `ADMIN_API_KEY` | Bootstrap admin bearer token for API key management | undefined | Yes, for protected endpoints |
 | `LOG_LEVEL` | Logging level | info | No |
 | `WEBHOOK_MAX_ATTEMPTS` | Total delivery attempts (initial + retries) | 3 | No |
 | `WEBHOOK_RETRY_BASE_MS` | Base backoff between retries (ms) | 30000 | No |
@@ -144,6 +165,34 @@ GET /api/v1/prices/:asset_code?issuer=<issuer_address>
 GET /api/v1/prices/:asset_code/refresh?issuer=<issuer_address>
 ```
 
+Requires `Authorization: Bearer <api_key>`.
+
+### API Keys
+
+Protected endpoints use `Authorization: Bearer <api_key>`. Set `ADMIN_API_KEY`
+to a 32-byte hex token for bootstrap access, then create scoped API keys with
+the key-management endpoints.
+
+```
+GET /api/v1/keys
+POST /api/v1/keys
+DELETE /api/v1/keys/:id
+```
+
+`POST /api/v1/keys` returns the raw `api_key` only once. Stored keys are hashed
+with SHA-256 and listed with metadata only (`label`, `created_at`,
+`last_used_at`, `scopes`, and `key_prefix`).
+
+### Webhook Endpoints
+
+```
+POST   /api/v1/webhooks
+GET    /api/v1/webhooks
+DELETE /api/v1/webhooks/:id
+POST   /api/v1/webhooks/:id/test
+GET    /api/v1/webhooks/:id/deliveries
+```
+
 ### Health Check
 
 ```
@@ -172,7 +221,16 @@ curl "http://localhost:3000/api/v1/prices/USDC?issuer=GA5ZSEJYB37JRC5AVCIA5MOP4R
 
 ### Force Price Refresh
 ```bash
-curl http://localhost:3000/api/v1/prices/XLM/refresh
+curl http://localhost:3000/api/v1/prices/XLM/refresh \
+  -H "Authorization: Bearer $API_KEY"
+```
+
+### Create API Key
+```bash
+curl -X POST http://localhost:3000/api/v1/keys \
+  -H "Authorization: Bearer $ADMIN_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"label":"alerts worker","scopes":["alerts"]}'
 ```
 
 ### Check Service Health

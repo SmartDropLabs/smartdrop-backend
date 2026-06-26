@@ -2,10 +2,6 @@ const axios = require('axios');
 const config = require('../../config');
 const logger = require('../../logger');
 
-const STELLAR_CMC_MAP = {
-  XLM: 'XLM',
-};
-
 let apiClient = null;
 
 function getClient() {
@@ -22,36 +18,70 @@ function getClient() {
   return apiClient;
 }
 
-async function fetchPrice(assetCode) {
+function resolveMarket(assetCode, issuer) {
+  const normalizedIssuer = issuer || null;
+
+  if (normalizedIssuer) {
+    const market = config.coinmarketcap.assetIssuerMap?.[`${assetCode}:${normalizedIssuer}`];
+    if (!market) {
+      logger.debug('Issuer not supported by CoinMarketCap', { assetCode, issuer: normalizedIssuer });
+      return null;
+    }
+    return market;
+  }
+
+  const market = config.coinmarketcap.assetIssuerMap?.[assetCode];
+  if (!market) {
+    logger.debug('Asset not supported by CoinMarketCap', { assetCode, issuer: normalizedIssuer });
+    return null;
+  }
+
+  if (market === null) {
+    logger.debug('Issuer not supported by CoinMarketCap', { assetCode, issuer: normalizedIssuer });
+    return null;
+  }
+
+  return market;
+}
+
+async function fetchPrice(assetCode, issuer = null) {
   if (!config.coinmarketcap.apiKey) {
     logger.debug('CoinMarketCap API key not configured');
     return null;
   }
 
-  const symbol = STELLAR_CMC_MAP[assetCode];
-  if (!symbol) {
-    logger.debug('Asset not supported by CoinMarketCap', { assetCode });
+  const market = resolveMarket(assetCode, issuer);
+  if (!market) {
     return null;
   }
 
   try {
     const client = getClient();
+    const lookupKey = market.id ? String(market.id) : market.symbol;
     const response = await client.get('/cryptocurrency/quotes/latest', {
       params: {
-        symbol,
+        ...(market.id ? { id: market.id } : { symbol: market.symbol }),
         convert: 'USD',
       },
     });
 
-    const data = response.data?.data?.[symbol];
+    const data = response.data?.data?.[lookupKey];
     if (!data || !data.quote?.USD?.price) {
       return null;
     }
 
     return data.quote.USD.price;
   } catch (err) {
+    if (err.response?.status === 401) {
+      err.nonRetryable = true;
+      logger.warn('CoinMarketCap authentication failed', { assetCode });
+      throw err;
+    }
     if (err.response?.status === 429) {
-      logger.warn('CoinMarketCap rate limit hit', { assetCode });
+      logger.warn('CoinMarketCap rate limit hit', {
+        assetCode,
+        retry_after: err.response.headers?.['retry-after'] || null,
+      });
     } else {
       logger.warn('CoinMarketCap price fetch failed', { assetCode, error: err.message });
     }

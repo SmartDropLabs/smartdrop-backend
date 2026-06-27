@@ -9,22 +9,26 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --watch src/index.js",
-    "test": "jest"
+    "test": "jest",
+    "migrate": "knex --knexfile src/db/knexfile.js migrate:latest",
+    "migrate:rollback": "knex --knexfile src/db/knexfile.js migrate:rollback"
   },
   "dependencies": {
     "axios": "^1.7.0",
     "cors": "^2.8.5",
-    "dotenv": "^16.4.5",
     "csv-parser": "^3.2.1",
+    "dotenv": "^16.4.5",
     "express": "^4.21.0",
     "helmet": "^8.2.0",
     "ioredis": "^5.4.1",
+    "knex": "^3.3.0",
     "multer": "^2.2.0",
     "node-cron": "^3.0.3",
+    "pg": "^8.22.0",
     "stellar-sdk": "^11.3.0",
     "winston": "^3.14.0",
+    "winston-daily-rotate-file": "^5.0.0",
     "zod": "^4.4.3"
-    "winston-daily-rotate-file": "^5.0.0"
   },
   "devDependencies": {
     "jest": "^29.7.0",

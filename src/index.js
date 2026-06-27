@@ -13,6 +13,7 @@ const webhooksRouter = require('./routes/webhooks');
 const airdropsRouter = require('./routes/airdrops');
 
 const app = express();
+let server;
 
 app.use(helmet());
 app.use(buildCorsMiddleware(config.corsAllowedOrigins));
@@ -42,7 +43,7 @@ app.use((err, req, res, _next) => {
 });
 
 if (require.main === module) {
-  const server = app.listen(config.port, () => {
+  server = app.listen(config.port, () => {
     logger.info(`SmartDrop backend running on port ${config.port}`);
     priceRefreshJob.start();
   });
@@ -65,3 +66,9 @@ if (require.main === module) {
 }
 
 module.exports = app;
+module.exports.app = app;
+module.exports.server = server || {
+  close(callback) {
+    if (callback) callback();
+  },
+};

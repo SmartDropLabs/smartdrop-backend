@@ -1,0 +1,842 @@
+openapi: 3.0.3
+info:
+  title: SmartDrop API
+  description: |
+    SmartDrop backend services — price oracle, webhook delivery, health monitoring, and indexing.
+
+    This specification covers all current REST endpoints and planned future endpoints.
+  version: 0.1.0
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  contact:
+    name: SmartDrop Labs
+    url: https://github.com/SmartDropLabs
+
+servers:
+  - url: http://localhost:4000
+    description: Local development
+  - url: https://api.smartdrop.app
+    description: Production (planned)
+
+security: []
+
+paths:
+  /health:
+    get:
+      operationId: healthCheck
+      summary: Service health check
+      description: Returns the current health status of the API server and its Redis connection.
+      tags:
+        - Health
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+              example:
+                status: ok
+                timestamp: '2026-06-27T12:00:00.000Z'
+                redis_connected: true
+                redis_unavailable: false
+        '503':
+          description: Service is not healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: Service unavailable
+                message: Redis connection failed
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/prices/{asset_code}:
+    get:
+      operationId: getAssetPrice
+      summary: Get asset price
+      description: |
+        Returns the current USD price for a Stellar asset.
+        If no issuer is provided, native asset (XLM) is assumed.
+      tags:
+        - Prices
+      parameters:
+        - name: asset_code
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/AssetCode'
+          description: Stellar asset code (1–12 uppercase alphanumeric characters)
+          example: XLM
+        - name: issuer
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/StellarAddress'
+          description: Stellar issuer public key (G…)
+          example: GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA
+      x-rate-limit:
+        window: 60s
+        max: 30
+      responses:
+        '200':
+          description: Price data for the requested asset
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PriceResponse'
+              example:
+                asset_code: XLM
+                issuer: null
+                price_usd: 0.1234
+                source: stellar_dex
+                fetched_at: '2026-06-27T12:00:00.000Z'
+                is_stale: false
+                stale_warning: null
+                sources_attempted:
+                  - stellar_dex
+                  - coingecko
+                redis_unavailable: false
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '404':
+          description: Price data is not available for the requested asset
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PriceNotFoundResponse'
+              example:
+                error: Price not available
+                message: 'No price data found for UNKNOWN'
+                asset_code: UNKNOWN
+                issuer: null
+                price_usd: null
+                source: unavailable
+                fetched_at: '2026-06-27T12:00:00.000Z'
+                is_stale: true
+                stale_warning: 'No price data available from any source'
+                sources_attempted: []
+                redis_unavailable: false
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/prices/batch:
+    post:
+      operationId: batchGetPrices
+      summary: Get prices for multiple assets (planned)
+      description: |
+        **⚠️ Planned — not yet implemented.**
+        Accepts a list of asset identifiers and returns prices for all of them
+        in a single request.
+      tags:
+        - Prices
+      x-draft: true
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchPriceRequest'
+            example:
+              assets:
+                - asset_code: XLM
+                  issuer: null
+                - asset_code: USDC
+                  issuer: GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA
+                - asset_code: BTC
+                  issuer: GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA
+      responses:
+        '200':
+          description: Batch price results
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PriceResponse'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/webhooks:
+    post:
+      operationId: createWebhookEndpoint
+      summary: Register a webhook endpoint
+      description: |
+        Creates a new webhook endpoint that will receive signed POST requests
+        when SmartDrop lifecycle events occur.
+      tags:
+        - Webhooks
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateWebhookRequest'
+            example:
+              url: https://example.com/webhooks/smartdrop
+              events:
+                - airdrop.completed
+                - recipient.claimed
+              secret: whsec_myverys3cretkey
+      x-rate-limit:
+        window: 60s
+        max: 20
+      responses:
+        '201':
+          description: Webhook endpoint created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookEndpoint'
+              example:
+                id: wh_a1b2c3d4e5f6g7h8
+                url: https://example.com/webhooks/smartdrop
+                events:
+                  - airdrop.completed
+                  - recipient.claimed
+                active: true
+                secret_preview: whse...key
+                created_at: '2026-06-27T12:00:00.000Z'
+                updated_at: '2026-06-27T12:00:00.000Z'
+        '400':
+          $ref: '#/components/responses/ValidationError'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    get:
+      operationId: listWebhookEndpoints
+      summary: List all registered webhook endpoints
+      description: Returns all webhook endpoints (secrets are excluded; only a preview is shown).
+      tags:
+        - Webhooks
+      responses:
+        '200':
+          description: List of webhook endpoints
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  webhooks:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/WebhookEndpoint'
+              example:
+                webhooks:
+                  - id: wh_a1b2c3d4e5f6g7h8
+                    url: https://example.com/webhooks/smartdrop
+                    events:
+                      - airdrop.completed
+                    active: true
+                    secret_preview: whse...key
+                    created_at: '2026-06-27T12:00:00.000Z'
+                    updated_at: '2026-06-27T12:00:00.000Z'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/webhooks/{id}:
+    delete:
+      operationId: deleteWebhookEndpoint
+      summary: Remove a webhook endpoint
+      description: Soft-deletes a webhook endpoint by marking it inactive.
+      tags:
+        - Webhooks
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/WebhookId'
+          description: Webhook endpoint ID
+          example: wh_a1b2c3d4e5f6g7h8
+      responses:
+        '200':
+          description: Webhook endpoint removed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted:
+                    type: boolean
+                    enum:
+                      - true
+                  webhook:
+                    $ref: '#/components/schemas/WebhookEndpoint'
+              example:
+                deleted: true
+                webhook:
+                  id: wh_a1b2c3d4e5f6g7h8
+                  url: https://example.com/webhooks/smartdrop
+                  events:
+                    - airdrop.completed
+                  active: false
+                  secret_preview: whse...key
+                  created_at: '2026-06-27T12:00:00.000Z'
+                  updated_at: '2026-06-27T12:00:01.000Z'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/webhooks/{id}/test:
+    post:
+      operationId: testWebhookEndpoint
+      summary: Send a test ping to a webhook endpoint
+      description: |
+        Queues a test `ping` event delivery to the specified webhook endpoint.
+        The delivery is processed asynchronously.
+      tags:
+        - Webhooks
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            $ref: '#/components/schemas/WebhookId'
+          example: wh_a1b2c3d4e5f6g7h8
+      x-rate-limit:
+        window: 60s
+        max: 10
+      responses:
+        '202':
+          description: Test ping queued for delivery
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  delivery:
+                    $ref: '#/components/schemas/WebhookDelivery'
+              example:
+                delivery:
+                  id: dlv_x1y2z3
+                  endpoint_id: wh_a1b2c3d4e5f6g7h8
+                  event: ping
+                  payload:
+                    event: ping
+                    timestamp: '2026-06-27T12:00:00.000Z'
+                  status: pending
+                  attempt_count: 0
+                  attempts: []
+                  next_retry_at: null
+                  created_at: '2026-06-27T12:00:00.000Z'
+                  updated_at: '2026-06-27T12:00:00.000Z'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/indexer/status:
+    get:
+      operationId: getIndexerStatus
+      summary: Indexer service status (planned)
+      description: |
+        **⚠️ Planned — not yet implemented.**
+        Returns the current status and ledger height of the on-chain indexer service.
+      tags:
+        - Indexer
+      x-draft: true
+      responses:
+        '200':
+          description: Indexer status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum:
+                      - syncing
+                      - synced
+                      - error
+                  current_ledger:
+                    type: integer
+                  latest_ledger:
+                    type: integer
+                  last_indexed_at:
+                    type: string
+                    format: date-time
+              example:
+                status: synced
+                current_ledger: 52489123
+                latest_ledger: 52489123
+                last_indexed_at: '2026-06-27T12:00:00.000Z'
+        '503':
+          description: Indexer is not responding
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error: Indexer unavailable
+                message: Indexer service is not responding
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /ws:
+    get:
+      operationId: websocketEndpoint
+      summary: Real-time event stream (planned)
+      description: |
+        **⚠️ Planned — not yet implemented.**
+        WebSocket endpoint for streaming real-time SmartDrop events
+        (price updates, airdrop status changes, webhook delivery logs).
+      tags:
+        - WebSocket
+      x-draft: true
+      x-websocket: true
+      responses:
+        '101':
+          description: WebSocket protocol upgrade (future)
+        '400':
+          $ref: '#/components/responses/ValidationError'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        API key authentication. Provide your API key as a Bearer token in the
+        `Authorization` header. Keys are created via `POST /api/v1/keys` and
+        can be scoped to specific resources.
+
+  schemas:
+    StellarAddress:
+      type: string
+      pattern: ^G[A-Z0-9]{55}$
+      description: Stellar public key (ed25519) starting with G
+      example: GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA
+
+    StellarAddressNullable:
+      type: string
+      nullable: true
+      pattern: ^G[A-Z0-9]{55}$
+      description: Stellar public key (ed25519) starting with G, or null for native assets
+      example: GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA
+
+    AssetCode:
+      type: string
+      minLength: 1
+      maxLength: 12
+      pattern: ^[A-Z0-9]+$
+      description: Stellar asset code (1–12 uppercase alphanumeric)
+      example: USDC
+
+    WebhookId:
+      type: string
+      pattern: ^wh_
+      description: Webhook endpoint ID (prefixed with `wh_`)
+      example: wh_a1b2c3d4e5f6g7h8
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum:
+            - ok
+            - degraded
+          description: Service health status
+        timestamp:
+          type: string
+          format: date-time
+          description: Current server time in ISO 8601
+        redis_connected:
+          type: boolean
+          description: Whether Redis is connected
+        redis_unavailable:
+          type: boolean
+          description: Inverse of redis_connected (for legacy monitoring)
+      required:
+        - status
+        - timestamp
+        - redis_connected
+        - redis_unavailable
+
+    PriceResponse:
+      type: object
+      properties:
+        asset_code:
+          $ref: '#/components/schemas/AssetCode'
+        issuer:
+          $ref: '#/components/schemas/StellarAddressNullable'
+        price_usd:
+          type: number
+          nullable: true
+          description: Current USD price (null if unavailable)
+        source:
+          type: string
+          enum:
+            - stellar_dex
+            - coingecko
+            - coinmarketcap
+            - aggregated
+            - unavailable
+          description: Primary data source
+        fetched_at:
+          type: string
+          format: date-time
+          description: When the price was last fetched
+        is_stale:
+          type: boolean
+          description: Whether the cached price exceeds the stale threshold
+        stale_warning:
+          type: string
+          nullable: true
+          description: Human-readable stale warning message
+        sources_attempted:
+          type: array
+          items:
+            type: string
+          description: List of data sources that were queried
+        redis_unavailable:
+          type: boolean
+          description: Whether Redis was unavailable during this request
+      required:
+        - asset_code
+        - issuer
+        - price_usd
+        - source
+        - fetched_at
+        - is_stale
+        - stale_warning
+        - sources_attempted
+        - redis_unavailable
+
+    PriceNotFoundResponse:
+      allOf:
+        - $ref: '#/components/schemas/ErrorResponse'
+        - type: object
+          properties:
+            asset_code:
+              $ref: '#/components/schemas/AssetCode'
+            issuer:
+              $ref: '#/components/schemas/StellarAddressNullable'
+            price_usd:
+              type: number
+              nullable: true
+            source:
+              type: string
+              example: unavailable
+            fetched_at:
+              type: string
+              format: date-time
+            is_stale:
+              type: boolean
+              example: true
+            stale_warning:
+              type: string
+            sources_attempted:
+              type: array
+              items:
+                type: string
+            redis_unavailable:
+              type: boolean
+
+    BatchPriceRequest:
+      type: object
+      properties:
+        assets:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            type: object
+            properties:
+              asset_code:
+                $ref: '#/components/schemas/AssetCode'
+              issuer:
+                $ref: '#/components/schemas/StellarAddressNullable'
+            required:
+              - asset_code
+      required:
+        - assets
+
+    CreateWebhookRequest:
+      type: object
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Subscriber endpoint URL (HTTP or HTTPS)
+          example: https://example.com/webhooks/smartdrop
+        events:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/WebhookEvent'
+          description: Events the endpoint wishes to subscribe to
+        secret:
+          type: string
+          minLength: 8
+          description: Shared secret used for HMAC-SHA256 signature verification
+          example: whsec_myverys3cretkey
+      required:
+        - url
+        - events
+        - secret
+
+    WebhookEndpoint:
+      type: object
+      properties:
+        id:
+          $ref: '#/components/schemas/WebhookId'
+        url:
+          type: string
+          format: uri
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/WebhookEvent'
+        active:
+          type: boolean
+          description: Whether the endpoint is currently active
+        secret_preview:
+          type: string
+          nullable: true
+          description: First 4 and last 4 characters of the secret
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - url
+        - events
+        - active
+        - secret_preview
+        - created_at
+        - updated_at
+
+    WebhookEvent:
+      type: string
+      enum:
+        - airdrop.created
+        - airdrop.executing
+        - airdrop.completed
+        - airdrop.failed
+        - recipient.claimed
+        - ping
+      description: SmartDrop lifecycle events
+
+    WebhookDelivery:
+      type: object
+      properties:
+        id:
+          type: string
+          pattern: ^dlv_
+        endpoint_id:
+          $ref: '#/components/schemas/WebhookId'
+        event:
+          $ref: '#/components/schemas/WebhookEvent'
+        payload:
+          type: object
+        status:
+          type: string
+          enum:
+            - pending
+            - delivered
+            - failed
+            - dead_letter
+        attempt_count:
+          type: integer
+          minimum: 0
+        attempts:
+          type: array
+          items:
+            $ref: '#/components/schemas/DeliveryAttempt'
+        next_retry_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required:
+        - id
+        - endpoint_id
+        - event
+        - payload
+        - status
+        - attempt_count
+        - attempts
+        - created_at
+        - updated_at
+
+    DeliveryAttempt:
+      type: object
+      properties:
+        attempt:
+          type: integer
+          description: Attempt number (1-based)
+        ok:
+          type: boolean
+        status:
+          type: string
+          enum:
+            - delivered
+            - failed
+        response_code:
+          type: integer
+          nullable: true
+        error:
+          type: string
+          nullable: true
+        duration_ms:
+          type: integer
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        next_retry_at:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+        - attempt
+        - ok
+        - status
+        - response_code
+        - error
+        - duration_ms
+        - created_at
+        - next_retry_at
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Machine-readable error type
+        message:
+          type: string
+          description: Human-readable error description
+      required:
+        - error
+        - message
+
+    ValidationErrorDetail:
+      type: object
+      properties:
+        error:
+          type: string
+          example: Validation error
+        message:
+          type: string
+          example: url must be a valid HTTP or HTTPS URL
+        details:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              issue:
+                type: string
+      required:
+        - error
+        - message
+
+    RateLimitInfo:
+      type: object
+      properties:
+        error:
+          type: string
+          example: Too many requests
+        message:
+          type: string
+          example: Rate limit exceeded. Try again in 42 seconds.
+        retry_after_seconds:
+          type: integer
+      required:
+        - error
+        - message
+
+  responses:
+    ValidationError:
+      description: Request validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ValidationErrorDetail'
+    Unauthorized:
+      description: Missing or invalid authentication
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: Missing or invalid API key
+            message: Missing or invalid API key
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: Webhook endpoint not found
+            message: Webhook endpoint not found
+    UnprocessableEntity:
+      description: Request body is semantically invalid
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: Unprocessable entity
+            message: One or more field values are invalid
+    RateLimited:
+      description: Rate limit exceeded
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/RateLimitInfo'
+          example:
+            error: Too many requests
+            message: Rate limit exceeded. Try again in 42 seconds.
+            retry_after_seconds: 42
+      headers:
+        Retry-After:
+          schema:
+            type: integer
+          description: Seconds to wait before retrying
+        X-RateLimit-Limit:
+          schema:
+            type: integer
+          description: Maximum requests per window
+        X-RateLimit-Remaining:
+          schema:
+            type: integer
+          description: Remaining requests in current window
+        X-RateLimit-Reset:
+          schema:
+            type: integer
+          description: Unix timestamp when the window resets
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: Internal server error
+            message: An unexpected error occurred

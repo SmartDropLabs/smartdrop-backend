@@ -12,6 +12,7 @@ const alertsRouter = require('./routes/alerts');
 const keysRouter = require('./routes/keys');
 const webhooksRouter = require('./routes/webhooks');
 const airdropsRouter = require('./routes/airdrops');
+const apiDocsRouter = require('./routes/apiDocs');
 
 const app = express();
 let server;
@@ -37,6 +38,7 @@ app.use('/api/v1/alerts', requireApiKey());
 app.use('/api/v1', alertsRouter);
 app.use('/api/v1', webhooksRouter);
 app.use('/api/v1', airdropsRouter);
+app.use('/api-docs', apiDocsRouter);
 
 app.use((err, req, res, _next) => {
   const status = err.status || 500;

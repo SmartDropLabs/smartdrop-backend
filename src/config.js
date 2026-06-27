@@ -9,6 +9,7 @@ module.exports = {
     port: process.env.REDIS_PORT || 6379,
     password: process.env.REDIS_PASSWORD || undefined,
   },
+  databaseUrl: process.env.DATABASE_URL || 'postgres://postgres:postgres@localhost:5432/smartdrop',
   stellar: {
     horizonUrl: process.env.STELLAR_HORIZON_URL || 'https://horizon.stellar.org',
     usdcIssuer,

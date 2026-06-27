@@ -1,6 +1,7 @@
 const winston = require('winston');
 const DailyRotateFile = require('winston-daily-rotate-file');
 const { name: serviceName, version } = require('../package.json');
+const { requestContext } = require('./middleware/requestId');
 
 // ==================== LOG LEVEL ====================
 const getLogLevel = () => {
@@ -49,10 +50,17 @@ const env = process.env.NODE_ENV || 'development';
 const logFormat = process.env.LOG_FORMAT || (env === 'production' ? 'json' : 'pretty');
 const useJsonFormat = logFormat === 'json';
 
+// ==================== REQUEST CONTEXT ====================
+const requestIdFormat = winston.format((info) => {
+  info.requestId = requestContext.getStore()?.requestId ?? 'system';
+  return info;
+});
+
 // ==================== BASE FORMATS ====================
 const baseFormats = [
   winston.format.timestamp({ format: () => new Date().toISOString() }),
   winston.format.errors({ stack: true }),
+  requestIdFormat(),
   redactFormat(),
 ];
 

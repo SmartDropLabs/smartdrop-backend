@@ -5,6 +5,7 @@ const logger = require('./logger');
 const cache = require('./services/cache');
 const priceRefreshJob = require('./jobs/priceRefresh');
 const buildCorsMiddleware = require('./middleware/cors');
+const { requestIdMiddleware } = require('./middleware/requestId');
 const { requireApiKey } = require('./middleware/auth');
 const pricesRouter = require('./routes/prices');
 const alertsRouter = require('./routes/alerts');
@@ -14,6 +15,7 @@ const airdropsRouter = require('./routes/airdrops');
 
 const app = express();
 
+app.use(requestIdMiddleware);
 app.use(helmet());
 app.use(buildCorsMiddleware(config.corsAllowedOrigins));
 app.use(express.json());
@@ -41,8 +43,10 @@ app.use((err, req, res, _next) => {
   res.status(status).json({ error: err.message || 'Internal server error' });
 });
 
+let server;
+
 if (require.main === module) {
-  const server = app.listen(config.port, () => {
+  server = app.listen(config.port, () => {
     logger.info(`SmartDrop backend running on port ${config.port}`);
     priceRefreshJob.start();
   });

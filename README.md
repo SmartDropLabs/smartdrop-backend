@@ -28,7 +28,7 @@ Multi-source price oracle that fetches and caches USD prices for Stellar assets.
 - Redis caching with configurable TTL (default: 60s)
 - Background job refreshes prices every 30 seconds
 - Stale price detection (>5 minutes)
-- Price anomaly logging (>10% changes)
+- Price anomaly logging (>20% changes)
 - Fallback chain: DEX → CoinGecko → CoinMarketCap → cached
 
 ### Webhook Delivery System
@@ -108,6 +108,21 @@ The application reads configurations from the `.env` file at the root.
 | `ADMIN_API_KEY` | Bootstrap admin bearer token for API key management | undefined | Yes, for protected endpoints |
 | `LOG_LEVEL` | Logging level | info | No |
 | `CORS_ALLOWED_ORIGINS` | Allowed origins split by commas | http://localhost:4000,http://localhost:3001 | No |
+|----------|-------------|---------|----------|
+| `NODE_ENV` | Runtime environment: `development`, `test`, or `production` | development | No |
+| `PORT` | Server port | 3000 | No |
+| `REDIS_URL` | Redis connection URL | redis://localhost:6379 in development/test | Yes in production |
+| `DATABASE_URL` | Database connection URL reserved for persistence-backed features | postgres://localhost/smartdrop in development, postgres://localhost/smartdrop_test in test | Yes in production |
+| `STELLAR_HORIZON_URL` | Horizon API URL | https://horizon.stellar.org | No |
+| `USDC_ISSUER` | USDC issuer address | GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA | No |
+| `COINGECKO_API_KEY` | CoinGecko API key | empty | No |
+| `COINMARKETCAP_API_KEY` | CoinMarketCap API key | empty | No |
+| `PRICE_CACHE_TTL_SECONDS` | Cache TTL in seconds | 60 | No |
+| `PRICE_REFRESH_INTERVAL_SECONDS` | Refresh interval in seconds | 30 | No |
+| `PRICE_STALE_THRESHOLD_MINUTES` | Stale threshold in minutes | 5 | No |
+| `PRICE_ANOMALY_THRESHOLD_PCT` | Anomaly detection threshold % | 20 | No |
+| `ADMIN_API_KEY` | Bootstrap admin bearer token for API key management | empty | Yes, for protected endpoints |
+| `LOG_LEVEL` | Logging level: `debug`, `info`, `warn`, or `error` | info | No |
 
 ---
 
@@ -317,6 +332,9 @@ If you see "Redis connection error" in logs:
 * Verify containers are running: `docker compose ps`
 * Check Redis logs: `docker compose logs redis`
 * Ensure environmental parameters (`REDIS_HOST=redis`) reference the compose network alias rather than `localhost`.
+- Verify Redis is running: `redis-cli ping`
+- Check `REDIS_URL` in `.env`
+- If Redis requires a password, include it in the connection URL
 
 ### Price Not Available
 
@@ -346,6 +364,11 @@ The service logs important events:
 * Stale price warnings
 * Cache refresh cycles
 * API errors
+- Price fetches from each source
+- Price anomalies (>20% changes)
+- Stale price warnings
+- Cache refresh cycles
+- API errors
 
 Monitor logs for:
 

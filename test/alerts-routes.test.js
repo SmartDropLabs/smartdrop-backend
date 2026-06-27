@@ -29,7 +29,8 @@ describe('GET /api/v1/alerts pagination', () => {
 
   afterAll((done) => {
     priceRefreshJob.stop();
-    server.close(done);
+    if (server) server.close(done);
+    else done();
   });
 
 

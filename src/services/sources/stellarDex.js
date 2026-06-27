@@ -1,6 +1,5 @@
 const { Server } = require('stellar-sdk');
 const config = require('../../config');
-const logger = require('../../logger');
 
 let server = null;
 
@@ -13,60 +12,50 @@ function getServer() {
 
 const XLM_ASSET = { native: true };
 
+function derivePriceFromOrderbook(orderBook) {
+  const asks = orderBook.asks ?? [];
+  const bids = orderBook.bids ?? [];
+
+  const hasAsks = asks.length > 0;
+  const hasBids = bids.length > 0;
+
+  if (!hasAsks && !hasBids) {
+    return null;
+  }
+
+  if (hasAsks && hasBids) {
+    const bestAsk = parseFloat(asks[0].price);
+    const bestBid = parseFloat(bids[0].price);
+    return (bestAsk + bestBid) / 2;
+  }
+
+  if (hasBids) {
+    return parseFloat(bids[0].price);
+  }
+
+  return parseFloat(asks[0].price);
+}
+
 async function fetchPrice(assetCode, issuer) {
-  try {
-    const horizon = getServer();
+  const horizon = getServer();
 
-    let base;
-    let counter;
+  let base;
+  let counter;
 
-    if (!issuer || assetCode === 'XLM') {
-      base = XLM_ASSET;
-      counter = { code: 'USDC', issuer: config.stellar.usdcIssuer };
-    } else {
-      base = { code: assetCode, issuer };
-      counter = XLM_ASSET;
-    }
-
-    const orderBook = await horizon.orderbook(base, counter === XLM_ASSET ? undefined : counter).limit(1).call();
-
-    if (!orderBook.bids || orderBook.bids.length === 0) {
-      return null;
-    }
-
-    const bestBid = parseFloat(orderBook.bids[0].price);
-
-    if (!issuer || assetCode === 'XLM') {
-      const xlmUsdcPrice = bestBid;
-      const xlmUsd = await getXlmUsdPrice(horizon);
-      if (xlmUsd === null) return null;
-      return xlmUsdcPrice * xlmUsd;
-    }
-
-    return bestBid;
-  } catch (err) {
-    logger.warn('Stellar DEX price fetch failed', { assetCode, issuer, error: err.message });
-    return null;
+  if (!issuer || assetCode === 'XLM') {
+    base = XLM_ASSET;
+    counter = { code: 'USDC', issuer: config.stellar.usdcIssuer };
+  } else {
+    base = { code: assetCode, issuer };
+    counter = XLM_ASSET;
   }
+
+  const orderBook = await horizon
+    .orderbook(base, counter === XLM_ASSET ? undefined : counter)
+    .limit(1)
+    .call();
+
+  return derivePriceFromOrderbook(orderBook);
 }
 
-async function getXlmUsdPrice(horizon) {
-  try {
-    const usdcIssuer = config.stellar.usdcIssuer;
-    const orderBook = await horizon
-      .orderbook(XLM_ASSET, { code: 'USDC', issuer: usdcIssuer })
-      .limit(1)
-      .call();
-
-    if (!orderBook.bids || orderBook.bids.length === 0) {
-      return null;
-    }
-
-    return parseFloat(orderBook.bids[0].price);
-  } catch (err) {
-    logger.warn('XLM/USDC price fetch failed', { error: err.message });
-    return null;
-  }
-}
-
-module.exports = { fetchPrice };
+module.exports = { fetchPrice, derivePriceFromOrderbook };

@@ -44,6 +44,11 @@ app.use((err, req, res, _next) => {
   res.status(status).json({ error: err.message || 'Internal server error' });
 });
 
+// 1. Declaramos la variable server aquí afuera usando let (para que tenga alcance global en el archivo)
+let server;
+
+if (require.main === module) {
+  // 2. Aquí adentro solo la asignamos (quitamos el 'const')
 let server;
 
 if (require.main === module) {
@@ -55,7 +60,7 @@ if (require.main === module) {
   process.on('SIGTERM', async () => {
     logger.info('SIGTERM received, shutting down');
     priceRefreshJob.stop();
-    server.close();
+    if (server) server.close();
     await cache.disconnect();
     process.exit(0);
   });
@@ -63,12 +68,14 @@ if (require.main === module) {
   process.on('SIGINT', async () => {
     logger.info('SIGINT received, shutting down');
     priceRefreshJob.stop();
-    server.close();
+    if (server) server.close();
     await cache.disconnect();
     process.exit(0);
   });
 }
 
+// 3. Ahora el export funcionará perfectamente, tanto si corre directo como en modo test
+module.exports = { app, server };
 module.exports = app;
 module.exports.app = app;
 module.exports.server = server || {

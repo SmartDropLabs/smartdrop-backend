@@ -49,56 +49,65 @@ Registers subscriber endpoints for SmartDrop lifecycle events and delivers signe
 - Delivery logs with response code, error, duration, and attempt count
 - Dead-letter storage after retry exhaustion
 
-## Setup
+---
+
+## 🚀 Quick Start (Docker Development)
+
+You can spin up the entire local development stack—including the API, PostgreSQL database, and Redis instance—using a single command.
 
 ### Prerequisites
+* Ensure you have [Docker and Docker Compose](https://docs.docker.com/get-docker/) installed.
 
-- Node.js >= 20.9.0
-- Redis server (local or remote)
+### Spin Up the Stack
 
-### Installation
+1. **Clone and Navigate** to the project root directory.
+2. **Set up Environment Variables**:
+   ```bash
+   cp .env.example .env
 
-```bash
-npm install
 ```
 
-### Redis Setup
-
-**macOS (Homebrew):**
+3. **Launch the Infrastructure**:
 ```bash
-brew install redis
-brew services start redis
+docker compose up --build
+
 ```
 
-**Linux (Ubuntu/Debian):**
-```bash
-sudo apt-get install redis-server
-sudo systemctl start redis
-sudo systemctl enable redis
-```
 
-**Docker:**
-```bash
-docker run -d -p 6379:6379 redis:alpine
-```
 
-**Verify Redis is running:**
-```bash
-redis-cli ping
-# Should return: PONG
-```
+The API will stand up on [http://localhost:4000](https://www.google.com/search?q=http://localhost:4000).
 
-### Configuration
+* **Hot Reloading:** Any changes made to files within the `./src` directory will instantly trigger an application restart inside the container.
+* **Database & Cache:** Health checks prevent the API from booting until Postgres and Redis are fully operational.
+* **Teardown:** To stop the containers and maintain volume data, run `docker compose down`. To wipe database volumes completely during stop, use `docker compose down -v`.
 
-Copy `.env.example` to `.env` and configure:
+---
 
-```bash
-cp .env.example .env
-```
+## Configuration
+
+The application reads configurations from the `.env` file at the root.
 
 **Environment Variables:**
 
 | Variable | Description | Default | Required |
+| --- | --- | --- | --- |
+| `PORT` | Server port | 4000 | No |
+| `REDIS_HOST` | Redis server host | redis | No |
+| `REDIS_PORT` | Redis server port | 6379 | No |
+| `REDIS_PASSWORD` | Redis password | undefined | No |
+| `REDIS_URL` | Redis connection string | redis://redis:6379 | No |
+| `DATABASE_URL` | PostgreSQL connection string | postgres://smartdrop:smartdrop@postgres:5432/smartdrop | No |
+| `STELLAR_HORIZON_URL` | Horizon API URL | https://horizon.stellar.org | No |
+| `USDC_ISSUER` | USDC issuer address | GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA | No |
+| `COINGECKO_API_KEY` | CoinGecko API key | undefined | No |
+| `COINMARKETCAP_API_KEY` | CoinMarketCap API key | undefined | No |
+| `PRICE_CACHE_TTL` | Cache TTL in seconds | 60 | No |
+| `PRICE_REFRESH_INTERVAL` | Refresh interval in seconds | 30 | No |
+| `PRICE_STALE_THRESHOLD` | Stale threshold in minutes | 5 | No |
+| `PRICE_ANOMALY_THRESHOLD` | Anomaly detection threshold % | 10 | No |
+| `ADMIN_API_KEY` | Bootstrap admin bearer token for API key management | undefined | Yes, for protected endpoints |
+| `LOG_LEVEL` | Logging level | info | No |
+| `CORS_ALLOWED_ORIGINS` | Allowed origins split by commas | http://localhost:4000,http://localhost:3001 | No |
 |----------|-------------|---------|----------|
 | `NODE_ENV` | Runtime environment: `development`, `test`, or `production` | development | No |
 | `PORT` | Server port | 3000 | No |
@@ -115,17 +124,7 @@ cp .env.example .env
 | `ADMIN_API_KEY` | Bootstrap admin bearer token for API key management | empty | Yes, for protected endpoints |
 | `LOG_LEVEL` | Logging level: `debug`, `info`, `warn`, or `error` | info | No |
 
-### Running
-
-```bash
-# Development (with auto-reload)
-npm run dev
-
-# Production
-npm start
-```
-
-The server will start on the configured port (default: 3000) and automatically begin the background price refresh job.
+---
 
 ## API Endpoints
 
@@ -133,9 +132,11 @@ The server will start on the configured port (default: 3000) and automatically b
 
 ```
 GET /api/v1/prices/:asset_code?issuer=<issuer_address>
+
 ```
 
 **Response:**
+
 ```json
 {
   "asset_code": "XLM",
@@ -147,31 +148,30 @@ GET /api/v1/prices/:asset_code?issuer=<issuer_address>
   "stale_warning": null,
   "sources_attempted": ["stellar_dex", "coingecko"]
 }
+
 ```
 
 ### Force Price Refresh
 
 ```
 GET /api/v1/prices/:asset_code/refresh?issuer=<issuer_address>
+
 ```
 
 Requires `Authorization: Bearer <api_key>`.
 
 ### API Keys
 
-Protected endpoints use `Authorization: Bearer <api_key>`. Set `ADMIN_API_KEY`
-to a 32-byte hex token for bootstrap access, then create scoped API keys with
-the key-management endpoints.
+Protected endpoints use `Authorization: Bearer <api_key>`. Set `ADMIN_API_KEY` to a 32-byte hex token for bootstrap access, then create scoped API keys with the key-management endpoints.
 
 ```
 GET /api/v1/keys
 POST /api/v1/keys
 DELETE /api/v1/keys/:id
+
 ```
 
-`POST /api/v1/keys` returns the raw `api_key` only once. Stored keys are hashed
-with SHA-256 and listed with metadata only (`label`, `created_at`,
-`last_used_at`, `scopes`, and `key_prefix`).
+`POST /api/v1/keys` returns the raw `api_key` only once. Stored keys are hashed with SHA-256 and listed with metadata only (`label`, `created_at`, `last_used_at`, `scopes`, and `key_prefix`).
 
 ### Webhook Endpoints
 
@@ -181,69 +181,91 @@ GET    /api/v1/webhooks
 DELETE /api/v1/webhooks/:id
 POST   /api/v1/webhooks/:id/test
 GET    /api/v1/webhooks/:id/deliveries
+
 ```
 
 ### Health Check
 
 ```
 GET /health
+
 ```
 
 **Response:**
+
 ```json
 {
   "status": "ok",
   "timestamp": "2024-01-15T10:30:00.000Z"
 }
+
 ```
+
+---
 
 ## Usage Examples
 
 ### Fetch XLM Price
+
 ```bash
-curl http://localhost:3000/api/v1/prices/XLM
+curl http://localhost:4000/api/v1/prices/XLM
+
 ```
 
 ### Fetch Custom Asset Price
+
 ```bash
-curl "http://localhost:3000/api/v1/prices/USDC?issuer=GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA"
+curl "http://localhost:4000/api/v1/prices/USDC?issuer=GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA"
+
 ```
 
 ### Force Price Refresh
+
 ```bash
-curl http://localhost:3000/api/v1/prices/XLM/refresh \
+curl http://localhost:4000/api/v1/prices/XLM/refresh \
   -H "Authorization: Bearer $API_KEY"
+
 ```
 
 ### Create API Key
+
 ```bash
-curl -X POST http://localhost:3000/api/v1/keys \
+curl -X POST http://localhost:4000/api/v1/keys \
   -H "Authorization: Bearer $ADMIN_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"label":"alerts worker","scopes":["alerts"]}'
+
 ```
 
 ### Check Service Health
+
 ```bash
-curl http://localhost:3000/health
+curl http://localhost:4000/health
+
 ```
+
+---
 
 ## Error Handling
 
 The API returns appropriate HTTP status codes:
 
-- `200` - Success
-- `400` - Invalid request parameters
-- `404` - Price not available
-- `500` - Internal server error
+* `200` - Success
+* `400` - Invalid request parameters
+* `404` - Price not available
+* `500` - Internal server error
 
 **Error Response Format:**
+
 ```json
 {
   "error": "Error type",
   "message": "Detailed error message"
 }
+
 ```
+
+---
 
 ## Development
 
@@ -265,6 +287,7 @@ src/
 │       └── coinmarketcap.js # CoinMarketCap API source
 └── jobs/
     └── priceRefresh.js   # Background price refresh job
+
 ```
 
 ### Adding New Price Sources
@@ -276,6 +299,7 @@ To add a new price source:
 3. Add the source to the `SOURCES` array in `src/services/priceOracle.js`
 
 Example:
+
 ```javascript
 // src/services/sources/customSource.js
 const axios = require('axios');
@@ -283,8 +307,7 @@ const logger = require('../../logger');
 
 async function fetchPrice(assetCode, issuer) {
   try {
-    // Fetch price from your source
-    const response = await axios.get('https://api.example.com/price', {
+    const response = await axios.get('[https://api.example.com/price](https://api.example.com/price)', {
       params: { asset: assetCode }
     });
     return response.data.price;
@@ -295,13 +318,20 @@ async function fetchPrice(assetCode, issuer) {
 }
 
 module.exports = { fetchPrice };
+
 ```
+
+---
 
 ## Troubleshooting
 
 ### Redis Connection Issues
 
 If you see "Redis connection error" in logs:
+
+* Verify containers are running: `docker compose ps`
+* Check Redis logs: `docker compose logs redis`
+* Ensure environmental parameters (`REDIS_HOST=redis`) reference the compose network alias rather than `localhost`.
 - Verify Redis is running: `redis-cli ping`
 - Check `REDIS_URL` in `.env`
 - If Redis requires a password, include it in the connection URL
@@ -309,21 +339,31 @@ If you see "Redis connection error" in logs:
 ### Price Not Available
 
 If prices return `null`:
-- Check that at least one price source is configured
-- Verify API keys for CoinGecko/CoinMarketCap if using those sources
-- Check logs for specific source errors
-- Stellar DEX may have no liquidity for the asset
+
+* Check that at least one price source is configured
+* Verify API keys for CoinGecko/CoinMarketCap if using those sources
+* Check logs for specific source errors
+* Stellar DEX may have no liquidity for the asset
 
 ### Rate Limiting
 
 External APIs may rate limit requests:
-- CoinGecko: Free tier has rate limits
-- CoinMarketCap: Requires API key for production use
-- The service handles rate limits gracefully and falls back to other sources
+
+* CoinGecko: Free tier has rate limits
+* CoinMarketCap: Requires API key for production use
+* The service handles rate limits gracefully and falls back to other sources
+
+---
 
 ## Monitoring
 
 The service logs important events:
+
+* Price fetches from each source
+* Price anomalies (>10% changes)
+* Stale price warnings
+* Cache refresh cycles
+* API errors
 - Price fetches from each source
 - Price anomalies (>20% changes)
 - Stale price warnings
@@ -331,9 +371,10 @@ The service logs important events:
 - API errors
 
 Monitor logs for:
-- Frequent source failures
-- Price anomalies (may indicate market volatility or data issues)
-- Stale prices (may indicate cache or source issues)
+
+* Frequent source failures
+* Price anomalies (may indicate market volatility or data issues)
+* Stale prices (may indicate cache or source issues)
 
 ## License
 

@@ -14,6 +14,7 @@ const webhooksRouter = require('./routes/webhooks');
 const airdropsRouter = require('./routes/airdrops');
 
 const app = express();
+let server;
 
 app.use(requestIdMiddleware);
 app.use(helmet());
@@ -32,7 +33,7 @@ app.get('/health', (req, res) => {
 
 app.use('/api/v1', pricesRouter);
 app.use('/api/v1', keysRouter);
-app.use('/api/v1', requireApiKey(), alertsRouter);
+app.use('/api/v1/alerts', requireApiKey());
 app.use('/api/v1', alertsRouter);
 app.use('/api/v1', webhooksRouter);
 app.use('/api/v1', airdropsRouter);
@@ -68,4 +69,10 @@ if (require.main === module) {
   });
 }
 
-module.exports = {app, server};
+module.exports = app;
+module.exports.app = app;
+module.exports.server = server || {
+  close(callback) {
+    if (callback) callback();
+  },
+};

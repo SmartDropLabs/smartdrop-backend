@@ -1,5 +1,8 @@
 'use strict';
 
+const adminApiKey = 'a'.repeat(64);
+process.env.ADMIN_API_KEY = adminApiKey;
+
 const mockRedis = {
   smembers: jest.fn(async () => []),
 };
@@ -36,7 +39,8 @@ describe('GET /api/v1/alerts pagination', () => {
   test('returns pagination envelope', async () => {
 
     const response = await request(app)
-      .get('/api/v1/alerts');
+      .get('/api/v1/alerts')
+      .set('Authorization', `Bearer ${adminApiKey}`);
 
 
     expect(response.statusCode).toBe(200);

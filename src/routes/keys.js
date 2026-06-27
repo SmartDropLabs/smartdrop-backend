@@ -5,7 +5,7 @@ const logger = require('../logger');
 
 const router = express.Router();
 
-router.use(requireApiKey({ scopes: ['admin'] }));
+router.use('/keys', requireApiKey({ scopes: ['admin'] }));
 
 function validateScopes(scopes) {
   if (scopes === undefined) return null;

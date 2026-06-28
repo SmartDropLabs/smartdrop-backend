@@ -5,3 +5,7 @@ coverage
 .github
 test
 README.md
+.env
+.env.local
+docker-compose.override.yml
+.dockerignore

@@ -6,6 +6,8 @@ const router = express.Router();
 
 const VALID_TYPES = ['above', 'below', 'change_pct'];
 
+const { parsePagination, paginateResponse } = require('../utils/paginate');
+
 function isValidUrl(str) {
   try {
     const u = new URL(str);
@@ -53,8 +55,14 @@ router.post('/alerts', async (req, res) => {
 
 router.get('/alerts', async (req, res) => {
   try {
-    const alerts = await alertsService.list();
-    return res.json({ alerts });
+    const pagination = parsePagination(req.query);
+    const result = await alertsService.listPaginated(pagination);
+    return res.json(
+      paginateResponse(
+        result.alerts,
+        result.total,
+        pagination
+      ));
   } catch (err) {
     logger.error('List alerts error', { error: err.message });
     return res.status(500).json({ error: 'Internal server error' });

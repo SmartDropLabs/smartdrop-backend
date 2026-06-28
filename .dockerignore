@@ -11,3 +11,13 @@ test
 docker-compose*.yml
 *.log
 .DS_Store
+npm-debug.log
+coverage
+.git
+.github
+test
+README.md
+.env
+.env.local
+docker-compose.override.yml
+.dockerignore

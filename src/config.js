@@ -82,4 +82,20 @@ module.exports = {
     .split(',')
     .map((o) => o.trim())
     .filter(Boolean),
+  webhooks: {
+    maxAttempts: parseInt(process.env.WEBHOOK_MAX_ATTEMPTS, 10) || 3,
+    retryBaseMs: parseInt(process.env.WEBHOOK_RETRY_BASE_MS, 10) || 30000,
+    retryFactor: parseFloat(process.env.WEBHOOK_RETRY_FACTOR) || 2,
+    timeoutMs: parseInt(process.env.WEBHOOK_TIMEOUT_MS, 10) || 5000,
+    retryPollMs: parseInt(process.env.WEBHOOK_RETRY_POLL_MS, 10) || 5000,
+    retryBatchSize: parseInt(process.env.WEBHOOK_RETRY_BATCH, 10) || 25,
+    rateLimit: {
+      windowSeconds: parseInt(process.env.WEBHOOK_RATELIMIT_WINDOW, 10) || 60,
+      max: parseInt(process.env.WEBHOOK_RATELIMIT_MAX, 10) || 60,
+    },
+    testRateLimit: {
+      windowSeconds: parseInt(process.env.WEBHOOK_TEST_RATELIMIT_WINDOW, 10) || 60,
+      max: parseInt(process.env.WEBHOOK_TEST_RATELIMIT_MAX, 10) || 5,
+    },
+  },
 };

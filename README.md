@@ -107,6 +107,18 @@ The application reads configurations from the `.env` file at the root.
 | `PRICE_ANOMALY_THRESHOLD` | Anomaly detection threshold % | 10 | No |
 | `ADMIN_API_KEY` | Bootstrap admin bearer token for API key management | undefined | Yes, for protected endpoints |
 | `LOG_LEVEL` | Logging level | info | No |
+
+| `WEBHOOK_MAX_ATTEMPTS` | Total delivery attempts (initial + retries) | 3 | No |
+| `WEBHOOK_RETRY_BASE_MS` | Base backoff between retries (ms) | 30000 | No |
+| `WEBHOOK_RETRY_FACTOR` | Exponential backoff multiplier | 2 | No |
+| `WEBHOOK_TIMEOUT_MS` | HTTP timeout per delivery attempt | 5000 | No |
+| `WEBHOOK_RETRY_POLL_MS` | Retry worker poll interval | 5000 | No |
+| `WEBHOOK_RETRY_BATCH` | Max retries processed per tick | 25 | No |
+| `WEBHOOK_RATELIMIT_WINDOW` | Mgmt rate-limit window (s) | 60 | No |
+| `WEBHOOK_RATELIMIT_MAX` | Mgmt rate-limit max requests / window / IP | 60 | No |
+| `WEBHOOK_TEST_RATELIMIT_WINDOW` | Test endpoint rate-limit window (s) | 60 | No |
+| `WEBHOOK_TEST_RATELIMIT_MAX` | Test endpoint rate-limit max / window / IP | 5 | No |
+
 | `CORS_ALLOWED_ORIGINS` | Allowed origins split by commas | http://localhost:4000,http://localhost:3001 | No |
 |----------|-------------|---------|----------|
 | `NODE_ENV` | Runtime environment: `development`, `test`, or `production` | development | No |
@@ -123,6 +135,7 @@ The application reads configurations from the `.env` file at the root.
 | `PRICE_ANOMALY_THRESHOLD_PCT` | Anomaly detection threshold % | 20 | No |
 | `ADMIN_API_KEY` | Bootstrap admin bearer token for API key management | empty | Yes, for protected endpoints |
 | `LOG_LEVEL` | Logging level: `debug`, `info`, `warn`, or `error` | info | No |
+
 
 ---
 
@@ -244,7 +257,122 @@ curl http://localhost:4000/health
 
 ```
 
+
+## Webhooks
+
+Register endpoints that receive HTTP POST callbacks when SmartDrop indexes farming/pool events.
+
+### Supported event types
+
+| Event | Description |
+|-------|-------------|
+| `pool.created` | A new farming pool was created on-chain |
+| `pool.assets_locked` | Assets were locked into a pool |
+| `pool.assets_unlocked` | Assets were unlocked from a pool |
+| `pool.rewards_distributed` | Pool distributed rewards to participants |
+| `pool.closed` | Pool was closed |
+| `price.alert` | Existing price-alert event |
+| `*` | Wildcard — subscribe to every known event |
+
+### API
+
+#### Register a webhook
+```
+POST /api/v1/webhooks
+Content-Type: application/json
+
+{
+  "url": "https://example.com/webhooks/smartdrop",
+  "events": ["pool.assets_locked", "pool.rewards_distributed"],
+  "secret": "whsec_at_least_16_chars",     // optional, generated if omitted
+  "description": "Production webhook"       // optional
+}
+```
+
+The response includes the secret in plaintext **exactly once**. Subsequent reads only return `secret_preview`.
+
+#### Manage webhooks
+```
+GET    /api/v1/webhooks               # list
+GET    /api/v1/webhooks/:id           # fetch one
+PATCH  /api/v1/webhooks/:id           # update url / events / active / description
+DELETE /api/v1/webhooks/:id           # remove
+```
+
+#### Test endpoint
+```
+POST /api/v1/webhooks/:id/test
+```
+Sends a synthetic `pool.assets_locked` payload to the registered URL and returns the resulting delivery summary. Limited to 5 calls/min/IP by default.
+
+#### Inspect deliveries (admin dashboard feed)
+```
+GET /api/v1/webhooks/:id/deliveries?limit=50
+```
+Returns the most recent delivery records: `status` (`success | pending | failed`), `attempts`, `response_status`, `last_error`, `next_retry_at`.
+
+### Outgoing request shape
+
+Every delivery is a JSON POST with the following headers:
+
+| Header | Value |
+|--------|-------|
+| `Content-Type` | `application/json` |
+| `User-Agent` | `SmartDrop-Webhooks/1.0` |
+| `X-SmartDrop-Event` | event type (e.g. `pool.assets_locked`) |
+| `X-SmartDrop-Delivery` | unique delivery id (`dlv_…`) |
+| `X-SmartDrop-Signature` | `sha256=<hex hmac of the raw body>` |
+
+Body:
+```json
+{
+  "event": "pool.assets_locked",
+  "event_id": "evt_…",
+  "occurred_at": "2026-06-25T12:00:00.000Z",
+  "data": { "...": "event-specific fields" }
+}
+```
+
+### Verifying the signature (Node.js)
+
+```js
+const crypto = require('crypto');
+
+function verifySmartDrop(req, secret) {
+  const provided = req.header('X-SmartDrop-Signature') || '';
+  const expected = 'sha256=' + crypto
+    .createHmac('sha256', secret)
+    .update(req.rawBody)        // verify against the RAW body, not re-stringified JSON
+    .digest('hex');
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+```
+
+Express tip: capture the raw body via `express.json({ verify: (req, _res, buf) => { req.rawBody = buf.toString(); } })` so the HMAC matches byte-for-byte.
+
+### Retry & failure semantics
+
+- Up to `WEBHOOK_MAX_ATTEMPTS` (default 3) total attempts per event.
+- Retries are scheduled in Redis and processed by a background worker, so retries survive process restarts.
+- Backoff is exponential: `base * factor^(attempts-1)` (default 30s → 60s → 120s).
+- **Retryable**: network errors, HTTP 5xx, 408, 429.
+- **Not retried**: HTTP 4xx (except 408/429). These are marked `failed` immediately so a misconfigured consumer cannot be retried into the ground.
+- Each delivery is logged in `webhook_deliveries` (Redis-backed today, drop-in PG migration documented in `src/repositories/deliveryRepository.js`).
+
+### Storage model
+
+The current implementation stores webhooks and delivery logs in Redis behind a repository abstraction. The repository files document the equivalent PostgreSQL schema verbatim — migrating to PG is a matter of swapping the repository implementation only; no caller code changes.
+
+### Rate limiting
+
+- Management endpoints under `/api/v1/webhooks`: 60 req/min/IP (configurable).
+- `/test` endpoint: 5 req/min/IP (configurable) — prevents using SmartDrop as an outbound HTTP cannon.
+- The limiter fails **open** if Redis is unreachable so a cache outage does not lock you out of management calls.
+
 ---
+
 
 ## Error Handling
 

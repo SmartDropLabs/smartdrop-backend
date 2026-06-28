@@ -44,6 +44,9 @@ jobs:
             - name: Install dependencies
               run: npm ci
 
+            - name: Lint OpenAPI spec
+              run: npx @redocly/cli lint openapi.yaml
+
             - name: Run tests
               run: npm test
 

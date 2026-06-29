@@ -18,6 +18,8 @@ const webhooksRouter = require('./routes/webhooks');
 const airdropsRouter = require('./routes/airdrops');
 const apiDocsRouter = require('./routes/apiDocs');
 
+const priceWebSocket = require('./ws/priceWebSocket');
+
 const app = express();
 let server;
 
@@ -52,6 +54,7 @@ function shutdown(signal) {
     logger.info(`${signal} received, shutting down`);
     priceRefreshJob.stop();
     webhookRetryWorker.stop();
+    require('./ws/PriceSubscriptionManager').stopHeartbeat();
     if (server) server.close();
     await cache.disconnect();
     process.exit(0);
@@ -61,6 +64,7 @@ function shutdown(signal) {
 if (require.main === module) {
   server = app.listen(config.port, () => {
     logger.info(`SmartDrop backend running on port ${config.port}`);
+    priceWebSocket.attach(server);
     priceRefreshJob.start();
     webhookRetryWorker.start();
   });

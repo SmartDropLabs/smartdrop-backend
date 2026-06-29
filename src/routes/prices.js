@@ -1,7 +1,7 @@
 const express = require('express');
 const { requireApiKey } = require('../middleware/auth');
 const priceOracle = require('../services/priceOracle');
-const logger = require('../logger');
+const AppError = require('../errors/AppError');
 
 const router = express.Router();
 
@@ -16,76 +16,57 @@ function validateIssuer(issuer) {
   return /^G[A-Z0-9]{55}$/.test(issuer);
 }
 
-router.get('/prices/:asset_code', async (req, res) => {
+function validatePriceRequest(assetCode, issuer) {
+  if (!validateAssetCode(assetCode)) {
+    throw new AppError('VALIDATION_ERROR', 'Asset code must be 1-12 uppercase alphanumeric characters', 400, {
+      field: 'assetCode',
+      received: assetCode,
+      constraint: 'regex',
+    });
+  }
+
+  if (!validateIssuer(issuer)) {
+    throw new AppError('VALIDATION_ERROR', 'Issuer must be a valid Stellar address (G...)', 400, {
+      field: 'issuer',
+      received: issuer,
+      constraint: 'stellar_public_key',
+    });
+  }
+}
+
+router.get('/prices/:asset_code', async (req, res, next) => {
   try {
     const { asset_code } = req.params;
     const { issuer } = req.query;
-
     const normalizedCode = asset_code.toUpperCase();
-
-    if (!validateAssetCode(normalizedCode)) {
-      return res.status(400).json({
-        error: 'Invalid asset code',
-        message: 'Asset code must be 1-12 alphanumeric characters',
-      });
-    }
-
-    if (!validateIssuer(issuer)) {
-      return res.status(400).json({
-        error: 'Invalid issuer',
-        message: 'Issuer must be a valid Stellar address (G...)',
-      });
-    }
+    validatePriceRequest(normalizedCode, issuer);
 
     const priceData = await priceOracle.getPrice(normalizedCode, issuer || null);
 
     if (priceData.price_usd === null) {
-      return res.status(404).json({
-        error: 'Price not available',
-        message: `No price data found for ${normalizedCode}`,
-        ...priceData,
-      });
+      throw new AppError('NOT_FOUND', `No price data found for ${normalizedCode}`, 404, { asset_code: normalizedCode, issuer: issuer || null });
     }
 
     return res.json(priceData);
   } catch (err) {
-    logger.error('Price endpoint error', { error: err.message, stack: err.stack });
-    return res.status(500).json({
-      error: 'Internal server error',
-      message: 'Failed to fetch price data',
-    });
+    return next(err);
   }
 });
 
-router.get('/prices/:asset_code/refresh', requireApiKey(), async (req, res) => {
+router.get('/prices/:asset_code/refresh', requireApiKey(), async (req, res, next) => {
   try {
     const { asset_code } = req.params;
     const { issuer } = req.query;
     const normalizedCode = asset_code.toUpperCase();
-
-    if (!validateAssetCode(normalizedCode)) {
-      return res.status(400).json({
-        error: 'Invalid asset code',
-        message: 'Asset code must be 1-12 alphanumeric characters',
-      });
-    }
-
-    if (!validateIssuer(issuer)) {
-      return res.status(400).json({
-        error: 'Invalid issuer',
-        message: 'Issuer must be a valid Stellar address (G...)',
-      });
-    }
+    validatePriceRequest(normalizedCode, issuer);
 
     const priceData = await priceOracle.fetchFreshPrice(normalizedCode, issuer || null);
-
+    if (priceData.price_usd === null) {
+      throw new AppError('UPSTREAM_ERROR', 'All price sources failed', 502, { asset_code: normalizedCode, issuer: issuer || null });
+    }
     return res.json(priceData);
   } catch (err) {
-    logger.error('Price refresh endpoint error', { error: err.message, stack: err.stack });
-    return res.status(500).json({
-      error: 'Internal server error',
-      message: 'Failed to refresh price data',
-    });
+    return next(err);
   }
 });
 

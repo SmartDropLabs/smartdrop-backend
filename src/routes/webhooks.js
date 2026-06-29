@@ -1,8 +1,6 @@
-
 'use strict';
 
 const express = require('express');
-const logger = require('../logger');
 const config = require('../config');
 const webhookRepo = require('../repositories/webhookRepository');
 const deliveryRepo = require('../repositories/deliveryRepository');
@@ -10,6 +8,7 @@ const dispatcher = require('../services/webhookDispatcher');
 const signatureService = require('../services/webhookSignature');
 const events = require('../services/webhookEvents');
 const buildRateLimit = require('../middleware/rateLimit');
+const AppError = require('../errors/AppError');
 
 const router = express.Router();
 
@@ -31,59 +30,20 @@ function isValidUrl(str) {
   try {
     const u = new URL(str);
     return u.protocol === 'http:' || u.protocol === 'https:';
-
-const express = require('express');
-const webhooks = require('../services/webhooks');
-const logger = require('../logger');
-
-const router = express.Router();
-
-function isValidUrl(value) {
-  try {
-    const url = new URL(value);
-    return url.protocol === 'http:' || url.protocol === 'https:';
-
   } catch {
     return false;
   }
 }
 
-
 function validateCreate(body) {
   if (!body || typeof body !== 'object') return 'body must be an object';
   const { url, events: subscribedEvents, secret, description } = body;
-
-  if (!url || !isValidUrl(url)) {
-    return 'url must be a valid http(s) URL';
-  }
-  if (!events.isValidSubscription(subscribedEvents)) {
-    return `events must be a non-empty array of: ${events.ALL_EVENTS.join(', ')} or "*"`;
-  }
-  if (secret !== undefined) {
-    if (typeof secret !== 'string' || secret.length < 16) {
-      return 'secret must be a string of at least 16 characters';
-    }
-  }
-  if (description !== undefined && typeof description !== 'string') {
-    return 'description must be a string';
-
-function validateEndpoint(body) {
-  if (!body || !isValidUrl(body.url)) {
-    return 'url must be a valid HTTP or HTTPS URL';
-  }
-  if (!Array.isArray(body.events) || body.events.length === 0) {
-    return 'events must be a non-empty array';
-  }
-  if (body.events.some((event) => !webhooks.VALID_EVENTS.includes(event))) {
-    return `events must be one of: ${webhooks.VALID_EVENTS.join(', ')}`;
-  }
-  if (!body.secret || typeof body.secret !== 'string' || body.secret.length < 8) {
-    return 'secret must be at least 8 characters';
-
-  }
+  if (!url || !isValidUrl(url)) return 'url must be a valid http(s) URL';
+  if (!events.isValidSubscription(subscribedEvents)) return `events must be a non-empty array of: ${events.ALL_EVENTS.join(', ')} or "*"`;
+  if (secret !== undefined && (typeof secret !== 'string' || secret.length < 16)) return 'secret must be a string of at least 16 characters';
+  if (description !== undefined && typeof description !== 'string') return 'description must be a string';
   return null;
 }
-
 
 function publicView(webhook) {
   if (!webhook) return null;
@@ -99,18 +59,10 @@ function publicView(webhook) {
   };
 }
 
-router.post('/webhooks', async (req, res) => {
+router.post('/webhooks', async (req, res, next) => {
   try {
     const validationError = validateCreate(req.body);
-
-router.post('/webhooks', async (req, res) => {
-  try {
-    const validationError = validateEndpoint(req.body);
-
-    if (validationError) {
-      return res.status(400).json({ error: 'Validation error', message: validationError });
-    }
-
+    if (validationError) return next(new AppError('VALIDATION_ERROR', validationError, 400));
 
     const secret = req.body.secret || signatureService.generateSecret();
     const webhook = await webhookRepo.create({
@@ -126,113 +78,71 @@ router.post('/webhooks', async (req, res) => {
       secret_warning: 'Store this secret now — it will not be shown again in plaintext.',
     });
   } catch (err) {
-    logger.error('Create webhook error', { error: err.message });
-
-    const endpoint = await webhooks.createEndpoint({
-      url: req.body.url,
-      events: [...new Set(req.body.events)],
-      secret: req.body.secret,
-    });
-
-    return res.status(201).json(endpoint);
-  } catch (err) {
-    logger.error('Create webhook endpoint error', { error: err.message });
-
-    return res.status(500).json({ error: 'Internal server error' });
+    return next(err);
   }
 });
 
-router.get('/webhooks', async (_req, res) => {
+router.get('/webhooks', async (_req, res, next) => {
   try {
-
     const webhooks = await webhookRepo.list();
     return res.json({ webhooks: webhooks.map(publicView) });
   } catch (err) {
-    logger.error('List webhooks error', { error: err.message });
-    return res.status(500).json({ error: 'Internal server error' });
+    return next(err);
   }
 });
 
-router.get('/webhooks/:id', async (req, res) => {
+router.get('/webhooks/:id', async (req, res, next) => {
   try {
     const webhook = await webhookRepo.findById(req.params.id);
-    if (!webhook) return res.status(404).json({ error: 'Webhook not found' });
+    if (!webhook) return next(new AppError('NOT_FOUND', 'Webhook not found', 404));
     return res.json(publicView(webhook));
   } catch (err) {
-    logger.error('Get webhook error', { error: err.message });
-    return res.status(500).json({ error: 'Internal server error' });
+    return next(err);
   }
 });
 
-router.patch('/webhooks/:id', async (req, res) => {
+router.patch('/webhooks/:id', async (req, res, next) => {
   try {
     const patch = {};
     if (req.body.url !== undefined) {
-      if (!isValidUrl(req.body.url)) {
-        return res.status(400).json({ error: 'Validation error', message: 'url must be a valid http(s) URL' });
-      }
+      if (!isValidUrl(req.body.url)) return next(new AppError('VALIDATION_ERROR', 'url must be a valid http(s) URL', 400));
       patch.url = req.body.url;
     }
     if (req.body.events !== undefined) {
-      if (!events.isValidSubscription(req.body.events)) {
-        return res.status(400).json({ error: 'Validation error', message: 'events invalid' });
-      }
+      if (!events.isValidSubscription(req.body.events)) return next(new AppError('VALIDATION_ERROR', 'events invalid', 400));
       patch.events = req.body.events;
     }
     if (req.body.active !== undefined) {
-      if (typeof req.body.active !== 'boolean') {
-        return res.status(400).json({ error: 'Validation error', message: 'active must be boolean' });
-      }
+      if (typeof req.body.active !== 'boolean') return next(new AppError('VALIDATION_ERROR', 'active must be boolean', 400));
       patch.active = req.body.active;
     }
     if (req.body.description !== undefined) {
-      if (typeof req.body.description !== 'string') {
-        return res.status(400).json({ error: 'Validation error', message: 'description must be a string' });
-      }
+      if (typeof req.body.description !== 'string') return next(new AppError('VALIDATION_ERROR', 'description must be a string', 400));
       patch.description = req.body.description;
     }
 
     const updated = await webhookRepo.update(req.params.id, patch);
-    if (!updated) return res.status(404).json({ error: 'Webhook not found' });
+    if (!updated) return next(new AppError('NOT_FOUND', 'Webhook not found', 404));
     return res.json(publicView(updated));
   } catch (err) {
-    logger.error('Update webhook error', { error: err.message });
-
-    const endpoints = await webhooks.listEndpoints();
-    return res.json({ webhooks: endpoints });
-  } catch (err) {
-    logger.error('List webhook endpoints error', { error: err.message });
-
-    return res.status(500).json({ error: 'Internal server error' });
+    return next(err);
   }
 });
 
-router.delete('/webhooks/:id', async (req, res) => {
+router.delete('/webhooks/:id', async (req, res, next) => {
   try {
-
     const deleted = await webhookRepo.remove(req.params.id);
-    if (!deleted) return res.status(404).json({ error: 'Webhook not found' });
+    if (!deleted) return next(new AppError('NOT_FOUND', 'Webhook not found', 404));
     return res.json({ deleted: true, id: req.params.id });
   } catch (err) {
-    logger.error('Delete webhook error', { error: err.message });
-
-    const deleted = await webhooks.removeEndpoint(req.params.id);
-    if (!deleted) {
-      return res.status(404).json({ error: 'Webhook endpoint not found' });
-    }
-    return res.json({ deleted: true, webhook: deleted });
-  } catch (err) {
-    logger.error('Delete webhook endpoint error', { error: err.message });
-
-    return res.status(500).json({ error: 'Internal server error' });
+    return next(err);
   }
 });
 
-
-router.post('/webhooks/:id/test', testLimit, async (req, res) => {
+router.post('/webhooks/:id/test', testLimit, async (req, res, next) => {
   try {
     const delivery = await dispatcher.sendTest(req.params.id);
-    if (!delivery) return res.status(404).json({ error: 'Webhook not found' });
+    if (!delivery) return next(new AppError('NOT_FOUND', 'Webhook not found', 404));
     return res.status(202).json({
       delivery_id: delivery.id,
       status: delivery.status,
@@ -241,45 +151,19 @@ router.post('/webhooks/:id/test', testLimit, async (req, res) => {
       last_error: delivery.last_error,
     });
   } catch (err) {
-    logger.error('Test webhook error', { error: err.message });
-
-router.post('/webhooks/:id/test', async (req, res) => {
-  try {
-    const delivery = await webhooks.sendTestPing(req.params.id);
-    if (!delivery) {
-      return res.status(404).json({ error: 'Webhook endpoint not found' });
-    }
-    return res.status(202).json({ delivery });
-  } catch (err) {
-    logger.error('Test webhook delivery error', { error: err.message });
-
-    return res.status(500).json({ error: 'Internal server error' });
+    return next(err);
   }
 });
 
-router.get('/webhooks/:id/deliveries', async (req, res) => {
+router.get('/webhooks/:id/deliveries', async (req, res, next) => {
   try {
-
     const webhook = await webhookRepo.findById(req.params.id);
-    if (!webhook) return res.status(404).json({ error: 'Webhook not found' });
+    if (!webhook) return next(new AppError('NOT_FOUND', 'Webhook not found', 404));
     const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100);
     const deliveries = await deliveryRepo.listByWebhook(req.params.id, limit);
     return res.json({ deliveries });
   } catch (err) {
-    logger.error('List deliveries error', { error: err.message });
-
-    const endpoint = await webhooks.getEndpoint(req.params.id);
-    if (!endpoint || !endpoint.active) {
-      return res.status(404).json({ error: 'Webhook endpoint not found' });
-    }
-
-    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100);
-    const deliveries = await webhooks.listDeliveries(req.params.id, limit);
-    return res.json({ deliveries });
-  } catch (err) {
-    logger.error('List webhook deliveries error', { error: err.message });
-
-    return res.status(500).json({ error: 'Internal server error' });
+    return next(err);
   }
 });
 

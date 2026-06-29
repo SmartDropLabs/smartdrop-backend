@@ -1,6 +1,7 @@
 const express = require('express');
 const alertsService = require('../services/alerts');
 const logger = require('../logger');
+const AppError = require('../errors/AppError');
 
 const router = express.Router();
 
@@ -38,22 +39,22 @@ function validateCreateBody(body) {
   return null;
 }
 
-router.post('/alerts', async (req, res) => {
+router.post('/alerts', async (req, res, next) => {
   try {
     const validationError = validateCreateBody(req.body);
     if (validationError) {
-      return res.status(400).json({ error: 'Validation error', message: validationError });
+      return next(new AppError('VALIDATION_ERROR', validationError, 400));
     }
 
     const alert = await alertsService.create(req.body);
     return res.status(201).json(alert);
   } catch (err) {
     logger.error('Create alert error', { error: err.message });
-    return res.status(500).json({ error: 'Internal server error' });
+    return next(err);
   }
 });
 
-router.get('/alerts', async (req, res) => {
+router.get('/alerts', async (req, res, next) => {
   try {
     const pagination = parsePagination(req.query);
     const result = await alertsService.listPaginated(pagination);
@@ -65,20 +66,20 @@ router.get('/alerts', async (req, res) => {
       ));
   } catch (err) {
     logger.error('List alerts error', { error: err.message });
-    return res.status(500).json({ error: 'Internal server error' });
+    return next(err);
   }
 });
 
-router.delete('/alerts/:id', async (req, res) => {
+router.delete('/alerts/:id', async (req, res, next) => {
   try {
     const deleted = await alertsService.remove(req.params.id);
     if (!deleted) {
-      return res.status(404).json({ error: 'Alert not found' });
+      return next(new AppError('NOT_FOUND', 'Alert not found', 404));
     }
     return res.json({ deleted: true, id: req.params.id });
   } catch (err) {
     logger.error('Delete alert error', { error: err.message });
-    return res.status(500).json({ error: 'Internal server error' });
+    return next(err);
   }
 });
 

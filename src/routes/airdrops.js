@@ -4,6 +4,7 @@ const csv = require('csv-parser');
 const { Readable } = require('stream');
 const airdropsService = require('../services/airdrops');
 const logger = require('../logger');
+const AppError = require('../errors/AppError');
 const { StrKey } = require('stellar-sdk');
 
 const router = express.Router();
@@ -89,23 +90,23 @@ async function parseCSV(buffer) {
   });
 }
 
-router.post('/airdrops', async (req, res) => {
+router.post('/airdrops', async (req, res, next) => {
   try {
     const currentLedger = await airdropsService.getCurrentLedger();
     const validationError = validateAirdropCreate(req.body, currentLedger);
     if (validationError) {
-      return res.status(400).json({ error: 'Validation error', message: validationError });
+      return next(new AppError('VALIDATION_ERROR', validationError, 400));
     }
 
     const airdrop = await airdropsService.create(req.body);
     return res.status(201).json(airdrop);
   } catch (err) {
     logger.error('Create airdrop error', { error: err.message });
-    return res.status(500).json({ error: 'Internal server error' });
+    return next(err);
   }
 });
 
-router.get('/airdrops', async (req, res) => {
+router.get('/airdrops', async (req, res, next) => {
   try {
     const page = parseInt(req.query.page, 10) || 1;
     const limit = parseInt(req.query.limit, 10) || 20;
@@ -113,73 +114,73 @@ router.get('/airdrops', async (req, res) => {
     return res.json(result);
   } catch (err) {
     logger.error('List airdrops error', { error: err.message });
-    return res.status(500).json({ error: 'Internal server error' });
+    return next(err);
   }
 });
 
-router.get('/airdrops/:id', async (req, res) => {
+router.get('/airdrops/:id', async (req, res, next) => {
   try {
     const airdrop = await airdropsService.get(req.params.id);
     if (!airdrop) {
-      return res.status(404).json({ error: 'Airdrop not found' });
+      return next(new AppError('NOT_FOUND', 'Airdrop not found', 404));
     }
     return res.json(airdrop);
   } catch (err) {
     logger.error('Get airdrop error', { error: err.message });
-    return res.status(500).json({ error: 'Internal server error' });
+    return next(err);
   }
 });
 
-router.patch('/airdrops/:id', async (req, res) => {
+router.patch('/airdrops/:id', async (req, res, next) => {
   try {
     const currentLedger = await airdropsService.getCurrentLedger();
     const validationError = validateAirdropUpdate(req.body, currentLedger);
     if (validationError) {
-      return res.status(400).json({ error: 'Validation error', message: validationError });
+      return next(new AppError('VALIDATION_ERROR', validationError, 400));
     }
 
     const airdrop = await airdropsService.update(req.params.id, req.body);
     if (!airdrop) {
-      return res.status(404).json({ error: 'Airdrop not found' });
+      return next(new AppError('NOT_FOUND', 'Airdrop not found', 404));
     }
     return res.json(airdrop);
   } catch (err) {
     logger.error('Update airdrop error', { error: err.message });
-    return res.status(500).json({ error: 'Internal server error' });
+    return next(err);
   }
 });
 
-router.delete('/airdrops/:id', async (req, res) => {
+router.delete('/airdrops/:id', async (req, res, next) => {
   try {
     const deleted = await airdropsService.remove(req.params.id);
     if (!deleted) {
-      return res.status(404).json({ error: 'Airdrop not found' });
+      return next(new AppError('NOT_FOUND', 'Airdrop not found', 404));
     }
     return res.json({ deleted: true, id: req.params.id });
   } catch (err) {
     logger.error('Delete airdrop error', { error: err.message });
-    return res.status(500).json({ error: 'Internal server error' });
+    return next(err);
   }
 });
 
-router.post('/airdrops/:id/cancel', async (req, res) => {
+router.post('/airdrops/:id/cancel', async (req, res, next) => {
   try {
     const airdrop = await airdropsService.cancel(req.params.id);
     if (!airdrop) {
-      return res.status(404).json({ error: 'Airdrop not found' });
+      return next(new AppError('NOT_FOUND', 'Airdrop not found', 404));
     }
     return res.json(airdrop);
   } catch (err) {
     logger.error('Cancel airdrop error', { error: err.message });
-    return res.status(500).json({ error: 'Internal server error' });
+    return next(err);
   }
 });
 
-router.post('/airdrops/:id/recipients', upload.single('file'), async (req, res) => {
+router.post('/airdrops/:id/recipients', upload.single('file'), async (req, res, next) => {
   try {
     const airdrop = await airdropsService.get(req.params.id);
     if (!airdrop) {
-      return res.status(404).json({ error: 'Airdrop not found' });
+      return next(new AppError('NOT_FOUND', 'Airdrop not found', 404));
     }
 
     let recipients = [];
@@ -188,11 +189,11 @@ router.post('/airdrops/:id/recipients', upload.single('file'), async (req, res) 
     } else if (req.body.recipients) {
       recipients = Array.isArray(req.body.recipients) ? req.body.recipients : JSON.parse(req.body.recipients);
     } else {
-      return res.status(400).json({ error: 'Validation error', message: 'recipients or file is required' });
+      return next(new AppError('VALIDATION_ERROR', 'recipients or file is required', 400));
     }
 
     if (recipients.length > 10000) {
-      return res.status(400).json({ error: 'Validation error', message: 'recipients cannot exceed 10,000' });
+      return next(new AppError('VALIDATION_ERROR', 'recipients cannot exceed 10,000', 400));
     }
 
     const recipientSet = new Set();
@@ -200,14 +201,14 @@ router.post('/airdrops/:id/recipients', upload.single('file'), async (req, res) 
     for (let i = 0; i < recipients.length; i++) {
       const r = recipients[i];
       if (!r.address || !isValidStellarAddress(r.address)) {
-        return res.status(400).json({ error: 'Validation error', message: `recipient ${i}: invalid Stellar address` });
+        return next(new AppError('VALIDATION_ERROR', `recipient ${i}: invalid Stellar address`, 400));
       }
       if (recipientSet.has(r.address)) {
-        return res.status(400).json({ error: 'Validation error', message: `recipient ${i}: duplicate address ${r.address}` });
+        return next(new AppError('VALIDATION_ERROR', `recipient ${i}: duplicate address ${r.address}`, 400));
       }
       recipientSet.add(r.address);
       if (typeof r.amount !== 'number' || r.amount <= 0) {
-        return res.status(400).json({ error: 'Validation error', message: `recipient ${i}: amount must be a positive number` });
+        return next(new AppError('VALIDATION_ERROR', `recipient ${i}: amount must be a positive number`, 400));
       }
       sum += r.amount;
     }
@@ -216,15 +217,15 @@ router.post('/airdrops/:id/recipients', upload.single('file'), async (req, res) 
     return res.status(201).json({ added: recipients.length });
   } catch (err) {
     logger.error('Add recipients error', { error: err.message });
-    return res.status(500).json({ error: 'Internal server error' });
+    return next(err);
   }
 });
 
-router.get('/airdrops/:id/recipients', async (req, res) => {
+router.get('/airdrops/:id/recipients', async (req, res, next) => {
   try {
     const airdrop = await airdropsService.get(req.params.id);
     if (!airdrop) {
-      return res.status(404).json({ error: 'Airdrop not found' });
+      return next(new AppError('NOT_FOUND', 'Airdrop not found', 404));
     }
 
     const page = parseInt(req.query.page, 10) || 1;
@@ -233,7 +234,7 @@ router.get('/airdrops/:id/recipients', async (req, res) => {
     return res.json(result);
   } catch (err) {
     logger.error('List recipients error', { error: err.message });
-    return res.status(500).json({ error: 'Internal server error' });
+    return next(err);
   }
 });
 

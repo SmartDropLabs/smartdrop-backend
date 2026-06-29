@@ -2,6 +2,7 @@
 
 const cache = require('../services/cache');
 const logger = require('../logger');
+const AppError = require('../errors/AppError');
 
 /**
  * Fixed-window rate limiter backed by Redis INCR + EXPIRE.
@@ -34,10 +35,7 @@ function buildRateLimit({ windowSeconds, max, keyPrefix }) {
       res.setHeader('X-RateLimit-Remaining', String(remaining));
       res.setHeader('X-RateLimit-Reset', String((bucket + 1) * windowSeconds));
       if (count > max) {
-        return res.status(429).json({
-          error: 'Too many requests',
-          message: `Rate limit of ${max} requests per ${windowSeconds}s exceeded`,
-        });
+        return next(new AppError('RATE_LIMITED', `Rate limit of ${max} requests per ${windowSeconds}s exceeded`, 429, { limit: max, window_seconds: windowSeconds }));
       }
       return next();
     } catch (err) {

@@ -1,7 +1,6 @@
 const apiKeys = require('../services/apiKeys');
 const logger = require('../logger');
-
-const UNAUTHORIZED = { error: 'Missing or invalid API key' };
+const AppError = require('../errors/AppError');
 
 function extractBearerToken(header) {
   if (!header || typeof header !== 'string') return null;
@@ -21,21 +20,21 @@ function requireApiKey(options = {}) {
   return async (req, res, next) => {
     const token = extractBearerToken(req.get('authorization'));
     if (!token) {
-      return res.status(401).json(UNAUTHORIZED);
+      return next(new AppError('UNAUTHORIZED', 'Missing or invalid API key', 401));
     }
 
     try {
       const apiKey = await apiKeys.validateApiKey(token);
       if (!apiKey || !hasScopes(apiKey, requiredScopes)) {
         logger.warn('Rejected API key authentication', { key_prefix: token.slice(0, 8) });
-        return res.status(401).json(UNAUTHORIZED);
+        return next(new AppError('UNAUTHORIZED', 'Missing or invalid API key', 401));
       }
 
       req.apiKey = apiKey;
       return next();
     } catch (err) {
       logger.error('API key authentication failed', { error: err.message });
-      return res.status(401).json(UNAUTHORIZED);
+      return next(new AppError('UNAUTHORIZED', 'Missing or invalid API key', 401));
     }
   };
 }

@@ -55,6 +55,31 @@ Registers subscriber endpoints for SmartDrop lifecycle events and delivers signe
 
 You can spin up the entire local development stack—including the API, PostgreSQL database, and Redis instance—using a single command.
 
+### Quick Start With Docker
+
+Run the local API, Redis, and Postgres stack with Docker Compose:
+
+```bash
+docker compose up --build
+```
+
+The API listens on port `4000` in the compose environment:
+
+```bash
+curl http://localhost:4000/health
+```
+
+The compose stack mounts `./src` into the API container and runs
+`npm run dev`, so source changes restart the Node process automatically. Redis
+and Postgres include health checks, and `docker-compose.override.yml` is ignored
+for local-only secrets or service tweaks.
+
+To remove containers and the local Postgres volume:
+
+```bash
+docker compose down -v
+```
+
 ### Prerequisites
 * Ensure you have [Docker and Docker Compose](https://docs.docker.com/get-docker/) installed.
 

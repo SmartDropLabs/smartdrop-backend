@@ -205,6 +205,8 @@ async function refreshAllCachedPrices() {
     return;
   }
 
+  const freshPrices = {};
+
   const refreshPromises = keys
     .filter((key) => !key.includes(':history:'))
     .map(async (key) => {
@@ -212,9 +214,13 @@ async function refreshAllCachedPrices() {
       const parts = suffix.split(':');
       const assetCode = parts[0];
       const issuer = parts.length > 1 ? parts[1] : null;
+      const assetKey = issuer ? `${assetCode}:${issuer}` : assetCode;
 
       try {
-        await fetchFreshPrice(assetCode, issuer);
+        const result = await fetchFreshPrice(assetCode, issuer);
+        if (result && result.price_usd !== null) {
+          freshPrices[assetKey] = { price: result.price_usd, source: result.source };
+        }
         logger.debug('Refreshed price', { assetCode, issuer });
       } catch (err) {
         logger.warn('Price refresh failed', { assetCode, issuer, error: err.message });
@@ -223,6 +229,7 @@ async function refreshAllCachedPrices() {
 
   await Promise.allSettled(refreshPromises);
   logger.info('Price refresh cycle completed', { keysRefreshed: keys.length });
+  return freshPrices;
 }
 
 module.exports = {

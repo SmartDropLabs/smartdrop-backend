@@ -126,7 +126,7 @@ async function getPrice(assetCode, issuer = null) {
 
 async function fetchFreshPrice(assetCode, issuer = null, redisUnavailable = false) {
   const sourceResults = await fetchFromAllSources(assetCode, issuer);
-  const sourcesAttempted = sourceResults.map((r) => r.name);
+  const sourcesAttempted = sourceResults.map((r) => r.source);
   const prices = sourceResults.map((r) => r.price);
 
   const aggregatedPrice = median(prices);
@@ -236,4 +236,8 @@ module.exports = {
   getPrice,
   fetchFreshPrice,
   refreshAllCachedPrices,
+  // Internal helpers exported for unit testing.
+  median,
+  detectAnomaly,
+  fetchFromAllSources,
 };

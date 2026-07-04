@@ -1,6 +1,7 @@
 const { Server } = require('stellar-sdk');
 const config = require('../../config');
 const logger = require('../../logger');
+const { fetchWithRetry } = require('../../utils/fetchWithRetry');
 
 let server = null;
 
@@ -12,6 +13,14 @@ function getServer() {
 }
 
 const XLM_ASSET = { native: true };
+
+function fetchOrderBook(horizon, base, counter, label) {
+  return fetchWithRetry(
+    () => horizon.orderbook(base, counter).limit(1).call(),
+    { label },
+    config.price?.sourceRetryCount
+  );
+}
 
 async function fetchPrice(assetCode, issuer) {
   try {
@@ -28,7 +37,12 @@ async function fetchPrice(assetCode, issuer) {
       counter = XLM_ASSET;
     }
 
-    const orderBook = await horizon.orderbook(base, counter === XLM_ASSET ? undefined : counter).limit(1).call();
+    const orderBook = await fetchOrderBook(
+      horizon,
+      base,
+      counter === XLM_ASSET ? undefined : counter,
+      'stellar_dex orderbook'
+    );
 
     if (!orderBook.bids || orderBook.bids.length === 0) {
       return null;
@@ -53,10 +67,12 @@ async function fetchPrice(assetCode, issuer) {
 async function getXlmUsdPrice(horizon) {
   try {
     const usdcIssuer = config.stellar.usdcIssuer;
-    const orderBook = await horizon
-      .orderbook(XLM_ASSET, { code: 'USDC', issuer: usdcIssuer })
-      .limit(1)
-      .call();
+    const orderBook = await fetchOrderBook(
+      horizon,
+      XLM_ASSET,
+      { code: 'USDC', issuer: usdcIssuer },
+      'stellar_dex xlm_usdc'
+    );
 
     if (!orderBook.bids || orderBook.bids.length === 0) {
       return null;

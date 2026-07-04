@@ -1,6 +1,7 @@
 const axios = require('axios');
 const config = require('../../config');
 const logger = require('../../logger');
+const { fetchWithRetry } = require('../../utils/fetchWithRetry');
 
 const STELLAR_COINGECKO_MAP = {
   XLM: 'stellar',
@@ -32,12 +33,14 @@ async function fetchPrice(assetCode) {
 
   try {
     const client = getClient();
-    const response = await client.get('/simple/price', {
+    const response = await fetchWithRetry('/simple/price', {
+      client,
+      label: 'coingecko',
       params: {
         ids: coinId,
         vs_currencies: 'usd',
       },
-    });
+    }, config.price?.sourceRetryCount);
 
     const price = response.data[coinId]?.usd;
     if (price === undefined || price === null) {

@@ -28,6 +28,9 @@ jest.mock('../src/config', () => ({
       [`USDC:${mockUsdcIssuer}`]: { id: 3408 },
     },
   },
+  price: {
+    sourceRetryCount: 0,
+  },
 }));
 
 jest.mock('../src/logger', () => mockLogger);
@@ -73,6 +76,7 @@ describe('CoinMarketCap source', () => {
       timeout: 10000,
     });
     expect(mockGet).toHaveBeenCalledWith('/cryptocurrency/quotes/latest', {
+      timeout: 10000,
       params: {
         symbol: 'XLM',
         convert: 'USD',
@@ -101,6 +105,7 @@ describe('CoinMarketCap source', () => {
 
     expect(price).toBe(1.0003);
     expect(mockGet).toHaveBeenCalledWith('/cryptocurrency/quotes/latest', {
+      timeout: 10000,
       params: {
         id: 3408,
         convert: 'USD',

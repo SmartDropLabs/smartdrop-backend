@@ -69,6 +69,7 @@ describe('configuration validation', () => {
         refreshInterval: 30,
         staleThresholdMinutes: 5,
         anomalyThresholdPercent: 20,
+        sourceRetryCount: 3,
       },
     });
   });

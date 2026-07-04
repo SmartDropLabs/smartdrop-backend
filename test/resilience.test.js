@@ -37,6 +37,8 @@ beforeEach(() => {
   mockStellarFetch.mockReset();
   mockCoingeckoFetch.mockReset();
   mockCmcFetch.mockReset();
+  priceOracle.resetCircuitBreakers();
+  logger.info.mockClear();
   logger.warn.mockClear();
   logger.error.mockClear();
 
@@ -153,6 +155,35 @@ describe('all sources unavailable during Redis outage', () => {
     expect(result.price_usd).toBeNull();
     expect(result.redis_unavailable).toBe(true);
     expect(result.is_stale).toBe(true);
+  });
+});
+
+describe('price source circuit breakers', () => {
+  test('opens after repeated source failures and skips the failing source', async () => {
+    mockCacheGet.mockResolvedValue(null);
+    mockCacheSet.mockResolvedValue(undefined);
+    mockStellarFetch.mockResolvedValue(null);
+    mockCoingeckoFetch.mockResolvedValue(null);
+    mockCmcFetch.mockResolvedValue(null);
+
+    await priceOracle.fetchFreshPrice('XLM');
+    await priceOracle.fetchFreshPrice('XLM');
+    await priceOracle.fetchFreshPrice('XLM');
+
+    expect(priceOracle.getCircuitStates()).toMatchObject({
+      stellar_dex: 'open',
+      coingecko: 'open',
+      coinmarketcap: 'open',
+    });
+
+    mockStellarFetch.mockClear();
+    await priceOracle.fetchFreshPrice('XLM');
+
+    expect(mockStellarFetch).not.toHaveBeenCalled();
+    expect(logger.info).toHaveBeenCalledWith(
+      'Circuit breaker open, skipping source call',
+      expect.objectContaining({ source: 'stellar_dex', state: 'open' })
+    );
   });
 });
 

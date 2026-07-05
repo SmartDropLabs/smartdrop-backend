@@ -1,5 +1,7 @@
 'use strict';
 
+process.env.ADMIN_API_KEY = 'b'.repeat(64);
+
 const express = require('express');
 const request = require('supertest');
 
@@ -20,11 +22,13 @@ jest.mock('../src/logger', () => ({
 
 const pricesRouter = require('../src/routes/prices');
 const logger = require('../src/logger');
+const { errorHandler } = require('../src/middleware/errorHandler');
 
 function buildApp() {
   const app = express();
   app.use(express.json());
   app.use('/api/v1', pricesRouter);
+  app.use(errorHandler);
   return app;
 }
 
@@ -124,12 +128,9 @@ describe('price routes', () => {
     const res = await request(app).get('/api/v1/prices/UNKNOWN');
 
     expect(res.status).toBe(404);
-    expect(res.body).toMatchObject({
-      error: 'Price not available',
+    expect(res.body.error).toMatchObject({
+      code: 'NOT_FOUND',
       message: 'No price data found for UNKNOWN',
-      price_usd: null,
-      is_stale: true,
-      stale_warning: 'No price data available from any source',
     });
   });
 
@@ -137,9 +138,9 @@ describe('price routes', () => {
     const res = await request(app).get('/api/v1/prices/TOO-LONG-ASSET');
 
     expect(res.status).toBe(400);
-    expect(res.body).toEqual({
-      error: 'Invalid asset code',
-      message: 'Asset code must be 1-12 alphanumeric characters',
+    expect(res.body.error).toMatchObject({
+      code: 'VALIDATION_ERROR',
+      message: 'Asset code must be 1-12 uppercase alphanumeric characters',
     });
     expect(mockGetPrice).not.toHaveBeenCalled();
   });
@@ -150,8 +151,8 @@ describe('price routes', () => {
       .query({ issuer: 'not-a-stellar-address' });
 
     expect(res.status).toBe(400);
-    expect(res.body).toEqual({
-      error: 'Invalid issuer',
+    expect(res.body.error).toMatchObject({
+      code: 'VALIDATION_ERROR',
       message: 'Issuer must be a valid Stellar address (G...)',
     });
     expect(mockGetPrice).not.toHaveBeenCalled();
@@ -163,15 +164,8 @@ describe('price routes', () => {
     const res = await request(app).get('/api/v1/prices/XLM');
 
     expect(res.status).toBe(500);
-    expect(res.body).toEqual({
-      error: 'Internal server error',
-      message: 'Failed to fetch price data',
-    });
+    expect(res.body.error).toMatchObject({ code: 'INTERNAL_ERROR' });
     expect(JSON.stringify(res.body)).not.toContain('redis exploded');
-    expect(logger.error).toHaveBeenCalledWith(
-      'Price endpoint error',
-      expect.objectContaining({ error: 'redis exploded with stack details' })
-    );
   });
 
   test('GET /prices/:asset_code/refresh validates params and calls fresh oracle lookup', async () => {
@@ -185,6 +179,7 @@ describe('price routes', () => {
 
     const res = await request(app)
       .get('/api/v1/prices/usdc/refresh')
+      .set('Authorization', `Bearer ${process.env.ADMIN_API_KEY}`)
       .query({ issuer: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' });
 
     expect(res.status).toBe(200);

@@ -1,7 +1,13 @@
 'use strict';
 
-
+const http = require('http');
 const signature = require('../src/services/webhookSignature');
+const {
+  buildSignatureHeaders,
+  sendSignedRequest,
+  signPayload,
+  verifySignature,
+} = require('../src/services/webhook');
 
 describe('webhook signature', () => {
   const secret = 'whsec_test_supersecret_value';
@@ -49,14 +55,8 @@ describe('webhook signature', () => {
     const sigFromObj = signature.sign(secret, obj);
     const sigFromStr = signature.sign(secret, JSON.stringify(obj));
     expect(sigFromObj).toBe(sigFromStr);
-
-const http = require('http');
-const {
-  buildSignatureHeaders,
-  sendSignedRequest,
-  signPayload,
-  verifySignature,
-} = require('../src/services/webhook');
+  });
+});
 
 describe('webhook signatures', () => {
   test('signs and verifies payloads with timestamped HMAC-SHA256', () => {

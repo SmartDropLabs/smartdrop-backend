@@ -22,9 +22,7 @@ describe('requestId middleware', () => {
 
     expect(res.status).toBe(200);
     expect(res.headers['x-request-id']).toBeDefined();
-    expect(res.headers['x-request-id']).toMatch(
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-    );
+    expect(res.headers['x-request-id']).toMatch(/^req_[0-9a-zA-Z_-]+$/);
   });
 
   test('attaches the same ID to req.id and the response header', async () => {
@@ -58,7 +56,13 @@ describe('logger requestId correlation', () => {
     jest.resetModules();
     process.env.LOG_FORMAT = 'json';
     process.env.LOG_LEVEL = 'info';
-    writeSpy = jest.spyOn(process.stdout, 'write').mockImplementation((chunk, _encoding, cb) => {
+    // Winston's Console transport prefers `console._stdout` over
+    // `process.stdout` directly (see winston/lib/winston/transports/console.js).
+    // Depending on test run order, Jest's per-file console can end up wrapping
+    // a different stream object than `process.stdout`, so spy on whichever one
+    // Winston will actually call.
+    const target = console._stdout || process.stdout;
+    writeSpy = jest.spyOn(target, 'write').mockImplementation((chunk, _encoding, cb) => {
       if (typeof cb === 'function') cb();
       return true;
     });

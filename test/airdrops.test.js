@@ -131,7 +131,7 @@ describe('POST /api/v1/airdrops', () => {
         expiry_ledger: 123456,
       });
     expect(response.status).toBe(400);
-    expect(response.body.error).toBe('Validation error');
+    expect(response.body.error.code).toBe('VALIDATION_ERROR');
   });
 
   test('returns validation error when sum of recipients does not equal total_amount', async () => {
@@ -146,7 +146,7 @@ describe('POST /api/v1/airdrops', () => {
         recipients: [{ address: validAddress1, amount: 50 }],
       });
     expect(response.status).toBe(400);
-    expect(response.body.message).toContain('sum of recipient amounts');
+    expect(response.body.error.message).toContain('sum of recipient amounts');
   });
 });
 

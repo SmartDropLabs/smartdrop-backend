@@ -9,6 +9,40 @@ const stellarAddress = makeValidator((input) => {
   return input;
 });
 
+function parseWatchedAssets(input) {
+  if (!input || !input.trim()) return [];
+
+  const seen = new Set();
+  return input
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const [code, issuer, extra] = entry.split(':');
+
+      if (extra !== undefined) {
+        throw new Error(`invalid asset "${entry}"; expected CODE or CODE:ISSUER`);
+      }
+
+      if (!/^[A-Z0-9]{1,12}$/.test(code)) {
+        throw new Error(`invalid asset code "${code}"; expected 1-12 uppercase alphanumeric characters`);
+      }
+
+      if (issuer !== undefined && !/^G[A-Z0-9]{55}$/.test(issuer)) {
+        throw new Error(`invalid issuer for "${code}"; expected a Stellar public key`);
+      }
+
+      const asset = { code, issuer: issuer || null };
+      const key = asset.issuer ? `${asset.code}:${asset.issuer}` : asset.code;
+      if (seen.has(key)) return null;
+      seen.add(key);
+      return asset;
+    })
+    .filter(Boolean);
+}
+
+const watchedAssets = makeValidator(parseWatchedAssets);
+
 const databaseDevDefault =
   process.env.NODE_ENV === 'test'
     ? 'postgres://localhost/smartdrop_test'
@@ -43,6 +77,7 @@ const env = cleanEnv(rawEnv, {
   AIRDROP_EXPIRY_CHECK_INTERVAL_SECONDS: num({ default: 60 }),
   AIRDROP_LEDGER_CACHE_TTL_MS: num({ default: 5000 }),
   AIRDROP_EXPIRY_SCAN_BATCH_SIZE: num({ default: 100 }),
+  WATCHED_ASSETS: watchedAssets({ default: '' }),
   LOG_LEVEL: str({
     default: 'info',
     choices: ['debug', 'info', 'warn', 'error'],
@@ -50,6 +85,9 @@ const env = cleanEnv(rawEnv, {
 });
 
 const usdcIssuer = env.USDC_ISSUER;
+const parsedWatchedAssets = Array.isArray(env.WATCHED_ASSETS)
+  ? env.WATCHED_ASSETS
+  : parseWatchedAssets(env.WATCHED_ASSETS);
 
 module.exports = {
   nodeEnv: env.NODE_ENV,
@@ -102,6 +140,7 @@ module.exports = {
     // into memory at once.
     expiryScanBatchSize: env.AIRDROP_EXPIRY_SCAN_BATCH_SIZE,
   },
+  watchedAssets: parsedWatchedAssets,
   auth: {
     adminApiKey: env.ADMIN_API_KEY,
   },

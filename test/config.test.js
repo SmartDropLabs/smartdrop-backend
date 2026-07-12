@@ -69,6 +69,11 @@ describe('configuration validation', () => {
         refreshInterval: 30,
         staleThresholdMinutes: 5,
         anomalyThresholdPercent: 20,
+        circuitBreaker: {
+          failureThreshold: 3,
+          successThreshold: 1,
+          timeoutMs: 30000,
+        },
       },
     });
   });

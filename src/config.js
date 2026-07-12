@@ -38,6 +38,9 @@ const env = cleanEnv(rawEnv, {
   PRICE_REFRESH_INTERVAL_SECONDS: num({ default: 30 }),
   PRICE_STALE_THRESHOLD_MINUTES: num({ default: 5 }),
   PRICE_ANOMALY_THRESHOLD_PCT: num({ default: 20 }),
+  CIRCUIT_BREAKER_FAILURE_THRESHOLD: num({ default: 3 }),
+  CIRCUIT_BREAKER_SUCCESS_THRESHOLD: num({ default: 1 }),
+  CIRCUIT_BREAKER_TIMEOUT_MS: num({ default: 30000 }),
   LOG_LEVEL: str({
     default: 'info',
     choices: ['debug', 'info', 'warn', 'error'],
@@ -74,6 +77,11 @@ module.exports = {
     refreshInterval: env.PRICE_REFRESH_INTERVAL_SECONDS,
     staleThresholdMinutes: env.PRICE_STALE_THRESHOLD_MINUTES,
     anomalyThresholdPercent: env.PRICE_ANOMALY_THRESHOLD_PCT,
+    circuitBreaker: {
+      failureThreshold: env.CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+      successThreshold: env.CIRCUIT_BREAKER_SUCCESS_THRESHOLD,
+      timeoutMs: env.CIRCUIT_BREAKER_TIMEOUT_MS,
+    },
   },
   auth: {
     adminApiKey: env.ADMIN_API_KEY,

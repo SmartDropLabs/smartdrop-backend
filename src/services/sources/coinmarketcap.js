@@ -1,6 +1,7 @@
 const axios = require('axios');
 const config = require('../../config');
 const logger = require('../../logger');
+const { fetchWithRetry } = require('../../utils/fetchWithRetry');
 
 let apiClient = null;
 
@@ -58,12 +59,14 @@ async function fetchPrice(assetCode, issuer = null) {
   try {
     const client = getClient();
     const lookupKey = market.id ? String(market.id) : market.symbol;
-    const response = await client.get('/cryptocurrency/quotes/latest', {
+    const response = await fetchWithRetry('/cryptocurrency/quotes/latest', {
+      client,
+      label: 'coinmarketcap',
       params: {
         ...(market.id ? { id: market.id } : { symbol: market.symbol }),
         convert: 'USD',
       },
-    });
+    }, config.price?.sourceRetryCount);
 
     const data = response.data?.data?.[lookupKey];
     if (!data || !data.quote?.USD?.price) {

@@ -133,6 +133,7 @@ The application reads configurations from the `.env` file at the root.
 | `PRICE_REFRESH_INTERVAL_SECONDS` | Refresh interval in seconds | 30 | No |
 | `PRICE_STALE_THRESHOLD_MINUTES` | Stale threshold in minutes | 5 | No |
 | `PRICE_ANOMALY_THRESHOLD_PCT` | Anomaly detection threshold % | 20 | No |
+| `PRICE_SOURCE_RETRY_COUNT` | Number of retries for transient price-source HTTP failures | 3 | No |
 | `ADMIN_API_KEY` | Bootstrap admin bearer token for API key management | empty | Yes, for protected endpoints |
 | `LOG_LEVEL` | Logging level: `debug`, `info`, `warn`, or `error` | info | No |
 

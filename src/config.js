@@ -82,6 +82,14 @@ module.exports = {
     .split(',')
     .map((o) => o.trim())
     .filter(Boolean),
+  rateLimit: {
+    windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS, 10) || 60000,
+    max: parseInt(process.env.RATE_LIMIT_MAX, 10) || 100,
+  },
+  priceRateLimit: {
+    windowSeconds: parseInt(process.env.PRICE_RATELIMIT_WINDOW, 10) || 60,
+    max: parseInt(process.env.PRICE_RATELIMIT_MAX, 10) || 30,
+  },
   webhooks: {
     maxAttempts: parseInt(process.env.WEBHOOK_MAX_ATTEMPTS, 10) || 3,
     retryBaseMs: parseInt(process.env.WEBHOOK_RETRY_BASE_MS, 10) || 30000,

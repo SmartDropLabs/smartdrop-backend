@@ -95,6 +95,10 @@ describe('structured error responses', () => {
     const res = await request(app).get('/limited');
     expect(res.status).toBe(429);
     expect(res.body.error.code).toBe('RATE_LIMITED');
-    expect(res.body.error.details).toEqual({ limit: 1, window_seconds: 60 });
+    expect(res.body.error.details).toEqual({
+      limit: 1,
+      window_seconds: 60,
+      retry_after_seconds: expect.any(Number),
+    });
   });
 });

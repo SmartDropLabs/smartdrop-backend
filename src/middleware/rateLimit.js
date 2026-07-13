@@ -31,11 +31,19 @@ function buildRateLimit({ windowSeconds, max, keyPrefix }) {
         await redis.expire(key, windowSeconds);
       }
       const remaining = Math.max(0, max - count);
+      const resetAt = (bucket + 1) * windowSeconds;
+      const retryAfterSeconds = Math.max(1, resetAt - Math.floor(Date.now() / 1000));
       res.setHeader('X-RateLimit-Limit', String(max));
       res.setHeader('X-RateLimit-Remaining', String(remaining));
-      res.setHeader('X-RateLimit-Reset', String((bucket + 1) * windowSeconds));
+      res.setHeader('X-RateLimit-Reset', String(resetAt));
       if (count > max) {
-        return next(new AppError('RATE_LIMITED', `Rate limit of ${max} requests per ${windowSeconds}s exceeded`, 429, { limit: max, window_seconds: windowSeconds }));
+        res.setHeader('Retry-After', String(retryAfterSeconds));
+        return next(new AppError(
+          'RATE_LIMITED',
+          `Rate limit of ${max} requests per ${windowSeconds}s exceeded`,
+          429,
+          { limit: max, window_seconds: windowSeconds, retry_after_seconds: retryAfterSeconds },
+        ));
       }
       return next();
     } catch (err) {

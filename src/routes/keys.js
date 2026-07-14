@@ -1,23 +1,15 @@
 const express = require('express');
 const { requireApiKey } = require('../middleware/auth');
+const { validate } = require('../middleware/validate');
 const apiKeys = require('../services/apiKeys');
 const logger = require('../logger');
 const AppError = require('../errors/AppError');
+const { keyCreateBodySchema, routeIdParamsSchema } = require('../validation/schemas');
 
 const router = express.Router();
+const validateRouteIdParams = validate(routeIdParamsSchema, 'params');
 
 router.use('/keys', requireApiKey({ scopes: ['admin'] }));
-
-function validateScopes(scopes) {
-  if (scopes === undefined) return null;
-  if (!Array.isArray(scopes) || scopes.length === 0) {
-    return 'scopes must be a non-empty array of strings';
-  }
-  if (scopes.some((scope) => typeof scope !== 'string' || !scope.trim())) {
-    return 'scopes must be a non-empty array of strings';
-  }
-  return null;
-}
 
 router.get('/keys', async (_req, res, next) => {
   try {
@@ -29,22 +21,13 @@ router.get('/keys', async (_req, res, next) => {
   }
 });
 
-router.post('/keys', async (req, res, next) => {
+router.post('/keys', validate(keyCreateBodySchema), async (req, res, next) => {
   try {
-    const { label, scopes } = req.body || {};
-    const normalizedLabel = typeof label === 'string' ? label.trim() : '';
-    if (!normalizedLabel || normalizedLabel.length > 80) {
-      return next(new AppError('VALIDATION_ERROR', 'label must be a non-empty string up to 80 characters', 400));
-    }
-
-    const scopeError = validateScopes(scopes);
-    if (scopeError) {
-      return next(new AppError('VALIDATION_ERROR', scopeError, 400));
-    }
+    const { label, scopes } = req.validated.body;
 
     const created = await apiKeys.createKey({
-      label: normalizedLabel,
-      scopes: scopes ? scopes.map((scope) => scope.trim()) : ['default'],
+      label,
+      scopes: scopes || ['default'],
     });
     return res.status(201).json(created);
   } catch (err) {
@@ -53,7 +36,7 @@ router.post('/keys', async (req, res, next) => {
   }
 });
 
-router.delete('/keys/:id', async (req, res, next) => {
+router.delete('/keys/:id', validateRouteIdParams, async (req, res, next) => {
   try {
     const deleted = await apiKeys.revokeKey(req.params.id);
     if (!deleted) {

@@ -1,45 +1,19 @@
 const express = require('express');
 const { requireApiKey } = require('../middleware/auth');
+const { validate } = require('../middleware/validate');
 const priceOracle = require('../services/priceOracle');
 const AppError = require('../errors/AppError');
+const { priceParamsSchema, priceQuerySchema } = require('../validation/schemas');
 
 const router = express.Router();
 
-function validateAssetCode(assetCode) {
-  if (!assetCode || typeof assetCode !== 'string') return false;
-  if (assetCode.length < 1 || assetCode.length > 12) return false;
-  return /^[A-Z0-9]+$/.test(assetCode);
-}
+const validatePriceParams = validate(priceParamsSchema, 'params');
+const validatePriceQuery = validate(priceQuerySchema, 'query');
 
-function validateIssuer(issuer) {
-  if (!issuer) return true;
-  return /^G[A-Z0-9]{55}$/.test(issuer);
-}
-
-function validatePriceRequest(assetCode, issuer) {
-  if (!validateAssetCode(assetCode)) {
-    throw new AppError('VALIDATION_ERROR', 'Asset code must be 1-12 uppercase alphanumeric characters', 400, {
-      field: 'assetCode',
-      received: assetCode,
-      constraint: 'regex',
-    });
-  }
-
-  if (!validateIssuer(issuer)) {
-    throw new AppError('VALIDATION_ERROR', 'Issuer must be a valid Stellar address (G...)', 400, {
-      field: 'issuer',
-      received: issuer,
-      constraint: 'stellar_public_key',
-    });
-  }
-}
-
-router.get('/prices/:asset_code', async (req, res, next) => {
+router.get('/prices/:asset_code', validatePriceParams, validatePriceQuery, async (req, res, next) => {
   try {
-    const { asset_code } = req.params;
+    const { asset_code: normalizedCode } = req.validated.params;
     const { issuer } = req.query;
-    const normalizedCode = asset_code.toUpperCase();
-    validatePriceRequest(normalizedCode, issuer);
 
     const priceData = await priceOracle.getPrice(normalizedCode, issuer || null);
 
@@ -53,12 +27,10 @@ router.get('/prices/:asset_code', async (req, res, next) => {
   }
 });
 
-router.get('/prices/:asset_code/refresh', requireApiKey(), async (req, res, next) => {
+router.get('/prices/:asset_code/refresh', requireApiKey(), validatePriceParams, validatePriceQuery, async (req, res, next) => {
   try {
-    const { asset_code } = req.params;
+    const { asset_code: normalizedCode } = req.validated.params;
     const { issuer } = req.query;
-    const normalizedCode = asset_code.toUpperCase();
-    validatePriceRequest(normalizedCode, issuer);
 
     const priceData = await priceOracle.fetchFreshPrice(normalizedCode, issuer || null);
     if (priceData.price_usd === null) {

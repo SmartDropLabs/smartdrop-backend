@@ -146,7 +146,13 @@ describe('POST /api/v1/airdrops', () => {
         recipients: [{ address: validAddress1, amount: 50 }],
       });
     expect(response.status).toBe(400);
-    expect(response.body.error.message).toContain('sum of recipient amounts');
+    expect(response.body.error).toMatchObject({
+      code: 'VALIDATION_ERROR',
+      message: 'Validation failed',
+    });
+    expect(response.body.error.details.fields.recipients).toEqual(
+      expect.arrayContaining([expect.stringContaining('sum of recipient amounts')])
+    );
   });
 });
 

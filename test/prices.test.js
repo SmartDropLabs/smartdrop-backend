@@ -140,8 +140,11 @@ describe('price routes', () => {
     expect(res.status).toBe(400);
     expect(res.body.error).toMatchObject({
       code: 'VALIDATION_ERROR',
-      message: 'Asset code must be 1-12 uppercase alphanumeric characters',
+      message: 'Validation failed',
     });
+    expect(res.body.error.details.fields.asset_code).toEqual(
+      expect.arrayContaining(['Asset code must be alphanumeric'])
+    );
     expect(mockGetPrice).not.toHaveBeenCalled();
   });
 
@@ -153,8 +156,11 @@ describe('price routes', () => {
     expect(res.status).toBe(400);
     expect(res.body.error).toMatchObject({
       code: 'VALIDATION_ERROR',
-      message: 'Issuer must be a valid Stellar address (G...)',
+      message: 'Validation failed',
     });
+    expect(res.body.error.details.fields.issuer).toEqual(
+      expect.arrayContaining(['Must be a valid Stellar public key'])
+    );
     expect(mockGetPrice).not.toHaveBeenCalled();
   });
 

@@ -2,15 +2,22 @@
 
 const express = require('express');
 const config = require('../config');
+const { validate } = require('../middleware/validate');
 const webhookRepo = require('../repositories/webhookRepository');
 const deliveryRepo = require('../repositories/deliveryRepository');
 const dispatcher = require('../services/webhookDispatcher');
 const signatureService = require('../services/webhookSignature');
-const events = require('../services/webhookEvents');
 const buildRateLimit = require('../middleware/rateLimit');
 const AppError = require('../errors/AppError');
+const {
+  routeIdParamsSchema,
+  webhookCreateBodySchema,
+  webhookDeliveriesQuerySchema,
+  webhookPatchBodySchema,
+} = require('../validation/schemas');
 
 const router = express.Router();
+const validateRouteIdParams = validate(routeIdParamsSchema, 'params');
 
 const manageLimit = buildRateLimit({
   windowSeconds: config.webhooks.rateLimit.windowSeconds,
@@ -26,25 +33,6 @@ const testLimit = buildRateLimit({
 
 router.use('/webhooks', manageLimit);
 
-function isValidUrl(str) {
-  try {
-    const u = new URL(str);
-    return u.protocol === 'http:' || u.protocol === 'https:';
-  } catch {
-    return false;
-  }
-}
-
-function validateCreate(body) {
-  if (!body || typeof body !== 'object') return 'body must be an object';
-  const { url, events: subscribedEvents, secret, description } = body;
-  if (!url || !isValidUrl(url)) return 'url must be a valid http(s) URL';
-  if (!events.isValidSubscription(subscribedEvents)) return `events must be a non-empty array of: ${events.ALL_EVENTS.join(', ')} or "*"`;
-  if (secret !== undefined && (typeof secret !== 'string' || secret.length < 16)) return 'secret must be a string of at least 16 characters';
-  if (description !== undefined && typeof description !== 'string') return 'description must be a string';
-  return null;
-}
-
 function publicView(webhook) {
   if (!webhook) return null;
   return {
@@ -59,17 +47,15 @@ function publicView(webhook) {
   };
 }
 
-router.post('/webhooks', async (req, res, next) => {
+router.post('/webhooks', validate(webhookCreateBodySchema), async (req, res, next) => {
   try {
-    const validationError = validateCreate(req.body);
-    if (validationError) return next(new AppError('VALIDATION_ERROR', validationError, 400));
-
-    const secret = req.body.secret || signatureService.generateSecret();
+    const body = req.validated.body;
+    const secret = body.secret || signatureService.generateSecret();
     const webhook = await webhookRepo.create({
-      url: req.body.url,
-      events: req.body.events,
+      url: body.url,
+      events: body.events,
       secret,
-      description: req.body.description,
+      description: body.description,
     });
 
     return res.status(201).json({
@@ -91,7 +77,7 @@ router.get('/webhooks', async (_req, res, next) => {
   }
 });
 
-router.get('/webhooks/:id', async (req, res, next) => {
+router.get('/webhooks/:id', validateRouteIdParams, async (req, res, next) => {
   try {
     const webhook = await webhookRepo.findById(req.params.id);
     if (!webhook) return next(new AppError('NOT_FOUND', 'Webhook not found', 404));
@@ -101,26 +87,9 @@ router.get('/webhooks/:id', async (req, res, next) => {
   }
 });
 
-router.patch('/webhooks/:id', async (req, res, next) => {
+router.patch('/webhooks/:id', validateRouteIdParams, validate(webhookPatchBodySchema), async (req, res, next) => {
   try {
-    const patch = {};
-    if (req.body.url !== undefined) {
-      if (!isValidUrl(req.body.url)) return next(new AppError('VALIDATION_ERROR', 'url must be a valid http(s) URL', 400));
-      patch.url = req.body.url;
-    }
-    if (req.body.events !== undefined) {
-      if (!events.isValidSubscription(req.body.events)) return next(new AppError('VALIDATION_ERROR', 'events invalid', 400));
-      patch.events = req.body.events;
-    }
-    if (req.body.active !== undefined) {
-      if (typeof req.body.active !== 'boolean') return next(new AppError('VALIDATION_ERROR', 'active must be boolean', 400));
-      patch.active = req.body.active;
-    }
-    if (req.body.description !== undefined) {
-      if (typeof req.body.description !== 'string') return next(new AppError('VALIDATION_ERROR', 'description must be a string', 400));
-      patch.description = req.body.description;
-    }
-
+    const patch = req.validated.body;
     const updated = await webhookRepo.update(req.params.id, patch);
     if (!updated) return next(new AppError('NOT_FOUND', 'Webhook not found', 404));
     return res.json(publicView(updated));
@@ -129,7 +98,7 @@ router.patch('/webhooks/:id', async (req, res, next) => {
   }
 });
 
-router.delete('/webhooks/:id', async (req, res, next) => {
+router.delete('/webhooks/:id', validateRouteIdParams, async (req, res, next) => {
   try {
     const deleted = await webhookRepo.remove(req.params.id);
     if (!deleted) return next(new AppError('NOT_FOUND', 'Webhook not found', 404));
@@ -139,7 +108,7 @@ router.delete('/webhooks/:id', async (req, res, next) => {
   }
 });
 
-router.post('/webhooks/:id/test', testLimit, async (req, res, next) => {
+router.post('/webhooks/:id/test', validateRouteIdParams, testLimit, async (req, res, next) => {
   try {
     const delivery = await dispatcher.sendTest(req.params.id);
     if (!delivery) return next(new AppError('NOT_FOUND', 'Webhook not found', 404));
@@ -155,11 +124,11 @@ router.post('/webhooks/:id/test', testLimit, async (req, res, next) => {
   }
 });
 
-router.get('/webhooks/:id/deliveries', async (req, res, next) => {
+router.get('/webhooks/:id/deliveries', validateRouteIdParams, validate(webhookDeliveriesQuerySchema, 'query'), async (req, res, next) => {
   try {
     const webhook = await webhookRepo.findById(req.params.id);
     if (!webhook) return next(new AppError('NOT_FOUND', 'Webhook not found', 404));
-    const limit = Math.min(parseInt(req.query.limit, 10) || 50, 100);
+    const { limit } = req.validated.query;
     const deliveries = await deliveryRepo.listByWebhook(req.params.id, limit);
     return res.json({ deliveries });
   } catch (err) {

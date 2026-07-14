@@ -175,7 +175,8 @@ describe('API key management routes', () => {
     expect(res.status).toBe(400);
     expect(res.body.error).toMatchObject({
       code: 'VALIDATION_ERROR',
-      message: 'label must be a non-empty string up to 80 characters',
+      message: 'Validation failed',
     });
+    expect(res.body.error.details.fields.label).toBeDefined();
   });
 });

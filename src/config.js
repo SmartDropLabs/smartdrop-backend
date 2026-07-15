@@ -9,6 +9,14 @@ const stellarAddress = makeValidator((input) => {
   return input;
 });
 
+const positiveInteger = makeValidator((input) => {
+  const value = Number(input);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error('must be a positive integer');
+  }
+  return value;
+});
+
 const databaseDevDefault =
   process.env.NODE_ENV === 'test'
     ? 'postgres://localhost/smartdrop_test'
@@ -34,6 +42,10 @@ const env = cleanEnv(rawEnv, {
   COINGECKO_API_KEY: str({ default: '' }),
   COINMARKETCAP_API_KEY: str({ default: '' }),
   ADMIN_API_KEY: str({ default: '' }),
+  AIRDROP_CSV_MAX_BYTES: positiveInteger({ default: 5 * 1024 * 1024 }),
+  AIRDROP_JSON_MAX_BYTES: positiveInteger({ default: 2 * 1024 * 1024 }),
+  AIRDROP_RATELIMIT_WINDOW: positiveInteger({ default: 60 }),
+  AIRDROP_RATELIMIT_MAX: positiveInteger({ default: 10 }),
   PRICE_CACHE_TTL_SECONDS: num({ default: 60 }),
   PRICE_REFRESH_INTERVAL_SECONDS: num({ default: 30 }),
   PRICE_STALE_THRESHOLD_MINUTES: num({ default: 5 }),
@@ -77,6 +89,15 @@ module.exports = {
   },
   auth: {
     adminApiKey: env.ADMIN_API_KEY,
+  },
+  airdrops: {
+    csvMaxBytes: env.AIRDROP_CSV_MAX_BYTES,
+    jsonMaxBytes: env.AIRDROP_JSON_MAX_BYTES,
+    maxRecipients: 10000,
+    rateLimit: {
+      windowSeconds: env.AIRDROP_RATELIMIT_WINDOW,
+      max: env.AIRDROP_RATELIMIT_MAX,
+    },
   },
   corsAllowedOrigins: (process.env.CORS_ALLOWED_ORIGINS || 'http://localhost:3000,http://localhost:3001')
     .split(',')

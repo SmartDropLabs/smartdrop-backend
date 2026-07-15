@@ -52,6 +52,7 @@ describe('configuration validation', () => {
         '  databaseUrl: config.databaseUrl,',
         '  redisUrl: config.redis.url,',
         '  price: config.price,',
+        '  airdrops: config.airdrops,',
         '}));',
       ].join(' '),
       { NODE_ENV: 'test' }
@@ -69,6 +70,15 @@ describe('configuration validation', () => {
         refreshInterval: 30,
         staleThresholdMinutes: 5,
         anomalyThresholdPercent: 20,
+      },
+      airdrops: {
+        csvMaxBytes: 5 * 1024 * 1024,
+        jsonMaxBytes: 2 * 1024 * 1024,
+        maxRecipients: 10000,
+        rateLimit: {
+          windowSeconds: 60,
+          max: 10,
+        },
       },
     });
   });

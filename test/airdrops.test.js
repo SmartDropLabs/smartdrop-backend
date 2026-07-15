@@ -3,6 +3,7 @@
 const mockStore = new Map();
 const mockSets = new Map();
 const mockLists = new Map();
+const mockCounters = new Map();
 
 const mockRedis = {
   smembers: jest.fn(async (key) => [...(mockSets.get(key) || [])]),
@@ -26,6 +27,12 @@ const mockRedis = {
     const list = mockLists.get(key) || [];
     return list.slice(start, end + 1);
   }),
+  incr: jest.fn(async (key) => {
+    const count = (mockCounters.get(key) || 0) + 1;
+    mockCounters.set(key, count);
+    return count;
+  }),
+  expire: jest.fn(async () => 1),
 };
 
 jest.mock('../src/services/cache', () => ({
@@ -70,6 +77,7 @@ jest.mock('stellar-sdk', () => ({
 
 const request = require('supertest');
 const cache = require('../src/services/cache');
+const config = require('../src/config');
 let app;
 
 beforeAll(() => {
@@ -80,6 +88,7 @@ beforeEach(() => {
   mockStore.clear();
   mockSets.clear();
   mockLists.clear();
+  mockCounters.clear();
   cache.get.mockClear();
   cache.set.mockClear();
   cache.del.mockClear();
@@ -90,6 +99,8 @@ beforeEach(() => {
   mockRedis.lpush.mockClear();
   mockRedis.rpush.mockClear();
   mockRedis.lrange.mockClear();
+  mockRedis.incr.mockClear();
+  mockRedis.expire.mockClear();
 });
 
 const validAddress1 = 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5';
@@ -147,6 +158,17 @@ describe('POST /api/v1/airdrops', () => {
       });
     expect(response.status).toBe(400);
     expect(response.body.error.message).toContain('sum of recipient amounts');
+  });
+
+  test('rate limits repeated airdrop creation attempts', async () => {
+    for (let i = 0; i < config.airdrops.rateLimit.max; i += 1) {
+      const response = await request(app).post('/api/v1/airdrops').send({});
+      expect(response.status).toBe(400);
+    }
+
+    const blocked = await request(app).post('/api/v1/airdrops').send({});
+    expect(blocked.status).toBe(429);
+    expect(blocked.body.error.code).toBe('RATE_LIMITED');
   });
 });
 
@@ -328,6 +350,81 @@ describe('POST /api/v1/airdrops/:id/recipients', () => {
 
     expect(addResponse.status).toBe(201);
     expect(addResponse.body.added).toBe(2);
+  });
+
+  test('rejects a CSV larger than the configured upload limit', async () => {
+    const createResponse = await request(app)
+      .post('/api/v1/airdrops')
+      .send({
+        name: 'Test Airdrop',
+        asset: 'USDC',
+        asset_issuer: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA',
+        total_amount: 100,
+        expiry_ledger: 123456,
+      });
+
+    const oversized = Buffer.alloc(config.airdrops.csvMaxBytes + 1, 'a');
+    const response = await request(app)
+      .post(`/api/v1/airdrops/${createResponse.body.id}/recipients`)
+      .attach('file', oversized, 'recipients.csv');
+
+    expect(response.status).toBe(413);
+    expect(response.body.error).toMatchObject({
+      code: 'PAYLOAD_TOO_LARGE',
+      details: { max_bytes: config.airdrops.csvMaxBytes },
+    });
+    expect(mockRedis.rpush).not.toHaveBeenCalled();
+  });
+
+  test('stops CSV parsing when the 10,000-row limit is crossed', async () => {
+    const createResponse = await request(app)
+      .post('/api/v1/airdrops')
+      .send({
+        name: 'Test Airdrop',
+        asset: 'USDC',
+        asset_issuer: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA',
+        total_amount: 100,
+        expiry_ledger: 123456,
+      });
+    const row = `${validAddress1},1\n`;
+    const csvContent = `address,amount\n${row.repeat(10001)}`;
+
+    const response = await request(app)
+      .post(`/api/v1/airdrops/${createResponse.body.id}/recipients`)
+      .attach('file', Buffer.from(csvContent), 'recipients.csv');
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toMatchObject({
+      code: 'VALIDATION_ERROR',
+      message: 'recipients cannot exceed 10,000',
+    });
+    expect(mockRedis.rpush).not.toHaveBeenCalled();
+  });
+
+  test('rate limits repeated recipient additions', async () => {
+    const createResponse = await request(app)
+      .post('/api/v1/airdrops')
+      .send({
+        name: 'Test Airdrop',
+        asset: 'USDC',
+        asset_issuer: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA',
+        total_amount: 100,
+        expiry_ledger: 123456,
+      });
+    const endpoint = `/api/v1/airdrops/${createResponse.body.id}/recipients`;
+
+    for (let i = 0; i < config.airdrops.rateLimit.max; i += 1) {
+      const response = await request(app)
+        .post(endpoint)
+        .send({ recipients: [{ address: validAddress1, amount: 1 }] });
+      expect(response.status).toBe(201);
+    }
+
+    const blocked = await request(app)
+      .post(endpoint)
+      .send({ recipients: [{ address: validAddress1, amount: 1 }] });
+    expect(blocked.status).toBe(429);
+    expect(blocked.body.error.code).toBe('RATE_LIMITED');
   });
 });
 

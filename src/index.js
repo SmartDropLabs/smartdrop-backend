@@ -26,7 +26,7 @@ let server;
 app.use(requestIdMiddleware);
 app.use(helmet());
 app.use(buildCorsMiddleware(config.corsAllowedOrigins));
-app.use(express.json());
+app.use(express.json({ limit: config.airdrops.jsonMaxBytes }));
 
 app.get('/health', (req, res) => {
   const redisConnected = cache.isConnected();

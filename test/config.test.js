@@ -69,6 +69,8 @@ describe('configuration validation', () => {
         refreshInterval: 30,
         staleThresholdMinutes: 5,
         anomalyThresholdPercent: 20,
+        sourceCircuitCooldownMs: 900000,
+        sourceCircuitReminderMs: 300000,
       },
     });
   });

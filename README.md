@@ -105,6 +105,8 @@ The application reads configurations from the `.env` file at the root.
 | `PRICE_REFRESH_INTERVAL` | Refresh interval in seconds | 30 | No |
 | `PRICE_STALE_THRESHOLD` | Stale threshold in minutes | 5 | No |
 | `PRICE_ANOMALY_THRESHOLD` | Anomaly detection threshold % | 10 | No |
+| `PRICE_SOURCE_CIRCUIT_COOLDOWN_MS` | Cooldown after non-retryable price-source auth failures | 900000 | No |
+| `PRICE_SOURCE_CIRCUIT_REMINDER_MS` | Minimum interval between open-circuit reminder logs | 300000 | No |
 | `ADMIN_API_KEY` | Bootstrap admin bearer token for API key management | undefined | Yes, for protected endpoints |
 | `LOG_LEVEL` | Logging level | info | No |
 
@@ -133,6 +135,8 @@ The application reads configurations from the `.env` file at the root.
 | `PRICE_REFRESH_INTERVAL_SECONDS` | Refresh interval in seconds | 30 | No |
 | `PRICE_STALE_THRESHOLD_MINUTES` | Stale threshold in minutes | 5 | No |
 | `PRICE_ANOMALY_THRESHOLD_PCT` | Anomaly detection threshold % | 20 | No |
+| `PRICE_SOURCE_CIRCUIT_COOLDOWN_MS` | Cooldown after non-retryable price-source auth failures | 900000 | No |
+| `PRICE_SOURCE_CIRCUIT_REMINDER_MS` | Minimum interval between open-circuit reminder logs | 300000 | No |
 | `ADMIN_API_KEY` | Bootstrap admin bearer token for API key management | empty | Yes, for protected endpoints |
 | `LOG_LEVEL` | Logging level: `debug`, `info`, `warn`, or `error` | info | No |
 

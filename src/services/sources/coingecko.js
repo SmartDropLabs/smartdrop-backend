@@ -46,6 +46,10 @@ async function fetchPrice(assetCode) {
 
     return price;
   } catch (err) {
+    if (err.response?.status === 401 || err.response?.status === 403) {
+      err.nonRetryable = true;
+      throw err;
+    }
     if (err.response?.status === 429) {
       logger.warn('CoinGecko rate limit hit', { assetCode });
     } else {

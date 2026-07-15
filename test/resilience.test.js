@@ -38,7 +38,9 @@ beforeEach(() => {
   mockCoingeckoFetch.mockReset();
   mockCmcFetch.mockReset();
   logger.warn.mockClear();
+  logger.info.mockClear();
   logger.error.mockClear();
+  priceOracle.resetPriceSourceCircuitStates();
 
   // Default: sources return a price
   mockStellarFetch.mockResolvedValue(0.10);
@@ -138,6 +140,130 @@ describe('cache working normally', () => {
     const result = await priceOracle.fetchFreshPrice('XLM');
 
     expect(result.redis_unavailable).toBe(false);
+  });
+});
+
+describe('price source non-retryable circuit breaker', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+    mockCacheSet.mockResolvedValue(undefined);
+    mockStellarFetch.mockResolvedValue(null);
+    mockCoingeckoFetch.mockResolvedValue(null);
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  function authError() {
+    const err = new Error('bad api key');
+    err.nonRetryable = true;
+    err.response = { status: 401 };
+    return err;
+  }
+
+  function cmcCircuitState() {
+    return priceOracle
+      .getPriceSourceCircuitStates()
+      .find((state) => state.source === 'coinmarketcap');
+  }
+
+  test('opens the circuit on a non-retryable CoinMarketCap failure and skips while open', async () => {
+    mockCmcFetch.mockRejectedValueOnce(authError());
+
+    const firstResult = await priceOracle.fetchFreshPrice('XLM');
+
+    expect(firstResult.price_usd).toBeNull();
+    expect(mockCmcFetch).toHaveBeenCalledTimes(1);
+    expect(logger.error).toHaveBeenCalledWith(
+      'Price source permanently misconfigured',
+      expect.objectContaining({
+        source: 'coinmarketcap',
+        assetCode: 'XLM',
+        error: 'bad api key',
+        status_code: 401,
+        cooldown_ms: 900000,
+        open_until: '2026-01-01T00:15:00.000Z',
+      })
+    );
+    expect(cmcCircuitState()).toEqual(
+      expect.objectContaining({
+        open: true,
+        opened_at: '2026-01-01T00:00:00.000Z',
+        open_until: '2026-01-01T00:15:00.000Z',
+        last_error: 'bad api key',
+        status_code: 401,
+      })
+    );
+
+    mockCmcFetch.mockClear();
+    logger.error.mockClear();
+    logger.warn.mockClear();
+
+    const skippedResult = await priceOracle.fetchFreshPrice('XLM');
+
+    expect(skippedResult.price_usd).toBeNull();
+    expect(mockCmcFetch).not.toHaveBeenCalled();
+    expect(logger.error).not.toHaveBeenCalled();
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      'Price source circuit open, skipping fetch',
+      expect.any(Object)
+    );
+  });
+
+  test('retries after cooldown and closes the circuit after a successful fetch', async () => {
+    mockCmcFetch.mockRejectedValueOnce(authError());
+    await priceOracle.fetchFreshPrice('XLM');
+
+    mockCmcFetch.mockClear();
+    logger.info.mockClear();
+
+    jest.advanceTimersByTime(900000 - 1);
+    await priceOracle.fetchFreshPrice('XLM');
+    expect(mockCmcFetch).not.toHaveBeenCalled();
+
+    jest.advanceTimersByTime(1);
+    mockCmcFetch.mockResolvedValueOnce(0.1234);
+
+    const result = await priceOracle.fetchFreshPrice('XLM');
+
+    expect(result.price_usd).toBe(0.1234);
+    expect(mockCmcFetch).toHaveBeenCalledTimes(1);
+    expect(logger.info).toHaveBeenCalledWith('Price source circuit closed', {
+      source: 'coinmarketcap',
+      assetCode: 'XLM',
+    });
+    expect(cmcCircuitState()).toEqual(
+      expect.objectContaining({
+        open: false,
+        opened_at: null,
+        open_until: null,
+        last_error: null,
+        status_code: null,
+      })
+    );
+  });
+
+  test('leaves ordinary retryable source failures on the existing per-cycle path', async () => {
+    mockCmcFetch.mockRejectedValueOnce(new Error('temporary timeout')).mockResolvedValueOnce(0.2);
+
+    await priceOracle.fetchFreshPrice('XLM');
+    await priceOracle.fetchFreshPrice('XLM');
+
+    expect(mockCmcFetch).toHaveBeenCalledTimes(2);
+    expect(logger.warn).toHaveBeenCalledWith(
+      'Source fetch failed',
+      expect.objectContaining({
+        source: 'coinmarketcap',
+        assetCode: 'XLM',
+        error: 'temporary timeout',
+      })
+    );
+    expect(logger.error).not.toHaveBeenCalledWith(
+      'Price source permanently misconfigured',
+      expect.any(Object)
+    );
   });
 });
 

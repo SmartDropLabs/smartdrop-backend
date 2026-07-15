@@ -7,11 +7,104 @@ const logger = require('../logger');
 
 const CACHE_PREFIX = 'price:';
 const HISTORY_PREFIX = 'price:history:';
+const SOURCE_CIRCUITS = new Map();
 const SOURCES = [
   { name: 'stellar_dex', fetch: stellarDex.fetchPrice },
   { name: 'coingecko', fetch: coingecko.fetchPrice },
   { name: 'coinmarketcap', fetch: coinmarketcap.fetchPrice },
 ];
+
+function getSourceCircuit(sourceName) {
+  if (!SOURCE_CIRCUITS.has(sourceName)) {
+    SOURCE_CIRCUITS.set(sourceName, {
+      openedAt: 0,
+      openUntil: 0,
+      lastReminderAt: 0,
+      lastError: null,
+      statusCode: null,
+    });
+  }
+  return SOURCE_CIRCUITS.get(sourceName);
+}
+
+function formatTimestamp(timestamp) {
+  return timestamp ? new Date(timestamp).toISOString() : null;
+}
+
+function getPriceSourceCircuitStates() {
+  const now = Date.now();
+
+  return SOURCES.map((source) => {
+    const circuit = getSourceCircuit(source.name);
+    const open = circuit.openUntil > now;
+
+    return {
+      source: source.name,
+      open,
+      opened_at: circuit.openedAt ? formatTimestamp(circuit.openedAt) : null,
+      open_until: open ? formatTimestamp(circuit.openUntil) : null,
+      last_error: circuit.lastError,
+      status_code: circuit.statusCode,
+    };
+  });
+}
+
+function resetPriceSourceCircuitStates() {
+  SOURCE_CIRCUITS.clear();
+}
+
+function isSourceCircuitOpen(sourceName, now = Date.now()) {
+  const circuit = SOURCE_CIRCUITS.get(sourceName);
+  return Boolean(circuit && circuit.openUntil > now);
+}
+
+function maybeLogSourceCircuitSkip(sourceName, assetCode, now = Date.now()) {
+  const circuit = getSourceCircuit(sourceName);
+  const reminderMs = config.price.sourceCircuitReminderMs;
+
+  if (reminderMs > 0 && now - circuit.lastReminderAt < reminderMs) {
+    return;
+  }
+
+  circuit.lastReminderAt = now;
+  logger.warn('Price source circuit open, skipping fetch', {
+    source: sourceName,
+    assetCode,
+    open_until: formatTimestamp(circuit.openUntil),
+    retry_in_ms: Math.max(circuit.openUntil - now, 0),
+  });
+}
+
+function openSourceCircuit(sourceName, assetCode, err) {
+  const now = Date.now();
+  const cooldownMs = config.price.sourceCircuitCooldownMs;
+  const circuit = getSourceCircuit(sourceName);
+
+  circuit.openedAt = now;
+  circuit.openUntil = now + cooldownMs;
+  circuit.lastReminderAt = now;
+  circuit.lastError = err.message;
+  circuit.statusCode = err.response?.status || err.statusCode || null;
+
+  logger.error('Price source permanently misconfigured', {
+    source: sourceName,
+    assetCode,
+    error: err.message,
+    status_code: circuit.statusCode,
+    cooldown_ms: cooldownMs,
+    open_until: formatTimestamp(circuit.openUntil),
+  });
+}
+
+function closeSourceCircuit(sourceName, assetCode) {
+  const circuit = SOURCE_CIRCUITS.get(sourceName);
+  if (!circuit || !circuit.openedAt) {
+    return;
+  }
+
+  SOURCE_CIRCUITS.delete(sourceName);
+  logger.info('Price source circuit closed', { source: sourceName, assetCode });
+}
 
 function median(values) {
   if (values.length === 0) return null;
@@ -78,12 +171,22 @@ async function fetchFromAllSources(assetCode, issuer) {
   const results = [];
 
   for (const source of SOURCES) {
+    if (isSourceCircuitOpen(source.name)) {
+      maybeLogSourceCircuitSkip(source.name, assetCode);
+      continue;
+    }
+
     try {
       const price = await source.fetch(assetCode, issuer);
       if (price !== null && price > 0) {
+        closeSourceCircuit(source.name, assetCode);
         results.push({ source: source.name, price });
       }
     } catch (err) {
+      if (err.nonRetryable) {
+        openSourceCircuit(source.name, assetCode, err);
+        continue;
+      }
       logger.warn('Source fetch failed', { source: source.name, assetCode, error: err.message });
     }
   }
@@ -236,4 +339,6 @@ module.exports = {
   getPrice,
   fetchFreshPrice,
   refreshAllCachedPrices,
+  getPriceSourceCircuitStates,
+  resetPriceSourceCircuitStates,
 };

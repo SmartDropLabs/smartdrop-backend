@@ -40,6 +40,9 @@ const env = cleanEnv(rawEnv, {
   PRICE_ANOMALY_THRESHOLD_PCT: num({ default: 20 }),
   PRICE_SOURCE_CIRCUIT_COOLDOWN_MS: num({ default: 15 * 60 * 1000 }),
   PRICE_SOURCE_CIRCUIT_REMINDER_MS: num({ default: 5 * 60 * 1000 }),
+  AIRDROP_EXPIRY_CHECK_INTERVAL_SECONDS: num({ default: 60 }),
+  AIRDROP_LEDGER_CACHE_TTL_MS: num({ default: 5000 }),
+  AIRDROP_EXPIRY_SCAN_BATCH_SIZE: num({ default: 100 }),
   LOG_LEVEL: str({
     default: 'info',
     choices: ['debug', 'info', 'warn', 'error'],
@@ -85,6 +88,19 @@ module.exports = {
     // the circuit stays open, so a misconfigured key doesn't spam one log
     // line per fetch cycle for the entire cooldown window.
     circuitReminderIntervalMs: env.PRICE_SOURCE_CIRCUIT_REMINDER_MS,
+  },
+  airdrops: {
+    // How often the expiry reconciliation job scans non-terminal airdrops
+    // against the live Horizon ledger sequence.
+    expiryCheckIntervalSeconds: env.AIRDROP_EXPIRY_CHECK_INTERVAL_SECONDS,
+    // getCurrentLedger() is a live Horizon call with no caching; a job that
+    // polls frequently should reuse the same ledger sequence for this long
+    // rather than hitting Horizon once per airdrop per cycle.
+    ledgerCacheTtlMs: env.AIRDROP_LEDGER_CACHE_TTL_MS,
+    // SSCAN batch size used when scanning the full airdrop ID set — keeps
+    // each Redis round-trip small instead of loading the whole set (SMEMBERS)
+    // into memory at once.
+    expiryScanBatchSize: env.AIRDROP_EXPIRY_SCAN_BATCH_SIZE,
   },
   auth: {
     adminApiKey: env.ADMIN_API_KEY,

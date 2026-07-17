@@ -39,7 +39,7 @@ Registers subscriber endpoints for SmartDrop lifecycle events and delivers signe
 - `airdrop.created`
 - `airdrop.executing`
 - `airdrop.completed`
-- `airdrop.failed`
+- `airdrop.failed` — fired automatically when an airdrop expires (see below), in addition to any other failure path
 - `recipient.claimed`
 
 **Features:**
@@ -48,6 +48,28 @@ Registers subscriber endpoints for SmartDrop lifecycle events and delivers signe
 - At-least-once delivery attempts with exponential backoff
 - Delivery logs with response code, error, duration, and attempt count
 - Dead-letter storage after retry exhaustion
+
+### Airdrop Expiry Reconciliation
+
+Airdrops carry an `expiry_ledger`, validated as being in the future only at
+creation/update time. A background job (`src/jobs/airdropExpiry.js`, same
+`start()`/`stop()` pattern as the price-refresh and webhook-retry jobs)
+periodically re-checks that condition against the live network:
+
+- Every `AIRDROP_EXPIRY_CHECK_INTERVAL_SECONDS` (default 60s), fetches the
+  current Horizon ledger sequence and scans every airdrop still in a
+  non-terminal status (`draft`, `executing`).
+- Any airdrop whose `expiry_ledger` has passed is atomically transitioned to
+  `expired` and fires an `airdrop.failed` webhook event (`data.reason:
+  "expired"`) to every subscriber registered for it — no client action
+  required.
+- The transition is idempotent: re-running the check against an
+  already-expired airdrop is a guaranteed no-op, so the webhook fires
+  exactly once per airdrop even if the job runs again before anything else
+  changes its status.
+- If Horizon is temporarily unreachable, the job logs a warning and skips
+  that cycle rather than crashing — airdrops are simply re-checked on the
+  next tick.
 
 ---
 

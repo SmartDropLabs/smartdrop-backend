@@ -31,11 +31,53 @@ app.use(express.json());
 
 app.get('/health', (req, res) => {
   const redisConnected = cache.isConnected();
+  const priceRefreshHealth = priceRefreshJob.getHealth();
+  const webhookWorkerHealth = webhookRetryWorker.getHealth();
+
+  // Compute overall status:
+  //   unhealthy – Redis is down, or a job is stalled past its grace period
+  //   degraded  – a job has not yet run but is still within its startup grace period
+  //   ok        – all dependencies healthy
+  let status = 'ok';
+  if (!redisConnected || !priceRefreshHealth.healthy || !webhookWorkerHealth.healthy) {
+    // Distinguish between "never started" (degraded) vs outright stalled/down (unhealthy)
+    const jobsDegraded =
+      (!priceRefreshHealth.healthy && !priceRefreshHealth.stalled) ||
+      (!webhookWorkerHealth.healthy && !webhookWorkerHealth.stalled);
+    status = (!redisConnected || priceRefreshHealth.stalled || webhookWorkerHealth.stalled)
+      ? 'unhealthy'
+      : jobsDegraded ? 'degraded' : 'unhealthy';
+  }
+
   res.json({
-    status: 'ok',
+    status,
     timestamp: new Date().toISOString(),
-    redis_connected: redisConnected,
-    redis_unavailable: !redisConnected,
+    redis: {
+      connected: redisConnected,
+    },
+    jobs: {
+      price_refresh: {
+        healthy: priceRefreshHealth.healthy,
+        last_success_at: priceRefreshHealth.lastSuccessAt
+          ? new Date(priceRefreshHealth.lastSuccessAt).toISOString()
+          : null,
+        last_error: priceRefreshHealth.lastError,
+        stalled: priceRefreshHealth.stalled,
+      },
+      webhook_retry_worker: {
+        healthy: webhookWorkerHealth.healthy,
+        last_success_at: webhookWorkerHealth.lastSuccessAt
+          ? new Date(webhookWorkerHealth.lastSuccessAt).toISOString()
+          : null,
+        last_error: webhookWorkerHealth.lastError,
+        stalled: webhookWorkerHealth.stalled,
+      },
+    },
+    database: {
+      configured: true,
+      checked: false,
+      status: 'unused',
+    },
     price_source_circuits: priceOracle.getSourceCircuitStates(),
   });
 });

@@ -5,6 +5,7 @@ const helmet = require('helmet');
 const config = require('./config');
 const logger = require('./logger');
 const cache = require('./services/cache');
+const priceOracle = require('./services/priceOracle');
 const priceRefreshJob = require('./jobs/priceRefresh');
 const webhookRetryWorker = require('./jobs/webhookRetryWorker');
 const buildCorsMiddleware = require('./middleware/cors');
@@ -35,6 +36,7 @@ app.get('/health', (req, res) => {
     timestamp: new Date().toISOString(),
     redis_connected: redisConnected,
     redis_unavailable: !redisConnected,
+    price_source_circuits: priceOracle.getSourceCircuitStates(),
   });
 });
 

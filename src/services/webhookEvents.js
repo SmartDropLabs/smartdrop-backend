@@ -10,7 +10,16 @@ const POOL_EVENTS = Object.freeze([
 
 const PRICE_EVENTS = Object.freeze(['price.alert']);
 
-const ALL_EVENTS = Object.freeze([...POOL_EVENTS, ...PRICE_EVENTS]);
+// Only 'airdrop.failed' is registered here — it's the one event this
+// codebase actually dispatches today (the expiry reconciliation job, #88).
+// The README also documents airdrop.created/executing/completed, but
+// nothing in the codebase dispatches those yet; registering unused event
+// names here would let a client subscribe to something that can never
+// fire, so they're left out until whatever feature actually dispatches
+// them lands.
+const AIRDROP_EVENTS = Object.freeze(['airdrop.failed']);
+
+const ALL_EVENTS = Object.freeze([...POOL_EVENTS, ...PRICE_EVENTS, ...AIRDROP_EVENTS]);
 const EVENT_SET = new Set(ALL_EVENTS);
 
 const WILDCARD = '*';
@@ -33,6 +42,7 @@ function matchesSubscription(subscribedEvents, eventType) {
 module.exports = {
   POOL_EVENTS,
   PRICE_EVENTS,
+  AIRDROP_EVENTS,
   ALL_EVENTS,
   WILDCARD,
   isKnownEvent,

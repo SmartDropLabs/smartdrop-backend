@@ -8,6 +8,7 @@ const cache = require('./services/cache');
 const priceOracle = require('./services/priceOracle');
 const priceRefreshJob = require('./jobs/priceRefresh');
 const webhookRetryWorker = require('./jobs/webhookRetryWorker');
+const airdropExpiryJob = require('./jobs/airdropExpiry');
 const buildCorsMiddleware = require('./middleware/cors');
 const { requestIdMiddleware } = require('./middleware/requestId');
 const { requireApiKey } = require('./middleware/auth');
@@ -56,6 +57,7 @@ function shutdown(signal) {
     logger.info(`${signal} received, shutting down`);
     priceRefreshJob.stop();
     webhookRetryWorker.stop();
+    airdropExpiryJob.stop();
     require('./ws/PriceSubscriptionManager').stopHeartbeat();
     if (server) server.close();
     await cache.disconnect();
@@ -69,6 +71,7 @@ if (require.main === module) {
     priceWebSocket.attach(server);
     priceRefreshJob.start();
     webhookRetryWorker.start();
+    airdropExpiryJob.start();
   });
 
   process.on('SIGTERM', shutdown('SIGTERM'));

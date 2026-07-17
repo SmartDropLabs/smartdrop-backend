@@ -9,9 +9,21 @@ const CACHE_PREFIX = 'price:';
 const HISTORY_PREFIX = 'price:history:';
 const SOURCES = [
   { name: 'stellar_dex', fetch: stellarDex.fetchPrice },
-  { name: 'coingecko', fetch: coingecko.fetchPrice },
-  { name: 'coinmarketcap', fetch: coinmarketcap.fetchPrice },
+  { name: 'coingecko', fetch: coingecko.fetchPrice, getCircuitState: coingecko.getCircuitState },
+  { name: 'coinmarketcap', fetch: coinmarketcap.fetchPrice, getCircuitState: coinmarketcap.getCircuitState },
 ];
+
+/**
+ * Circuit-breaker state for every source that has one (currently coingecko
+ * and coinmarketcap — stellar_dex has no API-key/auth failure mode). Lets
+ * callers (e.g. /health) see at a glance which price sources are currently
+ * skipped due to a nonRetryable failure. See #95.
+ */
+function getSourceCircuitStates() {
+  return SOURCES.filter((source) => typeof source.getCircuitState === 'function').map((source) =>
+    source.getCircuitState()
+  );
+}
 
 function median(values) {
   if (values.length === 0) return null;
@@ -236,4 +248,5 @@ module.exports = {
   getPrice,
   fetchFreshPrice,
   refreshAllCachedPrices,
+  getSourceCircuitStates,
 };

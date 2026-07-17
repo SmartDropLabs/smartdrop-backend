@@ -38,6 +38,8 @@ const env = cleanEnv(rawEnv, {
   PRICE_REFRESH_INTERVAL_SECONDS: num({ default: 30 }),
   PRICE_STALE_THRESHOLD_MINUTES: num({ default: 5 }),
   PRICE_ANOMALY_THRESHOLD_PCT: num({ default: 20 }),
+  PRICE_SOURCE_CIRCUIT_COOLDOWN_MS: num({ default: 15 * 60 * 1000 }),
+  PRICE_SOURCE_CIRCUIT_REMINDER_MS: num({ default: 5 * 60 * 1000 }),
   LOG_LEVEL: str({
     default: 'info',
     choices: ['debug', 'info', 'warn', 'error'],
@@ -74,6 +76,15 @@ module.exports = {
     refreshInterval: env.PRICE_REFRESH_INTERVAL_SECONDS,
     staleThresholdMinutes: env.PRICE_STALE_THRESHOLD_MINUTES,
     anomalyThresholdPercent: env.PRICE_ANOMALY_THRESHOLD_PCT,
+  },
+  priceSources: {
+    // How long a source's circuit stays open after a nonRetryable (e.g. 401)
+    // failure before it's attempted again.
+    circuitCooldownMs: env.PRICE_SOURCE_CIRCUIT_COOLDOWN_MS,
+    // Minimum gap between repeated "circuit open, skipping" log lines while
+    // the circuit stays open, so a misconfigured key doesn't spam one log
+    // line per fetch cycle for the entire cooldown window.
+    circuitReminderIntervalMs: env.PRICE_SOURCE_CIRCUIT_REMINDER_MS,
   },
   auth: {
     adminApiKey: env.ADMIN_API_KEY,

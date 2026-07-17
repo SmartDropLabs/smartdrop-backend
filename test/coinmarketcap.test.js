@@ -28,6 +28,10 @@ jest.mock('../src/config', () => ({
       [`USDC:${mockUsdcIssuer}`]: { id: 3408 },
     },
   },
+  priceSources: {
+    circuitCooldownMs: 900000,
+    circuitReminderIntervalMs: 300000,
+  },
 }));
 
 jest.mock('../src/logger', () => mockLogger);
@@ -53,6 +57,7 @@ function loadSource() {
   mockAxiosCreate.mockReturnValue({ get: mockGet });
   mockLogger.warn.mockClear();
   mockLogger.debug.mockClear();
+  mockLogger.error.mockClear();
   return require('../src/services/sources/coinmarketcap');
 }
 
@@ -159,5 +164,119 @@ describe('CoinMarketCap source', () => {
     mockGet.mockResolvedValueOnce({ data: { data: { XLM: {} } } });
 
     await expect(coinmarketcap.fetchPrice('XLM')).resolves.toBeNull();
+  });
+
+  describe('circuit breaker (#95)', () => {
+    beforeEach(() => {
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    test('opens the circuit on a 401 and skips the HTTP request on the next fetch', async () => {
+      const coinmarketcap = loadSource();
+      const authError = new Error('unauthorized');
+      authError.response = { status: 401 };
+      mockGet.mockRejectedValueOnce(authError);
+
+      await expect(coinmarketcap.fetchPrice('XLM')).rejects.toThrow('unauthorized');
+      expect(coinmarketcap.getCircuitState()).toEqual({
+        source: 'coinmarketcap',
+        open: true,
+        openUntil: new Date('2026-01-01T00:15:00.000Z').toISOString(),
+      });
+
+      mockGet.mockClear();
+      const price = await coinmarketcap.fetchPrice('XLM');
+
+      expect(price).toBeNull();
+      expect(mockGet).not.toHaveBeenCalled();
+    });
+
+    test('retries the source after the cooldown window elapses', async () => {
+      const coinmarketcap = loadSource();
+      const authError = new Error('unauthorized');
+      authError.response = { status: 401 };
+      mockGet.mockRejectedValueOnce(authError);
+      await expect(coinmarketcap.fetchPrice('XLM')).rejects.toThrow('unauthorized');
+
+      jest.advanceTimersByTime(900001);
+      mockGet.mockClear();
+      mockGet.mockResolvedValueOnce(quoteResponse('XLM', 0.15));
+
+      const price = await coinmarketcap.fetchPrice('XLM');
+
+      expect(mockGet).toHaveBeenCalledTimes(1);
+      expect(price).toBe(0.15);
+    });
+
+    test('a successful retry closes the circuit', async () => {
+      const coinmarketcap = loadSource();
+      const authError = new Error('unauthorized');
+      authError.response = { status: 401 };
+      mockGet.mockRejectedValueOnce(authError);
+      await expect(coinmarketcap.fetchPrice('XLM')).rejects.toThrow('unauthorized');
+
+      jest.advanceTimersByTime(900001);
+      mockGet.mockResolvedValueOnce(quoteResponse('XLM', 0.15));
+      await coinmarketcap.fetchPrice('XLM');
+
+      expect(coinmarketcap.getCircuitState()).toEqual({
+        source: 'coinmarketcap',
+        open: false,
+        openUntil: null,
+      });
+    });
+
+    test('a fresh 401 after cooldown re-opens the circuit with a new window', async () => {
+      const coinmarketcap = loadSource();
+      const authError = new Error('unauthorized');
+      authError.response = { status: 401 };
+      mockGet.mockRejectedValueOnce(authError);
+      await expect(coinmarketcap.fetchPrice('XLM')).rejects.toThrow('unauthorized');
+
+      jest.advanceTimersByTime(900001);
+      mockGet.mockRejectedValueOnce(authError);
+      await expect(coinmarketcap.fetchPrice('XLM')).rejects.toThrow('unauthorized');
+
+      expect(coinmarketcap.getCircuitState().open).toBe(true);
+      expect(mockLogger.error).toHaveBeenCalledTimes(2);
+    });
+
+    test('the first 401 logs distinctly at error level; repeated skips while open do not', async () => {
+      const coinmarketcap = loadSource();
+      const authError = new Error('unauthorized');
+      authError.response = { status: 401 };
+      mockGet.mockRejectedValueOnce(authError);
+      await expect(coinmarketcap.fetchPrice('XLM')).rejects.toThrow('unauthorized');
+
+      expect(mockLogger.error).toHaveBeenCalledTimes(1);
+      expect(mockLogger.error).toHaveBeenCalledWith(
+        'Price source permanently misconfigured',
+        expect.objectContaining({ source: 'coinmarketcap' })
+      );
+
+      await coinmarketcap.fetchPrice('XLM');
+      await coinmarketcap.fetchPrice('XLM');
+
+      expect(mockLogger.error).toHaveBeenCalledTimes(1);
+    });
+
+    test('429s are unaffected by the circuit breaker', async () => {
+      const coinmarketcap = loadSource();
+      const rateLimitError = new Error('too many requests');
+      rateLimitError.response = { status: 429 };
+      mockGet.mockRejectedValue(rateLimitError);
+
+      await coinmarketcap.fetchPrice('XLM');
+      const price = await coinmarketcap.fetchPrice('XLM');
+
+      expect(price).toBeNull();
+      expect(mockGet).toHaveBeenCalledTimes(2);
+      expect(coinmarketcap.getCircuitState().open).toBe(false);
+    });
   });
 });

@@ -20,9 +20,25 @@ function generateId() {
 
 const horizon = new Horizon.Server(config.stellar.horizonUrl);
 
+// getCurrentLedger() is a live Horizon call. Callers that need to check many
+// airdrops in quick succession (the expiry reconciliation job, in
+// particular — see #88) would otherwise issue one Horizon request per
+// airdrop per cycle; cache the result briefly so bursts of calls within the
+// same window reuse one ledger read instead of hammering Horizon, the same
+// rate-limit concern already applied to CoinGecko/CoinMarketCap elsewhere.
+let cachedLedger = null;
+let cachedLedgerAt = 0;
+
 async function getCurrentLedger() {
+  const now = Date.now();
+  if (cachedLedger !== null && now - cachedLedgerAt < config.airdrops.ledgerCacheTtlMs) {
+    return cachedLedger;
+  }
+
   const ledger = await horizon.ledgers().order('desc').limit(1).call();
-  return ledger.records[0].sequence;
+  cachedLedger = ledger.records[0].sequence;
+  cachedLedgerAt = now;
+  return cachedLedger;
 }
 
 async function create(data) {

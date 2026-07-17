@@ -1,6 +1,13 @@
 const axios = require('axios');
 const config = require('../../config');
 const logger = require('../../logger');
+const { createCircuitBreaker } = require('./circuitBreaker');
+
+const circuit = createCircuitBreaker({
+  sourceName: 'coinmarketcap',
+  cooldownMs: config.priceSources.circuitCooldownMs,
+  reminderIntervalMs: config.priceSources.circuitReminderIntervalMs,
+});
 
 let apiClient = null;
 
@@ -55,6 +62,11 @@ async function fetchPrice(assetCode, issuer = null) {
     return null;
   }
 
+  if (circuit.isOpen()) {
+    circuit.noteSkipped({ assetCode });
+    return null;
+  }
+
   try {
     const client = getClient();
     const lookupKey = market.id ? String(market.id) : market.symbol;
@@ -65,6 +77,11 @@ async function fetchPrice(assetCode, issuer = null) {
       },
     });
 
+    // A successful HTTP round-trip means the API key is valid, regardless
+    // of whether this particular asset had usable quote data — close the
+    // circuit before evaluating the response shape.
+    circuit.close();
+
     const data = response.data?.data?.[lookupKey];
     if (!data || !data.quote?.USD?.price) {
       return null;
@@ -74,6 +91,7 @@ async function fetchPrice(assetCode, issuer = null) {
   } catch (err) {
     if (err.response?.status === 401) {
       err.nonRetryable = true;
+      circuit.open({ assetCode });
       logger.warn('CoinMarketCap authentication failed', { assetCode });
       throw err;
     }
@@ -89,4 +107,4 @@ async function fetchPrice(assetCode, issuer = null) {
   }
 }
 
-module.exports = { fetchPrice };
+module.exports = { fetchPrice, getCircuitState: circuit.getState };

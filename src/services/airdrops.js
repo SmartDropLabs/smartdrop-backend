@@ -60,7 +60,7 @@ async function create(data) {
 
   const redis = cache.getClient();
   await cache.set(airdropKey(id), airdrop);
-  await redis.sadd(IDS_KEY, id);
+  await redis.zadd(IDS_KEY, Date.now(), id);
 
   if (recipients.length > 0) {
     await redis.lpush(recipientsKey(id), ...recipients.map((r) => JSON.stringify(r)));
@@ -70,11 +70,11 @@ async function create(data) {
 }
 
 /**
- * Pages through the full airdrop ID set via SSCAN instead of SMEMBERS. Used
+ * Pages through the full airdrop ID sorted set via ZSCAN instead of ZREVRANGE. Used
  * by the expiry reconciliation job (#88), which needs to visit every
- * airdrop every cycle: SMEMBERS returns the whole set in one blocking call
+ * airdrop every cycle: ZREVRANGE with 0 -1 returns the whole set in one call
  * and would need it all held in memory at once, which doesn't scale as the
- * set grows. SSCAN pages incrementally with a small, bounded cursor cost per
+ * set grows. ZSCAN pages incrementally with a small, bounded cursor cost per
  * call. `list()` above is unchanged — this is a separate, job-internal
  * scanning path, not a replacement for the paginated HTTP listing endpoint.
  */
@@ -82,8 +82,9 @@ async function* scanIds(batchSize = config.airdrops.expiryScanBatchSize) {
   const redis = cache.getClient();
   let cursor = '0';
   do {
-    const [nextCursor, batch] = await redis.sscan(IDS_KEY, cursor, 'COUNT', batchSize);
+    const [nextCursor, batchWithScores] = await redis.zscan(IDS_KEY, cursor, 'COUNT', batchSize);
     cursor = nextCursor;
+    const batch = batchWithScores.filter((_, index) => index % 2 === 0);
     if (batch.length > 0) {
       yield batch;
     }
@@ -134,10 +135,10 @@ async function markExpired(id, currentLedger) {
 
 async function list(page = 1, limit = 20) {
   const redis = cache.getClient();
-  const ids = await redis.smembers(IDS_KEY);
+  const total = await redis.zcard(IDS_KEY);
   const start = (page - 1) * limit;
-  const end = start + limit;
-  const paginatedIds = ids.slice(start, end);
+  const end = start + limit - 1;
+  const paginatedIds = await redis.zrevrange(IDS_KEY, start, end);
   const airdrops = await Promise.all(paginatedIds.map((id) => cache.get(airdropKey(id))));
 
   return {
@@ -145,8 +146,8 @@ async function list(page = 1, limit = 20) {
     pagination: {
       page,
       limit,
-      total: ids.length,
-      total_pages: Math.ceil(ids.length / limit),
+      total,
+      total_pages: Math.ceil(total / limit),
     },
   };
 }
@@ -179,7 +180,7 @@ async function remove(id) {
 
   await cache.del(airdropKey(id));
   await cache.del(recipientsKey(id));
-  await redis.srem(IDS_KEY, id);
+  await redis.zrem(IDS_KEY, id);
   return existing;
 }
 

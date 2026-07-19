@@ -38,7 +38,7 @@ async function getKey(id) {
 
 async function listKeys() {
   const redis = cache.getClient();
-  const ids = await redis.smembers(IDS_KEY);
+  const ids = await redis.zrevrange(IDS_KEY, 0, -1);
   const records = await Promise.all(ids.map((id) => getKey(id)));
   return records.filter(Boolean).map(sanitize);
 }
@@ -60,7 +60,7 @@ async function createKey({ label, scopes = ['default'] }) {
   const redis = cache.getClient();
   await cache.set(keyPath(record.id), record);
   await cache.set(hashPath(hashed), record.id);
-  await redis.sadd(IDS_KEY, record.id);
+  await redis.zadd(IDS_KEY, Date.now(), record.id);
 
   return {
     api_key: apiKey,
@@ -75,7 +75,7 @@ async function revokeKey(id) {
   const redis = cache.getClient();
   await cache.del(keyPath(id));
   await cache.del(hashPath(record.key_hash));
-  await redis.srem(IDS_KEY, id);
+  await redis.zrem(IDS_KEY, id);
   return sanitize(record);
 }
 

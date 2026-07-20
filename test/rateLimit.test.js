@@ -41,6 +41,8 @@ describe('rateLimit middleware', () => {
     const blocked = await request(app).get('/test');
     expect(blocked.status).toBe(429);
     expect(blocked.body.error).toMatchObject({ code: 'RATE_LIMITED' });
+    expect(blocked.body.error.details.retry_after_seconds).toBeGreaterThan(0);
+    expect(blocked.headers['retry-after']).toBeDefined();
   });
 
   test('throws when configured with invalid options', () => {

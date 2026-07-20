@@ -2,6 +2,7 @@
 
 const mockStore = new Map();
 const mockSets = new Map();
+const mockSortedSets = new Map();
 const mockLists = new Map();
 
 const mockRedis = {
@@ -12,6 +13,22 @@ const mockRedis = {
   }),
   srem: jest.fn(async (key, val) => {
     mockSets.get(key)?.delete(val);
+  }),
+  zadd: jest.fn(async (key, score, member) => {
+    if (!mockSortedSets.has(key)) mockSortedSets.set(key, new Map());
+    mockSortedSets.get(key).set(member, score);
+  }),
+  zrem: jest.fn(async (key, member) => {
+    mockSortedSets.get(key)?.delete(member);
+  }),
+  zcard: jest.fn(async (key) => mockSortedSets.get(key)?.size || 0),
+  zrevrange: jest.fn(async (key, start, stop) => {
+    const sortedSet = mockSortedSets.get(key);
+    if (!sortedSet) return [];
+    const entries = Array.from(sortedSet.entries()).sort((a, b) => b[1] - a[1]);
+    const startIdx = start === -1 ? entries.length + start : start;
+    const stopIdx = stop === -1 ? entries.length + stop : stop;
+    return entries.slice(startIdx, stopIdx + 1).map(([member]) => member);
   }),
   llen: jest.fn(async (key) => (mockLists.get(key) || []).length),
   lpush: jest.fn(async (key, ...vals) => {
@@ -24,7 +41,9 @@ const mockRedis = {
   }),
   lrange: jest.fn(async (key, start, end) => {
     const list = mockLists.get(key) || [];
-    return list.slice(start, end + 1);
+    const startIdx = start === -1 ? list.length + start : start;
+    const endIdx = end === -1 ? list.length + end : end;
+    return list.slice(startIdx, endIdx + 1);
   }),
 };
 
@@ -73,12 +92,14 @@ const cache = require('../src/services/cache');
 let app;
 
 beforeAll(() => {
-  app = require('../src/index');
+  const { app: importedApp } = require('../src/index');
+  app = importedApp;
 });
 
 beforeEach(() => {
   mockStore.clear();
   mockSets.clear();
+  mockSortedSets.clear();
   mockLists.clear();
   cache.get.mockClear();
   cache.set.mockClear();
@@ -86,6 +107,10 @@ beforeEach(() => {
   mockRedis.smembers.mockClear();
   mockRedis.sadd.mockClear();
   mockRedis.srem.mockClear();
+  mockRedis.zadd.mockClear();
+  mockRedis.zrem.mockClear();
+  mockRedis.zcard.mockClear();
+  mockRedis.zrevrange.mockClear();
   mockRedis.llen.mockClear();
   mockRedis.lpush.mockClear();
   mockRedis.rpush.mockClear();
@@ -105,16 +130,12 @@ describe('POST /api/v1/airdrops', () => {
         asset: 'USDC',
         asset_issuer: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA',
         total_amount: 100,
-        expiry_ledger: 123456,
+        expiry_ledger: 123456, // Greater than mockLedger.sequence (12345)
         recipients: [
           { address: validAddress1, amount: 50 },
           { address: validAddress2, amount: 50 },
         ],
       });
-    console.log('POST /airdrops response status:', response.status);
-    console.log('POST /airdrops response body:', response.body);
-    console.log('mockStore contents after POST:', Array.from(mockStore.entries()));
-    console.log('mockSets contents after POST:', Array.from(mockSets.entries()));
     expect(response.status).toBe(201);
     expect(response.body.id).toMatch(/^drop_/);
     expect(response.body.name).toBe('Test Airdrop');
@@ -152,10 +173,6 @@ describe('POST /api/v1/airdrops', () => {
 
 describe('GET /api/v1/airdrops', () => {
   test('lists airdrops with pagination', async () => {
-    console.log('=== Test: lists airdrops with pagination ===');
-    console.log('Before first POST: mockStore', Array.from(mockStore.entries()));
-    console.log('Before first POST: mockSets', Array.from(mockSets.entries()));
-
     const res1 = await request(app)
       .post('/api/v1/airdrops')
       .send({
@@ -165,11 +182,6 @@ describe('GET /api/v1/airdrops', () => {
         total_amount: 100,
         expiry_ledger: 123456,
       });
-    console.log('First POST res status:', res1.status);
-    console.log('First POST res body:', res1.body);
-
-    console.log('After first POST: mockStore', Array.from(mockStore.entries()));
-    console.log('After first POST: mockSets', Array.from(mockSets.entries()));
 
     const res2 = await request(app)
       .post('/api/v1/airdrops')
@@ -180,13 +192,8 @@ describe('GET /api/v1/airdrops', () => {
         total_amount: 200,
         expiry_ledger: 123457,
       });
-    console.log('Second POST res status:', res2.status);
-
-    console.log('After second POST: mockStore', Array.from(mockStore.entries()));
-    console.log('After second POST: mockSets', Array.from(mockSets.entries()));
 
     const response = await request(app).get('/api/v1/airdrops?page=1&limit=2');
-    console.log('GET /airdrops response body:', response.body);
     expect(response.status).toBe(200);
     expect(response.body.airdrops).toHaveLength(2);
     expect(response.body.pagination.total).toBe(2);

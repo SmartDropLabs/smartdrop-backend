@@ -23,7 +23,11 @@ const apiDocsRouter = require('./routes/apiDocs');
 const priceWebSocket = require('./ws/priceWebSocket');
 
 const app = express();
-let server;
+let server = {
+  close(callback) {
+    if (callback) callback();
+  },
+};
 
 app.use(requestIdMiddleware);
 app.use(helmet());
@@ -120,10 +124,4 @@ if (require.main === module) {
   process.on('SIGINT', shutdown('SIGINT'));
 }
 
-module.exports = app;
-module.exports.app = app;
-module.exports.server = server || {
-  close(callback) {
-    if (callback) callback();
-  },
-};
+module.exports = { app, server };

@@ -4,6 +4,7 @@ process.env.ADMIN_API_KEY = 'a'.repeat(64);
 
 const mockStore = new Map();
 const mockSets = new Map();
+const mockSortedSets = new Map();
 
 const mockRedis = {
   smembers: jest.fn(async (key) => [...(mockSets.get(key) || [])]),
@@ -13,6 +14,21 @@ const mockRedis = {
   }),
   srem: jest.fn(async (key, val) => {
     mockSets.get(key)?.delete(val);
+  }),
+  zadd: jest.fn(async (key, score, member) => {
+    if (!mockSortedSets.has(key)) mockSortedSets.set(key, new Map());
+    mockSortedSets.get(key).set(member, score);
+  }),
+  zrem: jest.fn(async (key, member) => {
+    mockSortedSets.get(key)?.delete(member);
+  }),
+  zrevrange: jest.fn(async (key, start, stop) => {
+    const sortedSet = mockSortedSets.get(key);
+    if (!sortedSet) return [];
+    const entries = Array.from(sortedSet.entries()).sort((a, b) => b[1] - a[1]);
+    const startIdx = start === -1 ? entries.length + start : start;
+    const stopIdx = stop === -1 ? entries.length + stop : stop;
+    return entries.slice(startIdx, stopIdx + 1).map(([member]) => member);
   }),
 };
 
@@ -66,12 +82,16 @@ function buildKeysApp() {
 beforeEach(() => {
   mockStore.clear();
   mockSets.clear();
+  mockSortedSets.clear();
   cache.get.mockClear();
   cache.set.mockClear();
   cache.del.mockClear();
   mockRedis.smembers.mockClear();
   mockRedis.sadd.mockClear();
   mockRedis.srem.mockClear();
+  mockRedis.zadd.mockClear();
+  mockRedis.zrem.mockClear();
+  mockRedis.zrevrange.mockClear();
 });
 
 describe('requireApiKey middleware', () => {

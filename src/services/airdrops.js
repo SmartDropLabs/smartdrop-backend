@@ -20,9 +20,25 @@ function generateId() {
 
 const horizon = new Horizon.Server(config.stellar.horizonUrl);
 
+// getCurrentLedger() is a live Horizon call. Callers that need to check many
+// airdrops in quick succession (the expiry reconciliation job, in
+// particular — see #88) would otherwise issue one Horizon request per
+// airdrop per cycle; cache the result briefly so bursts of calls within the
+// same window reuse one ledger read instead of hammering Horizon, the same
+// rate-limit concern already applied to CoinGecko/CoinMarketCap elsewhere.
+let cachedLedger = null;
+let cachedLedgerAt = 0;
+
 async function getCurrentLedger() {
+  const now = Date.now();
+  if (cachedLedger !== null && now - cachedLedgerAt < config.airdrops.ledgerCacheTtlMs) {
+    return cachedLedger;
+  }
+
   const ledger = await horizon.ledgers().order('desc').limit(1).call();
-  return ledger.records[0].sequence;
+  cachedLedger = ledger.records[0].sequence;
+  cachedLedgerAt = now;
+  return cachedLedger;
 }
 
 async function create(data) {
@@ -44,7 +60,7 @@ async function create(data) {
 
   const redis = cache.getClient();
   await cache.set(airdropKey(id), airdrop);
-  await redis.sadd(IDS_KEY, id);
+  await redis.zadd(IDS_KEY, Date.now(), id);
 
   if (recipients.length > 0) {
     await redis.lpush(recipientsKey(id), ...recipients.map((r) => JSON.stringify(r)));
@@ -53,12 +69,76 @@ async function create(data) {
   return airdrop;
 }
 
+/**
+ * Pages through the full airdrop ID sorted set via ZSCAN instead of ZREVRANGE. Used
+ * by the expiry reconciliation job (#88), which needs to visit every
+ * airdrop every cycle: ZREVRANGE with 0 -1 returns the whole set in one call
+ * and would need it all held in memory at once, which doesn't scale as the
+ * set grows. ZSCAN pages incrementally with a small, bounded cursor cost per
+ * call. `list()` above is unchanged — this is a separate, job-internal
+ * scanning path, not a replacement for the paginated HTTP listing endpoint.
+ */
+async function* scanIds(batchSize = config.airdrops.expiryScanBatchSize) {
+  const redis = cache.getClient();
+  let cursor = '0';
+  do {
+    const [nextCursor, batchWithScores] = await redis.zscan(IDS_KEY, cursor, 'COUNT', batchSize);
+    cursor = nextCursor;
+    const batch = batchWithScores.filter((_, index) => index % 2 === 0);
+    if (batch.length > 0) {
+      yield batch;
+    }
+  } while (cursor !== '0');
+}
+
+// Statuses an airdrop cannot leave once reached.
+const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'expired']);
+
+/**
+ * Atomically transitions an airdrop to 'expired' if — and only if — it's
+ * still in a non-terminal status *and* its expiry_ledger has actually
+ * passed, checked and written in a single Lua script so two processes (or
+ * two overlapping job cycles) racing on the same airdrop can't both "win"
+ * and each fire a duplicate webhook. Returns the updated airdrop on a
+ * successful transition, or null if nothing changed (already terminal, not
+ * yet expired, or the airdrop doesn't exist) — callers use that to decide
+ * whether to dispatch a webhook.
+ */
+const MARK_EXPIRED_SCRIPT = `
+local raw = redis.call('GET', KEYS[1])
+if not raw then return false end
+local airdrop = cjson.decode(raw)
+local terminal = { completed = true, failed = true, cancelled = true, expired = true }
+if terminal[airdrop.status] then return false end
+if not airdrop.expiry_ledger or tonumber(airdrop.expiry_ledger) > tonumber(ARGV[1]) then
+  return false
+end
+airdrop.status = 'expired'
+airdrop.updated_at = ARGV[2]
+local updated = cjson.encode(airdrop)
+redis.call('SET', KEYS[1], updated)
+return updated
+`;
+
+async function markExpired(id, currentLedger) {
+  const redis = cache.getClient();
+  const result = await redis.eval(
+    MARK_EXPIRED_SCRIPT,
+    1,
+    airdropKey(id),
+    currentLedger,
+    new Date().toISOString(),
+  );
+  if (!result) return null;
+  return JSON.parse(result);
+}
+
 async function list(page = 1, limit = 20) {
   const redis = cache.getClient();
-  const ids = await redis.smembers(IDS_KEY);
+  const total = await redis.zcard(IDS_KEY);
   const start = (page - 1) * limit;
-  const end = start + limit;
-  const paginatedIds = ids.slice(start, end);
+  const end = start + limit - 1;
+  const paginatedIds = await redis.zrevrange(IDS_KEY, start, end);
   const airdrops = await Promise.all(paginatedIds.map((id) => cache.get(airdropKey(id))));
 
   return {
@@ -66,8 +146,8 @@ async function list(page = 1, limit = 20) {
     pagination: {
       page,
       limit,
-      total: ids.length,
-      total_pages: Math.ceil(ids.length / limit),
+      total,
+      total_pages: Math.ceil(total / limit),
     },
   };
 }
@@ -100,7 +180,7 @@ async function remove(id) {
 
   await cache.del(airdropKey(id));
   await cache.del(recipientsKey(id));
-  await redis.srem(IDS_KEY, id);
+  await redis.zrem(IDS_KEY, id);
   return existing;
 }
 
@@ -156,4 +236,7 @@ module.exports = {
   addRecipients,
   listRecipients,
   getCurrentLedger,
+  scanIds,
+  markExpired,
+  TERMINAL_STATUSES,
 };

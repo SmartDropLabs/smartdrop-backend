@@ -2,7 +2,34 @@
 
 const mockStore = new Map();
 const mockSets = new Map();
+const mockZSets = new Map();
 const mockLists = new Map();
+
+// Faithfully mirrors MARK_EXPIRED_SCRIPT's condition/write logic in JS,
+// since jest can't execute real Lua against a live Redis in this test
+// environment. Operates on the same `mockStore` cache.get/set already use
+// (real Redis: both the Lua script and cache.get/set ultimately read/write
+// the one physical `airdrop:<id>` key) — kept as a literal translation of
+// the script's checks, not a "smarter" reimplementation, to minimize the
+// risk of this mock silently diverging from what the real script does.
+const TERMINAL_STATUSES_FOR_MOCK = new Set(['completed', 'failed', 'cancelled', 'expired']);
+function mockMarkExpiredEval(store, key, currentLedger, nowIso) {
+  const airdrop = store.get(key);
+  if (airdrop === undefined) return null;
+  if (TERMINAL_STATUSES_FOR_MOCK.has(airdrop.status)) return null;
+  if (!airdrop.expiry_ledger || Number(airdrop.expiry_ledger) > Number(currentLedger)) return null;
+  const updated = { ...airdrop, status: 'expired', updated_at: nowIso };
+  store.set(key, updated);
+  return JSON.stringify(updated);
+}
+
+function getSortedZSetMembers(key) {
+  const z = mockZSets.get(key);
+  if (!z) return [];
+  return [...z.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([member]) => member);
+}
 
 const mockRedis = {
   smembers: jest.fn(async (key) => [...(mockSets.get(key) || [])]),
@@ -12,6 +39,41 @@ const mockRedis = {
   }),
   srem: jest.fn(async (key, val) => {
     mockSets.get(key)?.delete(val);
+  }),
+  // Paginated cursor mock: indexes into the set's insertion order, returning
+  // up to `count` members per call and a numeric cursor (as a string, like
+  // real Redis) until exhausted, at which point it returns cursor '0'.
+  sscan: jest.fn(async (key, cursor, _countKeyword, count) => {
+    const members = [...(mockSets.get(key) || [])];
+    const start = Number(cursor);
+    const batch = members.slice(start, start + count);
+    const nextCursor = start + count >= members.length ? '0' : String(start + count);
+    return [nextCursor, batch];
+  }),
+  zadd: jest.fn(async (key, score, member) => {
+    if (!mockZSets.has(key)) mockZSets.set(key, new Map());
+    mockZSets.get(key).set(member, Number(score));
+  }),
+  zrem: jest.fn(async (key, ...members) => {
+    const z = mockZSets.get(key);
+    if (!z) return;
+    for (const m of members) z.delete(m);
+  }),
+  zrevrange: jest.fn(async (key, start, stop) => {
+    const sorted = getSortedZSetMembers(key);
+    const end = stop === -1 ? sorted.length : stop + 1;
+    return sorted.slice(start, end);
+  }),
+  zcard: jest.fn(async (key) => (mockZSets.get(key)?.size || 0)),
+  zscan: jest.fn(async (key, cursor, _countKeyword, count) => {
+    const entries = [...(mockZSets.get(key)?.entries() || [])];
+    const batchWithScores = [];
+    const start = Number(cursor);
+    for (let i = start; i < start + count && i < entries.length; i++) {
+      batchWithScores.push(entries[i][0], entries[i][1]);
+    }
+    const nextCursor = start + count >= entries.length ? '0' : String(start + count);
+    return [nextCursor, batchWithScores];
   }),
   llen: jest.fn(async (key) => (mockLists.get(key) || []).length),
   lpush: jest.fn(async (key, ...vals) => {
@@ -26,6 +88,12 @@ const mockRedis = {
     const list = mockLists.get(key) || [];
     return list.slice(start, end + 1);
   }),
+  // Only understands MARK_EXPIRED_SCRIPT's exact call shape
+  // (eval(script, 1, key, currentLedger, nowIso)) — sufficient since
+  // markExpired() is the only caller of redis.eval in this codebase.
+  eval: jest.fn(async (_script, _numKeys, key, currentLedger, nowIso) =>
+    mockMarkExpiredEval(mockStore, key, currentLedger, nowIso)
+  ),
 };
 
 jest.mock('../src/services/cache', () => ({
@@ -51,13 +119,14 @@ jest.mock('../src/logger', () => ({
 }));
 
 const mockLedger = { sequence: 12345 };
+const mockHorizonCall = jest.fn(async () => ({ records: [mockLedger] }));
 jest.mock('stellar-sdk', () => ({
   Horizon: {
     Server: jest.fn(() => ({
       ledgers: jest.fn(() => ({
         order: jest.fn(() => ({
           limit: jest.fn(() => ({
-            call: jest.fn(async () => ({ records: [mockLedger] })),
+            call: mockHorizonCall,
           })),
         })),
       })),
@@ -73,6 +142,7 @@ const airdropsService = require('../src/services/airdrops');
 beforeEach(() => {
   mockStore.clear();
   mockSets.clear();
+  mockZSets.clear();
   mockLists.clear();
 });
 
@@ -95,5 +165,133 @@ describe('airdrops service', () => {
 
     expect(fetched).not.toBeNull();
     expect(fetched.id).toBe(airdrop.id);
+  });
+
+  describe('getCurrentLedger caching (#88)', () => {
+    beforeEach(() => {
+      mockHorizonCall.mockClear();
+      jest.useFakeTimers();
+      jest.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    test('reuses the cached ledger within the TTL instead of calling Horizon again', async () => {
+      jest.resetModules();
+      const freshService = require('../src/services/airdrops');
+
+      const first = await freshService.getCurrentLedger();
+      const second = await freshService.getCurrentLedger();
+
+      expect(first).toBe(12345);
+      expect(second).toBe(12345);
+      expect(mockHorizonCall).toHaveBeenCalledTimes(1);
+    });
+
+    test('calls Horizon again once the cache TTL has elapsed', async () => {
+      jest.resetModules();
+      const freshService = require('../src/services/airdrops');
+
+      await freshService.getCurrentLedger();
+      jest.advanceTimersByTime(5001);
+      await freshService.getCurrentLedger();
+
+      expect(mockHorizonCall).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  describe('scanIds (#88)', () => {
+    test('pages through every ID in the set across multiple SSCAN batches', async () => {
+      for (let i = 0; i < 5; i++) {
+        await airdropsService.create({
+          name: `Airdrop ${i}`,
+          asset: 'USDC',
+          asset_issuer: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA',
+          total_amount: 100,
+          expiry_ledger: 123456,
+        });
+      }
+
+      const seen = [];
+      for await (const batch of airdropsService.scanIds(2)) {
+        seen.push(...batch);
+      }
+
+      expect(seen).toHaveLength(5);
+      expect(new Set(seen).size).toBe(5);
+      // Confirms it actually paged (more than one SSCAN call for 5 items at
+      // batch size 2), not just a single SMEMBERS-style dump.
+      expect(mockRedis.sscan.mock.calls.length).toBeGreaterThan(1);
+    });
+
+    test('yields nothing for an empty airdrop set', async () => {
+      const seen = [];
+      for await (const batch of airdropsService.scanIds(2)) {
+        seen.push(...batch);
+      }
+      expect(seen).toHaveLength(0);
+    });
+  });
+
+  describe('markExpired (#88)', () => {
+    async function createAirdrop(overrides = {}) {
+      return airdropsService.create({
+        name: 'Test',
+        asset: 'USDC',
+        asset_issuer: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA',
+        total_amount: 100,
+        expiry_ledger: 100,
+        ...overrides,
+      });
+    }
+
+    test('transitions a draft airdrop past its expiry_ledger to expired', async () => {
+      const airdrop = await createAirdrop({ expiry_ledger: 100 });
+
+      const updated = await airdropsService.markExpired(airdrop.id, 150);
+
+      expect(updated).not.toBeNull();
+      expect(updated.status).toBe('expired');
+      const stored = await airdropsService.get(airdrop.id);
+      expect(stored.status).toBe('expired');
+    });
+
+    test('is a no-op for an airdrop not yet past its expiry_ledger', async () => {
+      const airdrop = await createAirdrop({ expiry_ledger: 200 });
+
+      const updated = await airdropsService.markExpired(airdrop.id, 150);
+
+      expect(updated).toBeNull();
+      const stored = await airdropsService.get(airdrop.id);
+      expect(stored.status).toBe('draft');
+    });
+
+    test('is idempotent: a second call against an already-expired airdrop no-ops', async () => {
+      const airdrop = await createAirdrop({ expiry_ledger: 100 });
+
+      const firstCall = await airdropsService.markExpired(airdrop.id, 150);
+      const secondCall = await airdropsService.markExpired(airdrop.id, 150);
+
+      expect(firstCall).not.toBeNull();
+      expect(secondCall).toBeNull();
+    });
+
+    test('does not transition an airdrop already in a terminal status', async () => {
+      const airdrop = await createAirdrop({ expiry_ledger: 100 });
+      await airdropsService.cancel(airdrop.id);
+
+      const updated = await airdropsService.markExpired(airdrop.id, 150);
+
+      expect(updated).toBeNull();
+      const stored = await airdropsService.get(airdrop.id);
+      expect(stored.status).toBe('cancelled');
+    });
+
+    test('returns null for a nonexistent airdrop id', async () => {
+      const updated = await airdropsService.markExpired('drop_does_not_exist', 150);
+      expect(updated).toBeNull();
+    });
   });
 });

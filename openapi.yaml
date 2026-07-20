@@ -460,6 +460,23 @@ components:
         redis_unavailable:
           type: boolean
           description: Inverse of redis_connected (for legacy monitoring)
+        price_source_circuits:
+          type: array
+          description: Circuit-breaker state for each price source with a nonRetryable failure mode (e.g. an invalid API key)
+          items:
+            type: object
+            properties:
+              source:
+                type: string
+                description: Price source name (e.g. coingecko, coinmarketcap)
+              open:
+                type: boolean
+                description: Whether this source is currently circuit-broken and being skipped
+              openUntil:
+                type: string
+                format: date-time
+                nullable: true
+                description: When the circuit will next allow a retry, or null if closed
       required:
         - status
         - timestamp

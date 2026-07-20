@@ -39,7 +39,7 @@ Registers subscriber endpoints for SmartDrop lifecycle events and delivers signe
 - `airdrop.created`
 - `airdrop.executing`
 - `airdrop.completed`
-- `airdrop.failed`
+- `airdrop.failed` — fired automatically when an airdrop expires (see below), in addition to any other failure path
 - `recipient.claimed`
 
 **Features:**
@@ -48,6 +48,28 @@ Registers subscriber endpoints for SmartDrop lifecycle events and delivers signe
 - At-least-once delivery attempts with exponential backoff
 - Delivery logs with response code, error, duration, and attempt count
 - Dead-letter storage after retry exhaustion
+
+### Airdrop Expiry Reconciliation
+
+Airdrops carry an `expiry_ledger`, validated as being in the future only at
+creation/update time. A background job (`src/jobs/airdropExpiry.js`, same
+`start()`/`stop()` pattern as the price-refresh and webhook-retry jobs)
+periodically re-checks that condition against the live network:
+
+- Every `AIRDROP_EXPIRY_CHECK_INTERVAL_SECONDS` (default 60s), fetches the
+  current Horizon ledger sequence and scans every airdrop still in a
+  non-terminal status (`draft`, `executing`).
+- Any airdrop whose `expiry_ledger` has passed is atomically transitioned to
+  `expired` and fires an `airdrop.failed` webhook event (`data.reason:
+  "expired"`) to every subscriber registered for it — no client action
+  required.
+- The transition is idempotent: re-running the check against an
+  already-expired airdrop is a guaranteed no-op, so the webhook fires
+  exactly once per airdrop even if the job runs again before anything else
+  changes its status.
+- If Horizon is temporarily unreachable, the job logs a warning and skips
+  that cycle rather than crashing — airdrops are simply re-checked on the
+  next tick.
 
 ---
 
@@ -134,6 +156,10 @@ The application reads configurations from the `.env` file at the root.
 | `PRICE_STALE_THRESHOLD_MINUTES` | Stale threshold in minutes | 5 | No |
 | `PRICE_ANOMALY_THRESHOLD_PCT` | Anomaly detection threshold % | 20 | No |
 | `ADMIN_API_KEY` | Bootstrap admin bearer token for API key management | empty | Yes, for protected endpoints |
+| `AIRDROP_CSV_MAX_BYTES` | Maximum recipient CSV upload size in bytes | 5242880 (5 MiB) | No |
+| `AIRDROP_JSON_MAX_BYTES` | Maximum JSON request body size; 2 MiB accommodates 10,000 inline recipients | 2097152 (2 MiB) | No |
+| `AIRDROP_RATELIMIT_WINDOW` | Per-IP airdrop mutation rate-limit window in seconds | 60 | No |
+| `AIRDROP_RATELIMIT_MAX` | Maximum create or recipient-add requests per window and IP | 10 | No |
 | `LOG_LEVEL` | Logging level: `debug`, `info`, `warn`, or `error` | info | No |
 
 
@@ -177,6 +203,8 @@ Requires `Authorization: Bearer <api_key>`.
 
 Protected endpoints use `Authorization: Bearer <api_key>`. Set `ADMIN_API_KEY` to a 32-byte hex token for bootstrap access, then create scoped API keys with the key-management endpoints.
 
+The bootstrap admin key is compared using constant-time checks over fixed-length SHA-256 digests so invalid guesses cannot short-circuit on matching prefixes or raw string length.
+
 ```
 GET /api/v1/keys
 POST /api/v1/keys
@@ -201,17 +229,66 @@ GET    /api/v1/webhooks/:id/deliveries
 
 ```
 GET /health
-
 ```
 
-**Response:**
+Returns the overall health of the service and its dependencies.
+
+**Response fields:**
+
+| Field | Description |
+|-------|-------------|
+| `status` | Overall health: `ok`, `degraded`, or `unhealthy` |
+| `timestamp` | ISO-8601 time of the response |
+| `redis.connected` | `true` when the Redis client is connected |
+| `jobs.price_refresh` | Health of the background price-refresh cron job |
+| `jobs.webhook_retry_worker` | Health of the webhook retry worker |
+| `database` | Reports `configured: true, checked: false, status: "unused"` — no active DB health probe |
+| `price_source_circuits` | Per-source circuit-breaker state (open/closed) |
+
+**Health states:**
+
+| State | Meaning |
+|-------|---------|
+| `ok` | Redis connected; all jobs running normally |
+| `degraded` | A job has not yet completed its first tick (startup grace period) |
+| `unhealthy` | Redis is disconnected, or a job has stalled past its grace period |
+
+**Job health fields** (`jobs.price_refresh` / `jobs.webhook_retry_worker`):
+
+| Field | Description |
+|-------|-------------|
+| `healthy` | `true` while the job is running within its expected interval |
+| `last_success_at` | ISO-8601 timestamp of the last successful tick, or `null` |
+| `last_error` | Error message from the last failed tick, or `null` |
+| `stalled` | `true` when no successful tick has occurred within 2× the job interval |
+
+**Example response:**
 
 ```json
 {
   "status": "ok",
-  "timestamp": "2024-01-15T10:30:00.000Z"
+  "timestamp": "2024-01-15T10:30:00.000Z",
+  "redis": { "connected": true },
+  "jobs": {
+    "price_refresh": {
+      "healthy": true,
+      "last_success_at": "2024-01-15T10:29:55.000Z",
+      "last_error": null,
+      "stalled": false
+    },
+    "webhook_retry_worker": {
+      "healthy": true,
+      "last_success_at": "2024-01-15T10:29:58.000Z",
+      "last_error": null,
+      "stalled": false
+    }
+  },
+  "database": { "configured": true, "checked": false, "status": "unused" },
+  "price_source_circuits": [
+    { "source": "coingecko", "open": false, "openUntil": null },
+    { "source": "coinmarketcap", "open": false, "openUntil": null }
+  ]
 }
-
 ```
 
 ---

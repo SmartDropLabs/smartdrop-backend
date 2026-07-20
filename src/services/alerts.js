@@ -51,23 +51,22 @@ async function create(data) {
 
   const redis = cache.getClient();
   await cache.set(alertKey(id), alert);
-  await redis.sadd(IDS_KEY, id);
+  await redis.zadd(IDS_KEY, Date.now(), id);
 
   return alert;
 }
 
 async function list() {
   const redis = cache.getClient();
-  const ids = await redis.smembers(IDS_KEY);
+  const ids = await redis.zrevrange(IDS_KEY, 0, -1);
   const alerts = await Promise.all(ids.map((id) => cache.get(alertKey(id))));
   return alerts.filter(Boolean);
 }
 
 async function listPaginated({ offset = 0, limit = 20 } = {}) {
   const redis = cache.getClient();
-  const ids = await redis.smembers(IDS_KEY);
-  const total = ids.length;
-  const paginatedIds = ids.slice(offset, offset + limit);
+  const total = await redis.zcard(IDS_KEY);
+  const paginatedIds = await redis.zrevrange(IDS_KEY, offset, offset + limit - 1);
   const alerts = await Promise.all(
     paginatedIds.map((id) => cache.get(alertKey(id)))
   );
@@ -82,7 +81,7 @@ async function remove(id) {
   const existing = await cache.get(alertKey(id));
   if (!existing) return null;
   await cache.del(alertKey(id));
-  await redis.srem(IDS_KEY, id);
+  await redis.zrem(IDS_KEY, id);
   return existing;
 }
 
@@ -103,7 +102,7 @@ async function fire(alert, priceUsd) {
 
 async function evaluateForAsset(asset, priceUsd) {
   const redis = cache.getClient();
-  const ids = await redis.smembers(IDS_KEY);
+  const ids = await redis.zrevrange(IDS_KEY, 0, -1);
 
   for (const id of ids) {
     const alert = await cache.get(alertKey(id));

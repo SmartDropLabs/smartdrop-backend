@@ -2,11 +2,35 @@
 
 const mockStore = new Map();
 const mockSets = new Map();
+const mockZSets = new Map();
+
+function getSortedZSetMembers(key) {
+  const z = mockZSets.get(key);
+  if (!z) return [];
+  return [...z.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([member]) => member);
+}
 
 const mockRedis = {
   smembers: jest.fn(async (key) => [...(mockSets.get(key) || [])]),
   sadd: jest.fn(async (key, val) => { if (!mockSets.has(key)) mockSets.set(key, new Set()); mockSets.get(key).add(val); }),
   srem: jest.fn(async (key, val) => { mockSets.get(key)?.delete(val); }),
+  zadd: jest.fn(async (key, score, member) => {
+    if (!mockZSets.has(key)) mockZSets.set(key, new Map());
+    mockZSets.get(key).set(member, Number(score));
+  }),
+  zrem: jest.fn(async (key, ...members) => {
+    const z = mockZSets.get(key);
+    if (!z) return;
+    for (const m of members) z.delete(m);
+  }),
+  zrevrange: jest.fn(async (key, start, stop) => {
+    const sorted = getSortedZSetMembers(key);
+    const end = stop === -1 ? sorted.length : stop + 1;
+    return sorted.slice(start, end);
+  }),
+  zcard: jest.fn(async (key) => (mockZSets.get(key)?.size || 0)),
 };
 
 jest.mock('../src/services/cache', () => ({
@@ -35,6 +59,7 @@ const cache = require('../src/services/cache');
 beforeEach(() => {
   mockStore.clear();
   mockSets.clear();
+  mockZSets.clear();
   mockWebhookDeliver.mockClear();
   cache.get.mockClear();
   cache.set.mockClear();

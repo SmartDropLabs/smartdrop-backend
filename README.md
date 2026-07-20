@@ -199,6 +199,8 @@ Requires `Authorization: Bearer <api_key>`.
 
 Protected endpoints use `Authorization: Bearer <api_key>`. Set `ADMIN_API_KEY` to a 32-byte hex token for bootstrap access, then create scoped API keys with the key-management endpoints.
 
+The bootstrap admin key is compared using constant-time checks over fixed-length SHA-256 digests so invalid guesses cannot short-circuit on matching prefixes or raw string length.
+
 ```
 GET /api/v1/keys
 POST /api/v1/keys

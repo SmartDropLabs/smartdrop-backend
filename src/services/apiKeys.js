@@ -10,6 +10,12 @@ function hashApiKey(apiKey) {
   return crypto.createHash('sha256').update(apiKey).digest('hex');
 }
 
+function constantTimeSecretEqual(actual, expected) {
+  const actualDigest = crypto.createHash('sha256').update(actual).digest();
+  const expectedDigest = crypto.createHash('sha256').update(expected).digest();
+  return crypto.timingSafeEqual(actualDigest, expectedDigest);
+}
+
 function sanitize(record) {
   if (!record) return null;
   const { key_hash, ...safe } = record;
@@ -91,7 +97,7 @@ async function touch(record) {
 async function validateApiKey(apiKey) {
   if (!apiKey) return null;
 
-  if (config.auth.adminApiKey && apiKey === config.auth.adminApiKey) {
+  if (config.auth.adminApiKey && constantTimeSecretEqual(apiKey, config.auth.adminApiKey)) {
     return {
       id: 'admin',
       label: 'Bootstrap admin key',

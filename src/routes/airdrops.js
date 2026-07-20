@@ -2,13 +2,46 @@ const express = require('express');
 const multer = require('multer');
 const csv = require('csv-parser');
 const { Readable } = require('stream');
+const { pipeline } = require('stream/promises');
+const config = require('../config');
 const airdropsService = require('../services/airdrops');
 const logger = require('../logger');
 const AppError = require('../errors/AppError');
+const buildRateLimit = require('../middleware/rateLimit');
 const { StrKey } = require('stellar-sdk');
 
 const router = express.Router();
-const upload = multer();
+const CSV_PARSE_CHUNK_BYTES = 64 * 1024;
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: config.airdrops.csvMaxBytes },
+});
+
+const createAirdropLimit = buildRateLimit({
+  windowSeconds: config.airdrops.rateLimit.windowSeconds,
+  max: config.airdrops.rateLimit.max,
+  keyPrefix: 'airdrops_create',
+});
+
+const addRecipientsLimit = buildRateLimit({
+  windowSeconds: config.airdrops.rateLimit.windowSeconds,
+  max: config.airdrops.rateLimit.max,
+  keyPrefix: 'airdrops_recipients',
+});
+
+function uploadRecipientsFile(req, res, next) {
+  upload.single('file')(req, res, (err) => {
+    if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
+      return next(new AppError(
+        'PAYLOAD_TOO_LARGE',
+        `CSV file cannot exceed ${config.airdrops.csvMaxBytes} bytes`,
+        413,
+        { max_bytes: config.airdrops.csvMaxBytes }
+      ));
+    }
+    return next(err);
+  });
+}
 
 function isValidStellarAddress(address) {
   try {
@@ -36,7 +69,7 @@ function validateAirdropCreate(body, currentLedger) {
   if (typeof expiry_ledger !== 'number' || expiry_ledger <= currentLedger) {
     return `expiry_ledger is required and must be greater than current ledger (${currentLedger})`;
   }
-  if (recipients.length > 10000) {
+  if (recipients.length > config.airdrops.maxRecipients) {
     return 'recipients cannot exceed 10,000';
   }
 
@@ -73,24 +106,33 @@ function validateAirdropUpdate(body, currentLedger) {
 }
 
 async function parseCSV(buffer) {
-  return new Promise((resolve, reject) => {
-    const results = [];
-    const stream = Readable.from(buffer);
-    stream
-      .pipe(csv())
-      .on('data', (data) => {
-        const address = data.address || data.Address || data.ADDRESS;
-        const amount = parseFloat(data.amount || data.Amount || data.AMOUNT);
-        if (address && !isNaN(amount)) {
-          results.push({ address, amount });
-        }
-      })
-      .on('end', () => resolve(results))
-      .on('error', reject);
+  const results = [];
+  let rowCount = 0;
+  const chunks = (function* chunkBuffer() {
+    for (let offset = 0; offset < buffer.length; offset += CSV_PARSE_CHUNK_BYTES) {
+      yield buffer.subarray(offset, offset + CSV_PARSE_CHUNK_BYTES);
+    }
+  }());
+
+  await pipeline(Readable.from(chunks), csv(), async (rows) => {
+    for await (const data of rows) {
+      rowCount += 1;
+      if (rowCount > config.airdrops.maxRecipients) {
+        throw new AppError('VALIDATION_ERROR', 'recipients cannot exceed 10,000', 400);
+      }
+
+      const address = data.address || data.Address || data.ADDRESS;
+      const amount = parseFloat(data.amount || data.Amount || data.AMOUNT);
+      if (address && !Number.isNaN(amount)) {
+        results.push({ address, amount });
+      }
+    }
   });
+
+  return results;
 }
 
-router.post('/airdrops', async (req, res, next) => {
+router.post('/airdrops', createAirdropLimit, async (req, res, next) => {
   try {
     const currentLedger = await airdropsService.getCurrentLedger();
     const validationError = validateAirdropCreate(req.body, currentLedger);
@@ -176,7 +218,7 @@ router.post('/airdrops/:id/cancel', async (req, res, next) => {
   }
 });
 
-router.post('/airdrops/:id/recipients', upload.single('file'), async (req, res, next) => {
+router.post('/airdrops/:id/recipients', addRecipientsLimit, uploadRecipientsFile, async (req, res, next) => {
   try {
     const airdrop = await airdropsService.get(req.params.id);
     if (!airdrop) {
@@ -192,7 +234,7 @@ router.post('/airdrops/:id/recipients', upload.single('file'), async (req, res, 
       return next(new AppError('VALIDATION_ERROR', 'recipients or file is required', 400));
     }
 
-    if (recipients.length > 10000) {
+    if (recipients.length > config.airdrops.maxRecipients) {
       return next(new AppError('VALIDATION_ERROR', 'recipients cannot exceed 10,000', 400));
     }
 

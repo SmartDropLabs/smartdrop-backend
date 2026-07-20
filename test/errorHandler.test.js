@@ -29,6 +29,7 @@ describe('structured error responses', () => {
     ['VALIDATION_ERROR', 400],
     ['UNAUTHORIZED', 401],
     ['NOT_FOUND', 404],
+    ['PAYLOAD_TOO_LARGE', 413],
     ['UPSTREAM_ERROR', 502],
     ['INTERNAL_ERROR', 500],
   ])('returns standard shape for %s', async (code, status) => {
@@ -65,6 +66,23 @@ describe('structured error responses', () => {
     });
     expect(JSON.stringify(res.body)).not.toContain('secret stack details');
     expect(JSON.stringify(res.body)).not.toContain('stack');
+  });
+
+  test('returns a structured 413 when the JSON body limit is exceeded', async () => {
+    const app = express();
+    app.use(requestIdMiddleware);
+    app.use(express.json({ limit: 10 }));
+    app.post('/payload', (_req, res) => res.json({ ok: true }));
+    app.use(errorHandler);
+
+    const res = await request(app).post('/payload').send({ value: 'too large' });
+
+    expect(res.status).toBe(413);
+    expect(res.body.error).toEqual({
+      code: 'PAYLOAD_TOO_LARGE',
+      message: 'Request body is too large',
+      request_id: expect.stringMatching(/^req_/),
+    });
   });
 
   test('adds request_id to success responses', async () => {

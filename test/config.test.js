@@ -72,6 +72,9 @@ describe('configuration validation', () => {
         anomalyThresholdPercent: 20,
       },
       airdrops: {
+        expiryCheckIntervalSeconds: 60,
+        ledgerCacheTtlMs: 5000,
+        expiryScanBatchSize: 100,
         csvMaxBytes: 5 * 1024 * 1024,
         jsonMaxBytes: 2 * 1024 * 1024,
         maxRecipients: 10000,

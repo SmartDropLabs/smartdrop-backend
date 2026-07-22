@@ -22,6 +22,15 @@
  * Indexes that would back the queries below:
  *   (webhook_id, created_at desc)   - listing recent deliveries per webhook
  *   (next_retry_at)                 - retry worker scan
+ *
+ * Atomicity: `popDueRetries` claims due retries from the `webhooks:retries`
+ * sorted set via a single Lua script (ZRANGEBYSCORE + ZREM in one round
+ * trip), registered on the ioredis client with `defineCommand`. Redis
+ * executes Lua scripts single-threaded to completion, so N instances of
+ * this backend calling `popDueRetries` concurrently against the same Redis
+ * always receive a disjoint set of ids - no delivery is ever claimed by
+ * more than one instance. This makes `webhookRetryWorker` safe to run on
+ * multiple replicas without duplicate delivery attempts.
  */
 
 const crypto = require('crypto');
@@ -29,6 +38,23 @@ const cache = require('../services/cache');
 
 const RETRY_QUEUE_KEY = 'webhooks:retries';
 const RECENT_DELIVERIES_LIMIT = 100;
+
+// Atomically claims up to ARGV[2] due members (score <= ARGV[1]) from the
+// sorted set at KEYS[1] and removes them in the same round trip, so
+// concurrent callers can never be handed overlapping ids.
+const POP_DUE_RETRIES_LUA = `
+local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, ARGV[2])
+if #ids > 0 then
+  redis.call('ZREM', KEYS[1], unpack(ids))
+end
+return ids
+`;
+
+function ensurePopDueRetriesCommand(redis) {
+  if (typeof redis.popDueRetriesAtomic !== 'function') {
+    redis.defineCommand('popDueRetriesAtomic', { numberOfKeys: 1, lua: POP_DUE_RETRIES_LUA });
+  }
+}
 
 function key(id) {
   return `webhook_delivery:${id}`;
@@ -92,10 +118,8 @@ async function scheduleRetry(deliveryId, nextRetryAtMs) {
 
 async function popDueRetries(nowMs, max = 25) {
   const redis = cache.getClient();
-  const ids = await redis.zrangebyscore(RETRY_QUEUE_KEY, '-inf', nowMs, 'LIMIT', 0, max);
-  if (ids.length === 0) return [];
-  await redis.zrem(RETRY_QUEUE_KEY, ...ids);
-  return ids;
+  ensurePopDueRetriesCommand(redis);
+  return redis.popDueRetriesAtomic(RETRY_QUEUE_KEY, nowMs, max);
 }
 
 async function cancelRetry(deliveryId) {

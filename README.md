@@ -437,6 +437,7 @@ Express tip: capture the raw body via `express.json({ verify: (req, _res, buf) =
 - **Retryable**: network errors, HTTP 5xx, 408, 429.
 - **Not retried**: HTTP 4xx (except 408/429). These are marked `failed` immediately so a misconfigured consumer cannot be retried into the ground.
 - Each delivery is logged in `webhook_deliveries` (Redis-backed today, drop-in PG migration documented in `src/repositories/deliveryRepository.js`).
+- **Safe for multiple replicas**: `webhookRetryWorker` claims due retries via `deliveryRepository.popDueRetries`, which uses a single atomic Redis Lua script (`ZRANGEBYSCORE` + `ZREM` in one round trip) rather than two separate calls. Running N instances of this backend against the same Redis is safe - each due retry is claimed by exactly one instance, so a delivery is never dispatched twice for the same retry. The worker's in-process `running` flag only guards against a single process overlapping with itself; cross-replica safety comes from the atomic claim, not from that flag.
 
 ### Storage model
 

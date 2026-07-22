@@ -2,6 +2,7 @@
 
 const mockStore = new Map();
 const mockSets = new Map();
+const mockZSets = new Map();
 const mockLists = new Map();
 const mockCounters = new Map();
 
@@ -13,6 +14,33 @@ const mockRedis = {
   }),
   srem: jest.fn(async (key, val) => {
     mockSets.get(key)?.delete(val);
+  }),
+  zadd: jest.fn(async (key, score, member) => {
+    if (!mockZSets.has(key)) mockZSets.set(key, new Map());
+    mockZSets.get(key).set(member, Number(score));
+  }),
+  zrem: jest.fn(async (key, ...members) => {
+    const z = mockZSets.get(key);
+    if (!z) return;
+    for (const m of members) z.delete(m);
+  }),
+  zrevrange: jest.fn(async (key, start, stop) => {
+    const z = mockZSets.get(key);
+    if (!z) return [];
+    const sorted = [...z.entries()].sort((a, b) => b[1] - a[1]).map(([m]) => m);
+    const end = stop === -1 ? sorted.length : stop + 1;
+    return sorted.slice(start, end);
+  }),
+  zcard: jest.fn(async (key) => (mockZSets.get(key)?.size || 0)),
+  zscan: jest.fn(async (key, cursor, _countKeyword, count) => {
+    const entries = [...(mockZSets.get(key)?.entries() || [])];
+    const batchWithScores = [];
+    const start = Number(cursor);
+    for (let i = start; i < start + count && i < entries.length; i += 1) {
+      batchWithScores.push(entries[i][0], entries[i][1]);
+    }
+    const nextCursor = start + count >= entries.length ? '0' : String(start + count);
+    return [nextCursor, batchWithScores];
   }),
   llen: jest.fn(async (key) => (mockLists.get(key) || []).length),
   lpush: jest.fn(async (key, ...vals) => {
@@ -87,6 +115,7 @@ beforeAll(() => {
 beforeEach(() => {
   mockStore.clear();
   mockSets.clear();
+  mockZSets.clear();
   mockLists.clear();
   mockCounters.clear();
   cache.get.mockClear();
@@ -95,6 +124,11 @@ beforeEach(() => {
   mockRedis.smembers.mockClear();
   mockRedis.sadd.mockClear();
   mockRedis.srem.mockClear();
+  mockRedis.zadd.mockClear();
+  mockRedis.zrem.mockClear();
+  mockRedis.zrevrange.mockClear();
+  mockRedis.zcard.mockClear();
+  mockRedis.zscan.mockClear();
   mockRedis.llen.mockClear();
   mockRedis.lpush.mockClear();
   mockRedis.rpush.mockClear();
@@ -122,10 +156,6 @@ describe('POST /api/v1/airdrops', () => {
           { address: validAddress2, amount: 50 },
         ],
       });
-    console.log('POST /airdrops response status:', response.status);
-    console.log('POST /airdrops response body:', response.body);
-    console.log('mockStore contents after POST:', Array.from(mockStore.entries()));
-    console.log('mockSets contents after POST:', Array.from(mockSets.entries()));
     expect(response.status).toBe(201);
     expect(response.body.id).toMatch(/^drop_/);
     expect(response.body.name).toBe('Test Airdrop');
@@ -174,11 +204,7 @@ describe('POST /api/v1/airdrops', () => {
 
 describe('GET /api/v1/airdrops', () => {
   test('lists airdrops with pagination', async () => {
-    console.log('=== Test: lists airdrops with pagination ===');
-    console.log('Before first POST: mockStore', Array.from(mockStore.entries()));
-    console.log('Before first POST: mockSets', Array.from(mockSets.entries()));
-
-    const res1 = await request(app)
+    await request(app)
       .post('/api/v1/airdrops')
       .send({
         name: 'Airdrop 1',
@@ -187,13 +213,8 @@ describe('GET /api/v1/airdrops', () => {
         total_amount: 100,
         expiry_ledger: 123456,
       });
-    console.log('First POST res status:', res1.status);
-    console.log('First POST res body:', res1.body);
 
-    console.log('After first POST: mockStore', Array.from(mockStore.entries()));
-    console.log('After first POST: mockSets', Array.from(mockSets.entries()));
-
-    const res2 = await request(app)
+    await request(app)
       .post('/api/v1/airdrops')
       .send({
         name: 'Airdrop 2',
@@ -202,13 +223,8 @@ describe('GET /api/v1/airdrops', () => {
         total_amount: 200,
         expiry_ledger: 123457,
       });
-    console.log('Second POST res status:', res2.status);
-
-    console.log('After second POST: mockStore', Array.from(mockStore.entries()));
-    console.log('After second POST: mockSets', Array.from(mockSets.entries()));
 
     const response = await request(app).get('/api/v1/airdrops?page=1&limit=2');
-    console.log('GET /airdrops response body:', response.body);
     expect(response.status).toBe(200);
     expect(response.body.airdrops).toHaveLength(2);
     expect(response.body.pagination.total).toBe(2);

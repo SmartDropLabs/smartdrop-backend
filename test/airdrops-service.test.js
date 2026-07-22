@@ -203,7 +203,7 @@ describe('airdrops service', () => {
   });
 
   describe('scanIds (#88)', () => {
-    test('pages through every ID in the set across multiple SSCAN batches', async () => {
+    test('pages through every ID in the set across multiple ZSCAN batches', async () => {
       for (let i = 0; i < 5; i++) {
         await airdropsService.create({
           name: `Airdrop ${i}`,
@@ -221,9 +221,9 @@ describe('airdrops service', () => {
 
       expect(seen).toHaveLength(5);
       expect(new Set(seen).size).toBe(5);
-      // Confirms it actually paged (more than one SSCAN call for 5 items at
-      // batch size 2), not just a single SMEMBERS-style dump.
-      expect(mockRedis.sscan.mock.calls.length).toBeGreaterThan(1);
+      // Confirms it actually paged (more than one ZSCAN call for 5 items at
+      // batch size 2), not just a single ZREVRANGE-style dump.
+      expect(mockRedis.zscan.mock.calls.length).toBeGreaterThan(1);
     });
 
     test('yields nothing for an empty airdrop set', async () => {

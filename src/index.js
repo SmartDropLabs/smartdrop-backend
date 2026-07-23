@@ -9,6 +9,7 @@ const priceOracle = require('./services/priceOracle');
 const priceRefreshJob = require('./jobs/priceRefresh');
 const webhookRetryWorker = require('./jobs/webhookRetryWorker');
 const airdropExpiryJob = require('./jobs/airdropExpiry');
+const { warmCache } = require('./startup/cacheWarm');
 const buildCorsMiddleware = require('./middleware/cors');
 const buildRateLimit = require('./middleware/rateLimit');
 const { requestIdMiddleware } = require('./middleware/requestId');
@@ -117,6 +118,18 @@ function shutdown(signal) {
 }
 
 if (require.main === module) {
+  startServer().catch((err) => {
+    logger.error('Startup failed', { error: err.message });
+    process.exit(1);
+  });
+
+  process.on('SIGTERM', shutdown('SIGTERM'));
+  process.on('SIGINT', shutdown('SIGINT'));
+}
+
+async function startServer() {
+  await warmCache(config.watchedAssets);
+
   server = app.listen(config.port, () => {
     logger.info(`SmartDrop backend running on port ${config.port}`);
     priceWebSocket.attach(server);
@@ -124,9 +137,9 @@ if (require.main === module) {
     webhookRetryWorker.start();
     airdropExpiryJob.start();
   });
+  module.exports.server = server;
 
-  process.on('SIGTERM', shutdown('SIGTERM'));
-  process.on('SIGINT', shutdown('SIGINT'));
+  return server;
 }
 
 module.exports = app;
@@ -136,3 +149,4 @@ module.exports.server = server || {
     if (callback) callback();
   },
 };
+module.exports.startServer = startServer;

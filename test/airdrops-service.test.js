@@ -2,6 +2,7 @@
 
 const mockStore = new Map();
 const mockSets = new Map();
+const mockZSets = new Map();
 const mockLists = new Map();
 
 // Faithfully mirrors MARK_EXPIRED_SCRIPT's condition/write logic in JS,
@@ -22,6 +23,14 @@ function mockMarkExpiredEval(store, key, currentLedger, nowIso) {
   return JSON.stringify(updated);
 }
 
+function getSortedZSetMembers(key) {
+  const z = mockZSets.get(key);
+  if (!z) return [];
+  return [...z.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([member]) => member);
+}
+
 const mockRedis = {
   smembers: jest.fn(async (key) => [...(mockSets.get(key) || [])]),
   sadd: jest.fn(async (key, val) => {
@@ -40,6 +49,31 @@ const mockRedis = {
     const batch = members.slice(start, start + count);
     const nextCursor = start + count >= members.length ? '0' : String(start + count);
     return [nextCursor, batch];
+  }),
+  zadd: jest.fn(async (key, score, member) => {
+    if (!mockZSets.has(key)) mockZSets.set(key, new Map());
+    mockZSets.get(key).set(member, Number(score));
+  }),
+  zrem: jest.fn(async (key, ...members) => {
+    const z = mockZSets.get(key);
+    if (!z) return;
+    for (const m of members) z.delete(m);
+  }),
+  zrevrange: jest.fn(async (key, start, stop) => {
+    const sorted = getSortedZSetMembers(key);
+    const end = stop === -1 ? sorted.length : stop + 1;
+    return sorted.slice(start, end);
+  }),
+  zcard: jest.fn(async (key) => (mockZSets.get(key)?.size || 0)),
+  zscan: jest.fn(async (key, cursor, _countKeyword, count) => {
+    const entries = [...(mockZSets.get(key)?.entries() || [])];
+    const batchWithScores = [];
+    const start = Number(cursor);
+    for (let i = start; i < start + count && i < entries.length; i++) {
+      batchWithScores.push(entries[i][0], entries[i][1]);
+    }
+    const nextCursor = start + count >= entries.length ? '0' : String(start + count);
+    return [nextCursor, batchWithScores];
   }),
   llen: jest.fn(async (key) => (mockLists.get(key) || []).length),
   lpush: jest.fn(async (key, ...vals) => {
@@ -108,6 +142,7 @@ const airdropsService = require('../src/services/airdrops');
 beforeEach(() => {
   mockStore.clear();
   mockSets.clear();
+  mockZSets.clear();
   mockLists.clear();
 });
 
@@ -168,7 +203,7 @@ describe('airdrops service', () => {
   });
 
   describe('scanIds (#88)', () => {
-    test('pages through every ID in the set across multiple SSCAN batches', async () => {
+    test('pages through every ID in the set across multiple ZSCAN batches', async () => {
       for (let i = 0; i < 5; i++) {
         await airdropsService.create({
           name: `Airdrop ${i}`,
@@ -186,9 +221,9 @@ describe('airdrops service', () => {
 
       expect(seen).toHaveLength(5);
       expect(new Set(seen).size).toBe(5);
-      // Confirms it actually paged (more than one SSCAN call for 5 items at
-      // batch size 2), not just a single SMEMBERS-style dump.
-      expect(mockRedis.sscan.mock.calls.length).toBeGreaterThan(1);
+      // Confirms it actually paged (more than one ZSCAN call for 5 items at
+      // batch size 2), not just a single ZREVRANGE-style dump.
+      expect(mockRedis.zscan.mock.calls.length).toBeGreaterThan(1);
     });
 
     test('yields nothing for an empty airdrop set', async () => {

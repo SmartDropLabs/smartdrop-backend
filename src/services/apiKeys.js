@@ -10,6 +10,12 @@ function hashApiKey(apiKey) {
   return crypto.createHash('sha256').update(apiKey).digest('hex');
 }
 
+function constantTimeSecretEqual(actual, expected) {
+  const actualDigest = crypto.createHash('sha256').update(actual).digest();
+  const expectedDigest = crypto.createHash('sha256').update(expected).digest();
+  return crypto.timingSafeEqual(actualDigest, expectedDigest);
+}
+
 function sanitize(record) {
   if (!record) return null;
   const { key_hash, ...safe } = record;
@@ -38,7 +44,7 @@ async function getKey(id) {
 
 async function listKeys() {
   const redis = cache.getClient();
-  const ids = await redis.smembers(IDS_KEY);
+  const ids = await redis.zrevrange(IDS_KEY, 0, -1);
   const records = await Promise.all(ids.map((id) => getKey(id)));
   return records.filter(Boolean).map(sanitize);
 }
@@ -60,7 +66,7 @@ async function createKey({ label, scopes = ['default'] }) {
   const redis = cache.getClient();
   await cache.set(keyPath(record.id), record);
   await cache.set(hashPath(hashed), record.id);
-  await redis.sadd(IDS_KEY, record.id);
+  await redis.zadd(IDS_KEY, Date.now(), record.id);
 
   return {
     api_key: apiKey,
@@ -75,7 +81,7 @@ async function revokeKey(id) {
   const redis = cache.getClient();
   await cache.del(keyPath(id));
   await cache.del(hashPath(record.key_hash));
-  await redis.srem(IDS_KEY, id);
+  await redis.zrem(IDS_KEY, id);
   return sanitize(record);
 }
 
@@ -91,7 +97,7 @@ async function touch(record) {
 async function validateApiKey(apiKey) {
   if (!apiKey) return null;
 
-  if (config.auth.adminApiKey && apiKey === config.auth.adminApiKey) {
+  if (config.auth.adminApiKey && constantTimeSecretEqual(apiKey, config.auth.adminApiKey)) {
     return {
       id: 'admin',
       label: 'Bootstrap admin key',

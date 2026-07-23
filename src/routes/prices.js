@@ -1,9 +1,19 @@
 const express = require('express');
+const config = require('../config');
 const { requireApiKey } = require('../middleware/auth');
+const buildRateLimit = require('../middleware/rateLimit');
 const priceOracle = require('../services/priceOracle');
 const AppError = require('../errors/AppError');
 
 const router = express.Router();
+
+const priceLimit = buildRateLimit({
+  windowSeconds: config.priceRateLimit.windowSeconds,
+  max: config.priceRateLimit.max,
+  keyPrefix: 'prices',
+});
+
+router.use(priceLimit);
 
 function validateAssetCode(assetCode) {
   if (!assetCode || typeof assetCode !== 'string') return false;

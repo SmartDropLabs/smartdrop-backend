@@ -53,6 +53,7 @@ describe('configuration validation', () => {
         '  redisUrl: config.redis.url,',
         '  price: config.price,',
         '  watchedAssets: config.watchedAssets,',
+        '  airdrops: config.airdrops,',
         '}));',
       ].join(' '),
       { NODE_ENV: 'test' }
@@ -72,6 +73,18 @@ describe('configuration validation', () => {
         anomalyThresholdPercent: 20,
       },
       watchedAssets: [],
+      airdrops: {
+        expiryCheckIntervalSeconds: 60,
+        ledgerCacheTtlMs: 5000,
+        expiryScanBatchSize: 100,
+        csvMaxBytes: 5 * 1024 * 1024,
+        jsonMaxBytes: 2 * 1024 * 1024,
+        maxRecipients: 10000,
+        rateLimit: {
+          windowSeconds: 60,
+          max: 10,
+        },
+      },
     });
   });
 

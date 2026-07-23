@@ -68,6 +68,28 @@ function createCacheMock() {
       return n;
     }),
     expire: jest.fn(async () => 1),
+    // Mimics ioredis#defineCommand for the one custom command this codebase
+    // registers (see deliveryRepository.js). Real Redis runs the Lua body
+    // single-threaded to completion, so this mock implementation reads and
+    // deletes without an intervening `await`, preserving that atomicity
+    // guarantee for tests.
+    defineCommand: jest.fn((name, { lua } = {}) => {
+      if (name === 'popDueRetriesAtomic') {
+        redis.popDueRetriesAtomic = jest.fn(async (queueKey, maxScore, limit) => {
+          const z = getZSet(queueKey);
+          const max = Number(maxScore);
+          const ids = [...z.entries()]
+            .filter(([, score]) => score <= max)
+            .sort((a, b) => a[1] - b[1])
+            .slice(0, Number(limit))
+            .map(([m]) => m);
+          ids.forEach((id) => z.delete(id));
+          return ids;
+        });
+        return;
+      }
+      throw new Error(`cacheMock.defineCommand: unsupported command "${name}" (lua: ${typeof lua})`);
+    }),
   };
 
   const cacheMock = {

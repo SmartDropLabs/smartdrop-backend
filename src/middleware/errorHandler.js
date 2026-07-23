@@ -9,11 +9,22 @@ function notFoundHandler(req, _res, next) {
 
 function errorHandler(err, req, res, _next) {
   const isAppError = err instanceof AppError;
-  const status = isAppError ? err.statusCode : 500;
-  const code = isAppError ? err.code : 'INTERNAL_ERROR';
-  const message = isAppError ? err.message : 'An unexpected error occurred';
+  const isPayloadTooLarge = !isAppError && err.type === 'entity.too.large';
+  let status = 500;
+  let code = 'INTERNAL_ERROR';
+  let message = 'An unexpected error occurred';
 
-  if (!isAppError || status >= 500) {
+  if (isAppError) {
+    status = err.statusCode;
+    code = err.code;
+    message = err.message;
+  } else if (isPayloadTooLarge) {
+    status = 413;
+    code = 'PAYLOAD_TOO_LARGE';
+    message = 'Request body is too large';
+  }
+
+  if ((!isAppError && !isPayloadTooLarge) || status >= 500) {
     logger.error('Unhandled error', { error: err.message, stack: err.stack, request_id: req.id });
   }
 

@@ -11,6 +11,7 @@ const webhookRetryWorker = require('./jobs/webhookRetryWorker');
 const airdropExpiryJob = require('./jobs/airdropExpiry');
 const { warmCache } = require('./startup/cacheWarm');
 const buildCorsMiddleware = require('./middleware/cors');
+const buildRateLimit = require('./middleware/rateLimit');
 const { requestIdMiddleware } = require('./middleware/requestId');
 const { requireApiKey } = require('./middleware/auth');
 const { errorHandler, notFoundHandler } = require('./middleware/errorHandler');
@@ -29,7 +30,7 @@ let server;
 app.use(requestIdMiddleware);
 app.use(helmet());
 app.use(buildCorsMiddleware(config.corsAllowedOrigins));
-app.use(express.json());
+app.use(express.json({ limit: config.airdrops.jsonMaxBytes }));
 
 app.get('/health', (req, res) => {
   const redisConnected = cache.isConnected();
@@ -84,12 +85,20 @@ app.get('/health', (req, res) => {
   });
 });
 
+const globalApiLimit = buildRateLimit({
+  windowSeconds: Math.floor(config.rateLimit.windowMs / 1000),
+  max: config.rateLimit.max,
+  keyPrefix: 'api',
+});
+
+app.use('/api/v1', globalApiLimit);
 app.use('/api/v1', pricesRouter);
 app.use('/api/v1', keysRouter);
 app.use('/api/v1/alerts', requireApiKey());
 app.use('/api/v1', alertsRouter);
 app.use('/api/v1', webhooksRouter);
 app.use('/api/v1', airdropsRouter);
+app.use('/api-docs', globalApiLimit);
 app.use('/api-docs', apiDocsRouter);
 
 app.use(notFoundHandler);

@@ -27,11 +27,7 @@ const apiDocsRouter = require('./routes/apiDocs');
 const priceWebSocket = require('./ws/priceWebSocket');
 
 const app = express();
-let server = {
-  close(callback) {
-    if (callback) callback();
-  },
-};
+let server;
 
 app.use(requestIdMiddleware);
 app.use(helmet());
@@ -114,40 +110,11 @@ app.use('/api-docs', apiDocsRouter);
 app.use(notFoundHandler);
 app.use(errorHandler);
 
-const server = app.listen(config.port, () => {
-  logger.info(`SmartDrop backend running on port ${config.port}`);
-  priceRefreshJob.start();
-  indexerPoller.start();
-});
-
-let server;
-
-if (require.main === module) {
-  server = app.listen(config.port, () => {
-    logger.info(`SmartDrop backend running on port ${config.port}`);
-    priceRefreshJob.start();
-  });
-process.on('SIGTERM', async () => {
-  logger.info('SIGTERM received, shutting down');
-  priceRefreshJob.stop();
-  indexerPoller.stop();
-  server.close();
-  await cache.disconnect();
-  process.exit(0);
-});
-
-process.on('SIGINT', async () => {
-  logger.info('SIGINT received, shutting down');
-  priceRefreshJob.stop();
-  indexerPoller.stop();
-  server.close();
-  await cache.disconnect();
-  process.exit(0);
-});
 function shutdown(signal) {
   return async () => {
     logger.info(`${signal} received, shutting down`);
     priceRefreshJob.stop();
+    indexerPoller.stop();
     webhookRetryWorker.stop();
     airdropExpiryJob.stop();
     require('./ws/PriceSubscriptionManager').stopHeartbeat();
@@ -155,6 +122,22 @@ function shutdown(signal) {
     await cache.disconnect();
     process.exit(0);
   };
+}
+
+async function startServer() {
+  await warmCache(config.watchedAssets);
+
+  server = app.listen(config.port, () => {
+    logger.info(`SmartDrop backend running on port ${config.port}`);
+    priceWebSocket.attach(server);
+    priceRefreshJob.start();
+    indexerPoller.start();
+    webhookRetryWorker.start();
+    airdropExpiryJob.start();
+  });
+  module.exports.server = server;
+
+  return server;
 }
 
 if (require.main === module) {
@@ -167,27 +150,5 @@ if (require.main === module) {
   process.on('SIGINT', shutdown('SIGINT'));
 }
 
-async function startServer() {
-  await warmCache(config.watchedAssets);
-
-  server = app.listen(config.port, () => {
-    logger.info(`SmartDrop backend running on port ${config.port}`);
-    priceWebSocket.attach(server);
-    priceRefreshJob.start();
-    webhookRetryWorker.start();
-    airdropExpiryJob.start();
-  });
-  module.exports.server = server;
-
-  return server;
-}
-
 module.exports = { app, server };
-module.exports = app;
-module.exports.app = app;
-module.exports.server = server || {
-  close(callback) {
-    if (callback) callback();
-  },
-};
 module.exports.startServer = startServer;

@@ -19,15 +19,14 @@ const SOURCES = [
     name: 'coingecko',
     fetch: coingecko.fetchPrice,
     breaker: new CircuitBreaker('coingecko', breakerOptions),
+    getCircuitState: coingecko.getCircuitState,
   },
   {
     name: 'coinmarketcap',
     fetch: coinmarketcap.fetchPrice,
     breaker: new CircuitBreaker('coinmarketcap', breakerOptions),
+    getCircuitState: coinmarketcap.getCircuitState,
   },
-  { name: 'stellar_dex', fetch: stellarDex.fetchPrice },
-  { name: 'coingecko', fetch: coingecko.fetchPrice, getCircuitState: coingecko.getCircuitState },
-  { name: 'coinmarketcap', fetch: coinmarketcap.fetchPrice, getCircuitState: coinmarketcap.getCircuitState },
 ];
 
 /**

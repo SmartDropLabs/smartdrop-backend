@@ -2,7 +2,6 @@
 
 const mockStore = new Map();
 const mockSets = new Map();
-const mockSortedSets = new Map();
 const mockZSets = new Map();
 const mockLists = new Map();
 const mockCounters = new Map();
@@ -17,20 +16,6 @@ const mockRedis = {
     mockSets.get(key)?.delete(val);
   }),
   zadd: jest.fn(async (key, score, member) => {
-    if (!mockSortedSets.has(key)) mockSortedSets.set(key, new Map());
-    mockSortedSets.get(key).set(member, score);
-  }),
-  zrem: jest.fn(async (key, member) => {
-    mockSortedSets.get(key)?.delete(member);
-  }),
-  zcard: jest.fn(async (key) => mockSortedSets.get(key)?.size || 0),
-  zrevrange: jest.fn(async (key, start, stop) => {
-    const sortedSet = mockSortedSets.get(key);
-    if (!sortedSet) return [];
-    const entries = Array.from(sortedSet.entries()).sort((a, b) => b[1] - a[1]);
-    const startIdx = start === -1 ? entries.length + start : start;
-    const stopIdx = stop === -1 ? entries.length + stop : stop;
-    return entries.slice(startIdx, stopIdx + 1).map(([member]) => member);
     if (!mockZSets.has(key)) mockZSets.set(key, new Map());
     mockZSets.get(key).set(member, Number(score));
   }),
@@ -118,6 +103,9 @@ jest.mock('stellar-sdk', () => ({
   StrKey: {
     isValidEd25519PublicKey: jest.fn((address) => address.startsWith('G') && address.length === 56),
   },
+  SorobanRpc: {
+    Server: jest.fn(() => ({})),
+  },
 }));
 
 const request = require('supertest');
@@ -127,14 +115,11 @@ let app;
 
 beforeAll(() => {
   app = require('../src/index').app;
-  const { app: importedApp } = require('../src/index');
-  app = importedApp;
 });
 
 beforeEach(() => {
   mockStore.clear();
   mockSets.clear();
-  mockSortedSets.clear();
   mockZSets.clear();
   mockLists.clear();
   mockCounters.clear();

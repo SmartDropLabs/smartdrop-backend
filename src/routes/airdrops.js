@@ -16,9 +16,15 @@ const {
   recipientsSchema,
   routeIdParamsSchema,
 } = require('../validation/schemas');
+const buildRateLimit = require('../middleware/rateLimit');
+const { StrKey } = require('stellar-sdk');
 
 const router = express.Router();
-const upload = multer();
+const CSV_PARSE_CHUNK_BYTES = 64 * 1024;
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: config.airdrops.csvMaxBytes },
+});
 const validateRouteIdParams = validate(routeIdParamsSchema, 'params');
 const validatePaginationQuery = validate(paginationQuerySchema, 'query');
 const validateRecipientBody = validate(airdropRecipientsBodySchema);
@@ -31,15 +37,9 @@ function validateWithCurrentLedger(schemaFactory) {
     } catch (err) {
       logger.error('Airdrop validation error', { error: err.message });
       return next(err);
-const buildRateLimit = require('../middleware/rateLimit');
-const { StrKey } = require('stellar-sdk');
-
-const router = express.Router();
-const CSV_PARSE_CHUNK_BYTES = 64 * 1024;
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: config.airdrops.csvMaxBytes },
-});
+    }
+  };
+}
 
 const createAirdropLimit = buildRateLimit({
   windowSeconds: config.airdrops.rateLimit.windowSeconds,
@@ -73,41 +73,6 @@ function isValidStellarAddress(address) {
   } catch {
     return false;
   }
-}
-
-function validateAirdropCreate(body, currentLedger) {
-  const { name, asset, asset_issuer, total_amount, expiry_ledger, recipients = [] } = body;
-
-  if (!name || typeof name !== 'string') {
-    return 'name is required and must be a string';
-  }
-  if (!asset || typeof asset !== 'string' || !/^[A-Z0-9]{1,12}$/i.test(asset)) {
-    return 'asset is required and must be 1-12 alphanumeric characters';
-  }
-  if (!asset_issuer || !isValidStellarAddress(asset_issuer)) {
-    return 'asset_issuer is required and must be a valid Stellar address';
-  }
-  if (typeof total_amount !== 'number' || total_amount <= 0) {
-    return 'total_amount is required and must be a positive number';
-  }
-  if (typeof expiry_ledger !== 'number' || expiry_ledger <= currentLedger) {
-    return `expiry_ledger is required and must be greater than current ledger (${currentLedger})`;
-  }
-  if (recipients.length > config.airdrops.maxRecipients) {
-    return 'recipients cannot exceed 10,000';
-  }
-
-  const recipientSet = new Set();
-  let sum = 0;
-  for (let i = 0; i < recipients.length; i++) {
-    const r = recipients[i];
-    if (!r.address || !isValidStellarAddress(r.address)) {
-      return `recipient ${i}: invalid Stellar address`;
-    }
-    if (recipientSet.has(r.address)) {
-      return `recipient ${i}: duplicate address ${r.address}`;
-    }
-  };
 }
 
 function parseRecipients(recipients, next) {
@@ -147,8 +112,7 @@ async function parseCSV(buffer) {
   return results;
 }
 
-router.post('/airdrops', validateWithCurrentLedger(airdropCreateBodySchema), async (req, res, next) => {
-router.post('/airdrops', createAirdropLimit, async (req, res, next) => {
+router.post('/airdrops', createAirdropLimit, validateWithCurrentLedger(airdropCreateBodySchema), async (req, res, next) => {
   try {
     const airdrop = await airdropsService.create(req.validated.body);
     return res.status(201).json(airdrop);
@@ -221,8 +185,7 @@ router.post('/airdrops/:id/cancel', validateRouteIdParams, async (req, res, next
   }
 });
 
-router.post('/airdrops/:id/recipients', validateRouteIdParams, upload.single('file'), validateRecipientBody, async (req, res, next) => {
-router.post('/airdrops/:id/recipients', addRecipientsLimit, uploadRecipientsFile, async (req, res, next) => {
+router.post('/airdrops/:id/recipients', validateRouteIdParams, addRecipientsLimit, uploadRecipientsFile, validateRecipientBody, async (req, res, next) => {
   try {
     const airdrop = await airdropsService.get(req.params.id);
     if (!airdrop) {

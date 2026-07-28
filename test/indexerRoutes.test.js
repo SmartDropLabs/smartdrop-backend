@@ -72,7 +72,7 @@ describe('indexer routes', () => {
   test('returns indexed recipients', async () => {
     mockGetAirdropRecipients.mockResolvedValue([{ recipient: 'GRECIPIENT', status: 'claimed' }]);
 
-    const res = await request(buildApp()).get('/api/v1/airdrops/drop-1/recipients');
+    const res = await request(buildApp()).get('/api/v1/airdrops/drop-1/onchain-recipients');
 
     expect(res.status).toBe(200);
     expect(res.body.recipients).toHaveLength(1);

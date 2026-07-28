@@ -13,27 +13,30 @@ jest.mock('../src/services/priceOracle', () => ({
     coinmarketcap: 'open',
     stellar_dex: 'half-open',
   })),
+  getSourceCircuitStates: jest.fn(() => [
+    { source: 'coingecko', open: false, openUntil: null },
+    { source: 'coinmarketcap', open: false, openUntil: null },
+  ]),
   refreshAllCachedPrices: jest.fn(),
 }));
 
 jest.mock('../src/jobs/priceRefresh', () => ({
   start: jest.fn(),
   stop: jest.fn(),
+  getHealth: () => ({ healthy: true, lastSuccessAt: Date.now(), lastError: null, stalled: false }),
 }));
 
 jest.mock('../src/jobs/webhookRetryWorker', () => ({
   start: jest.fn(),
   stop: jest.fn(),
+  tick: jest.fn(),
+  getHealth: () => ({ healthy: true, lastSuccessAt: Date.now(), lastError: null, stalled: false }),
 }));
 
 jest.mock('../src/ws/priceWebSocket', () => ({
   attach: jest.fn(),
 }));
 
-describe('health endpoint', () => {
-  test('exposes price source circuit states', async () => {
-    jest.resetModules();
-    const { app } = require('../src/index');
 // ---------------------------------------------------------------------------
 // Helpers – reset modules between tests so mocks are applied cleanly
 // ---------------------------------------------------------------------------

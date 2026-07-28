@@ -7,7 +7,6 @@ const crypto = require('crypto');
 const mockStore = new Map();
 const mockSets = new Map();
 const mockSortedSets = new Map();
-const mockZSets = new Map();
 
 const mockRedis = {
   smembers: jest.fn(async (key) => [...(mockSets.get(key) || [])]),
@@ -32,20 +31,6 @@ const mockRedis = {
     const startIdx = start === -1 ? entries.length + start : start;
     const stopIdx = stop === -1 ? entries.length + stop : stop;
     return entries.slice(startIdx, stopIdx + 1).map(([member]) => member);
-    if (!mockZSets.has(key)) mockZSets.set(key, new Map());
-    mockZSets.get(key).set(member, Number(score));
-  }),
-  zrem: jest.fn(async (key, ...members) => {
-    const z = mockZSets.get(key);
-    if (!z) return;
-    for (const m of members) z.delete(m);
-  }),
-  zrevrange: jest.fn(async (key, start, stop) => {
-    const z = mockZSets.get(key);
-    if (!z) return [];
-    const sorted = [...z.entries()].sort((a, b) => b[1] - a[1]).map(([m]) => m);
-    const end = stop === -1 ? sorted.length : stop + 1;
-    return sorted.slice(start, end);
   }),
 };
 

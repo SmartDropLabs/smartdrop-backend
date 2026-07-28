@@ -31,7 +31,7 @@ router.get('/airdrops/:id/status', async (req, res) => {
   }
 });
 
-router.get('/airdrops/:id/recipients', async (req, res) => {
+router.get('/airdrops/:id/onchain-recipients', async (req, res) => {
   try {
     if (!isValidId(req.params.id)) {
       return res.status(400).json({ error: 'Invalid airdrop id' });

@@ -1,5 +1,14 @@
 'use strict';
 
+const mockLogger = {
+  info: jest.fn(),
+  warn: jest.fn(),
+  error: jest.fn(),
+  debug: jest.fn(),
+};
+
+jest.mock('../src/logger', () => mockLogger);
+
 const { CircuitBreaker, STATES } = require('../src/utils/circuitBreaker');
 
 function buildBreaker(options = {}) {
@@ -85,14 +94,8 @@ describe('CircuitBreaker', () => {
     })).rejects.toThrow('rate limited');
 
     expect(breaker.getState()).toBe(STATES.CLOSED);
-const mockLogger = {
-  info: jest.fn(),
-  warn: jest.fn(),
-  error: jest.fn(),
-  debug: jest.fn(),
-};
-
-jest.mock('../src/logger', () => mockLogger);
+  });
+});
 
 function loadCircuitBreaker() {
   jest.resetModules();

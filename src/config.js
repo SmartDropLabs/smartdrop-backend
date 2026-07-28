@@ -111,12 +111,9 @@ module.exports = {
   redis: {
     url: env.REDIS_URL,
   },
-  databaseUrl: process.env.DATABASE_URL || 'postgres://postgres:postgres@localhost:5432/smartdrop',
   stellar: {
-    horizonUrl: process.env.STELLAR_HORIZON_URL || 'https://horizon.stellar.org',
-    sorobanRpcUrl: process.env.SOROBAN_RPC_URL || 'https://soroban-rpc.mainnet.stellar.gateway.fm',
-    usdcIssuer: process.env.USDC_ISSUER || 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA',
     horizonUrl: env.STELLAR_HORIZON_URL,
+    sorobanRpcUrl: process.env.SOROBAN_RPC_URL || 'https://soroban-rpc.mainnet.stellar.gateway.fm',
     usdcIssuer,
   },
   indexer: {

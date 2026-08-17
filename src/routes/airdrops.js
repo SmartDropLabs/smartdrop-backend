@@ -141,6 +141,24 @@ function normalizeRow(row) {
 }
 
 /**
+ * Strictly parses a numeric amount string.
+ * Accepts only strings matching an optional sign, digits, and an optional decimal part.
+ * Rejects empty strings, comma-formatted numbers ("1,000"), and strings with trailing
+ * non-numeric content ("100USD", "50 units") — all of which parseFloat would silently
+ * truncate or misparse.
+ *
+ * @param {string} raw - The raw string value from the CSV cell.
+ * @returns {number|null} The parsed number, or null if the string is invalid.
+ */
+function strictParseAmount(raw) {
+  if (typeof raw !== "string" || raw.trim() === "") return null;
+  const trimmed = raw.trim();
+  // Only allow an optional sign followed by digits with an optional decimal part — nothing else.
+  if (!/^-?\d+(\.\d+)?$/.test(trimmed)) return null;
+  return Number(trimmed);
+}
+
+/**
  * Parses recipient CSV, rejecting malformed input instead of skipping it.
  *
  * Rows that failed validation used to be dropped silently, so a file whose
@@ -223,15 +241,15 @@ async function parseCSV(buffer) {
 
         const address = row[ADDRESS_COLUMN];
         const rawAmount = row[AMOUNT_COLUMN];
-        const amount = parseFloat(rawAmount);
+        const amount = strictParseAmount(rawAmount);
 
         // +1 for the header line, so the number matches what the uploader
         // sees in a text editor.
         const line = rowCount + 1;
         if (!address || String(address).trim() === "") {
           invalidRows.push({ line, reason: "missing address" });
-        } else if (!Number.isFinite(amount)) {
-          invalidRows.push({ line, reason: "amount is not a number" });
+        } else if (amount === null) {
+          invalidRows.push({ line, reason: "amount is missing or invalid" });
         } else if (amount <= 0) {
           invalidRows.push({
             line,

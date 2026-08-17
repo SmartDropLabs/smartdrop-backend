@@ -85,6 +85,24 @@ function parseRecipients(recipients, next) {
   return result.data;
 }
 
+/**
+ * Strictly parses a numeric amount string.
+ * Accepts only strings matching an optional sign, digits, and an optional decimal part.
+ * Rejects empty strings, comma-formatted numbers ("1,000"), and strings with trailing
+ * non-numeric content ("100USD", "50 units") — all of which parseFloat would silently
+ * truncate or misparse.
+ *
+ * @param {string} raw - The raw string value from the CSV cell.
+ * @returns {number|null} The parsed number, or null if the string is invalid.
+ */
+function strictParseAmount(raw) {
+  if (typeof raw !== 'string' || raw.trim() === '') return null;
+  const trimmed = raw.trim();
+  // Only allow an optional sign followed by digits with an optional decimal part — nothing else.
+  if (!/^-?\d+(\.\d+)?$/.test(trimmed)) return null;
+  return Number(trimmed);
+}
+
 async function parseCSV(buffer) {
   const results = [];
   let rowCount = 0;
@@ -102,10 +120,19 @@ async function parseCSV(buffer) {
       }
 
       const address = data.address || data.Address || data.ADDRESS;
-      const amount = parseFloat(data.amount || data.Amount || data.AMOUNT);
-      if (address && !Number.isNaN(amount)) {
-        results.push({ address, amount });
+      const rawAmount = data.amount || data.Amount || data.AMOUNT;
+      const amount = strictParseAmount(rawAmount);
+
+      if (amount === null) {
+        throw new AppError(
+          'VALIDATION_ERROR',
+          `recipient ${rowCount}: amount is missing or invalid — got ${JSON.stringify(rawAmount ?? '')}; ` +
+            'value must be a plain number (e.g. "100" or "1.5") with no commas or extra characters',
+          400
+        );
       }
+
+      results.push({ address, amount });
     }
   });
 

@@ -54,11 +54,11 @@ Polls Soroban RPC for SmartDrop contract events and stores decoded event state i
 Registers subscriber endpoints for SmartDrop lifecycle events and delivers signed JSON payloads with retry tracking.
 
 **Events:**
-- `airdrop.created`
-- `airdrop.executing`
-- `airdrop.completed`
-- `airdrop.failed` — fired automatically when an airdrop expires (see below), in addition to any other failure path
-- `recipient.claimed`
+- `airdrop.failed` — **(Active)** fired automatically when an airdrop expires (see below), in addition to any other failure path
+- `airdrop.created` — *(Planned, not yet implemented)*
+- `airdrop.executing` — *(Planned, not yet implemented)*
+- `airdrop.completed` — *(Planned, not yet implemented)*
+- `recipient.claimed` — *(Planned, not yet implemented)*
 
 **Features:**
 - Webhook endpoint CRUD with secrets kept out of list responses
@@ -486,19 +486,20 @@ curl http://localhost:4000/health
 
 ## Webhooks
 
-Register endpoints that receive HTTP POST callbacks when SmartDrop indexes farming/pool events.
+Register endpoints that receive HTTP POST callbacks when SmartDrop indexes contract lifecycle events or price alerts.
 
 ### Supported event types
 
-| Event | Description |
-|-------|-------------|
-| `pool.created` | A new farming pool was created on-chain |
-| `pool.assets_locked` | Assets were locked into a pool |
-| `pool.assets_unlocked` | Assets were unlocked from a pool |
-| `pool.rewards_distributed` | Pool distributed rewards to participants |
-| `pool.closed` | Pool was closed |
-| `price.alert` | Existing price-alert event |
-| `*` | Wildcard — subscribe to every known event |
+| Event | Status | Description |
+|-------|--------|-------------|
+| `airdrop.failed` | **Active** | Fired automatically when an airdrop expires |
+| `price.alert` | **Active** | Existing price-alert event |
+| `pool.created` | *Planned* | A new farming pool was created on-chain (not yet implemented) |
+| `pool.assets_locked` | *Planned* | Assets were locked into a pool (not yet implemented) |
+| `pool.assets_unlocked` | *Planned* | Assets were unlocked from a pool (not yet implemented) |
+| `pool.rewards_distributed` | *Planned* | Pool distributed rewards to participants (not yet implemented) |
+| `pool.closed` | *Planned* | Pool was closed (not yet implemented) |
+| `*` | - | Wildcard — subscribe to every known event |
 
 ### API
 
@@ -509,7 +510,7 @@ Content-Type: application/json
 
 {
   "url": "https://example.com/webhooks/smartdrop",
-  "events": ["pool.assets_locked", "pool.rewards_distributed"],
+  "events": ["airdrop.failed", "price.alert"],
   "secret": "whsec_at_least_16_chars",     // optional, generated if omitted
   "description": "Production webhook"       // optional
 }
@@ -530,6 +531,9 @@ DELETE /api/v1/webhooks/:id           # remove
 POST /api/v1/webhooks/:id/test
 ```
 Sends a synthetic `pool.assets_locked` payload to the registered URL and returns the resulting delivery summary. Limited to 5 calls/min/IP by default.
+
+> [!IMPORTANT]
+> A successful test delivery only confirms that the webhook URL can successfully receive deliveries from the service. It does **not** imply that the subscribed event type will ever fire for real. For example, `pool.assets_locked` is a planned event and is not yet implemented (it will never fire in production). Only `airdrop.failed` and `price.alert` are actively dispatched today.
 
 #### Inspect deliveries (admin dashboard feed)
 ```

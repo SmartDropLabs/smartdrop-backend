@@ -30,6 +30,17 @@ function getClient() {
   return apiClient;
 }
 
+/**
+ * Whether this source can serve the given asset at all — distinct from a
+ * transient fetch failure. Callers (priceOracle's fetchFromAllSources)
+ * check this before ever invoking the circuit-breaker-wrapped fetchPrice,
+ * so a permanently-unsupported asset never counts toward this source's
+ * failure threshold (#130).
+ */
+function isSupported(assetCode) {
+  return Boolean(STELLAR_COINGECKO_MAP[assetCode]);
+}
+
 async function fetchPrice(assetCode) {
   const coinId = STELLAR_COINGECKO_MAP[assetCode];
   if (!coinId) {
@@ -81,4 +92,4 @@ async function fetchPrice(assetCode) {
   }
 }
 
-module.exports = { fetchPrice, getCircuitState: circuit.getState };
+module.exports = { fetchPrice, isSupported, getCircuitState: circuit.getState };

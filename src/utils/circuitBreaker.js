@@ -33,6 +33,21 @@ class CircuitBreaker {
     return this.getState() === STATES.OPEN;
   }
 
+  /**
+   * Wraps a call in the breaker's failure accounting. `fn` returning
+   * `null`/`undefined` is treated exactly like a thrown error — it counts
+   * as a failure and can trip the breaker OPEN.
+   *
+   * Contract for callers: only pass `fn` here for a call the wrapped source
+   * is actually expected to be able to answer. If a source can never serve
+   * a given request (e.g. an asset it doesn't track at all), that's a
+   * permanent, per-request condition, not a signal about the source's
+   * health — decide that *before* calling `call()`, and skip it entirely
+   * rather than letting a "not supported" response reach here as a `null`.
+   * priceOracle.js's `fetchFromAllSources` does this via each source's
+   * `isSupported(assetCode, issuer)` (see #130); any future caller wrapping
+   * a new per-item resource in a shared breaker should do the same.
+   */
   async call(fn) {
     this._moveToHalfOpenIfReady();
 

@@ -251,6 +251,8 @@ The application reads configurations from the `.env` file at the root.
 | `CIRCUIT_BREAKER_FAILURE_THRESHOLD` | Source failures before opening a price-source circuit | 3 | No |
 | `CIRCUIT_BREAKER_SUCCESS_THRESHOLD` | Half-open successes required to close a circuit | 1 | No |
 | `CIRCUIT_BREAKER_TIMEOUT_MS` | Open-circuit cool-down before a half-open probe | 30000 | No |
+
+Each price source (`stellar_dex`, `coingecko`, `coinmarketcap`) gets one circuit breaker shared across every watched asset. `CIRCUIT_BREAKER_FAILURE_THRESHOLD` only counts genuine failures for an asset a source is supposed to support (network errors, unexpected empty responses) — a source being asked about an asset it doesn't support at all (e.g. CoinGecko has no mapping for anything but XLM) is filtered out before it ever reaches the breaker, so it can't trip that source offline for the other assets it does support.
 | `ADMIN_API_KEY` | Bootstrap admin bearer token for API key management | empty | Yes, for protected endpoints |
 | `AIRDROP_CSV_MAX_BYTES` | Maximum recipient CSV upload size in bytes | 5242880 (5 MiB) | No |
 | `AIRDROP_JSON_MAX_BYTES` | Maximum JSON request body size; 2 MiB accommodates 10,000 inline recipients | 2097152 (2 MiB) | No |

@@ -279,4 +279,28 @@ describe('CoinMarketCap source', () => {
       expect(coinmarketcap.getCircuitState().open).toBe(false);
     });
   });
+
+  describe('isSupported', () => {
+    test('is true for an asset with no issuer required (XLM)', () => {
+      const coinmarketcap = loadSource();
+      expect(coinmarketcap.isSupported('XLM')).toBe(true);
+    });
+
+    test('is true for a configured asset:issuer pair (USDC)', () => {
+      const coinmarketcap = loadSource();
+      expect(coinmarketcap.isSupported('USDC', mockUsdcIssuer)).toBe(true);
+    });
+
+    test('is false for an issuer not present in assetIssuerMap', () => {
+      const coinmarketcap = loadSource();
+      expect(coinmarketcap.isSupported('USDC', 'GSOMEOTHERISSUER')).toBe(
+        false,
+      );
+    });
+
+    test('is false for an asset with no mapping at all', () => {
+      const coinmarketcap = loadSource();
+      expect(coinmarketcap.isSupported('SOME_UNKNOWN_ASSET')).toBe(false);
+    });
+  });
 });

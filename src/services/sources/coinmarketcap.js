@@ -51,6 +51,18 @@ function resolveMarket(assetCode, issuer) {
   return market;
 }
 
+/**
+ * Whether this source can serve the given asset/issuer at all — distinct
+ * from a transient fetch failure. Callers (priceOracle's fetchFromAllSources)
+ * check this before ever invoking the circuit-breaker-wrapped fetchPrice, so
+ * an asset/issuer combination missing from assetIssuerMap never counts
+ * toward this source's failure threshold (#130). Reuses resolveMarket so
+ * this can never drift from fetchPrice's own notion of "supported".
+ */
+function isSupported(assetCode, issuer = null) {
+  return Boolean(resolveMarket(assetCode, issuer));
+}
+
 async function fetchPrice(assetCode, issuer = null) {
   if (!config.coinmarketcap.apiKey) {
     logger.debug('CoinMarketCap API key not configured');
@@ -107,4 +119,4 @@ async function fetchPrice(assetCode, issuer = null) {
   }
 }
 
-module.exports = { fetchPrice, getCircuitState: circuit.getState };
+module.exports = { fetchPrice, isSupported, getCircuitState: circuit.getState };

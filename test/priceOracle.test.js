@@ -19,6 +19,10 @@ const mockStellarFetch = jest.fn();
 const mockCoingeckoFetch = jest.fn();
 const mockCoinmarketcapFetch = jest.fn();
 
+const mockStellarIsSupported = jest.fn();
+const mockCoingeckoIsSupported = jest.fn();
+const mockCoinmarketcapIsSupported = jest.fn();
+
 const mockLogger = {
   info: jest.fn(),
   warn: jest.fn(),
@@ -33,9 +37,18 @@ jest.mock('../src/services/cache', () => ({
   getClient: mockCacheGetClient,
 }));
 
-jest.mock('../src/services/sources/stellarDex', () => ({ fetchPrice: mockStellarFetch }));
-jest.mock('../src/services/sources/coingecko', () => ({ fetchPrice: mockCoingeckoFetch }));
-jest.mock('../src/services/sources/coinmarketcap', () => ({ fetchPrice: mockCoinmarketcapFetch }));
+jest.mock('../src/services/sources/stellarDex', () => ({
+  fetchPrice: mockStellarFetch,
+  isSupported: mockStellarIsSupported,
+}));
+jest.mock('../src/services/sources/coingecko', () => ({
+  fetchPrice: mockCoingeckoFetch,
+  isSupported: mockCoingeckoIsSupported,
+}));
+jest.mock('../src/services/sources/coinmarketcap', () => ({
+  fetchPrice: mockCoinmarketcapFetch,
+  isSupported: mockCoinmarketcapIsSupported,
+}));
 
 jest.mock('../src/config', () => ({
   price: {
@@ -58,11 +71,24 @@ beforeEach(() => {
   mockStellarFetch.mockReset();
   mockCoingeckoFetch.mockReset();
   mockCoinmarketcapFetch.mockReset();
+  mockStellarIsSupported.mockReset();
+  mockCoingeckoIsSupported.mockReset();
+  mockCoinmarketcapIsSupported.mockReset();
   Object.values(mockLogger).forEach((fn) => fn.mockClear());
 
-  // Sensible defaults: cache writes succeed, cache empty unless a test says otherwise.
+  // Sensible defaults: cache writes succeed, cache empty unless a test says
+  // otherwise; every source supports every asset unless a test says
+  // otherwise, so existing tests that never touch isSupported keep exercising
+  // the breaker-wrapped fetch path exactly as before #130's fix.
   mockCacheGet.mockResolvedValue(null);
   mockCacheSet.mockResolvedValue(undefined);
+  mockStellarIsSupported.mockReturnValue(true);
+  mockCoingeckoIsSupported.mockReturnValue(true);
+  mockCoinmarketcapIsSupported.mockReturnValue(true);
+
+  // #130's tests deliberately trip breakers via repeated failures; reset
+  // them after every test so state never leaks into the next one.
+  oracle.resetCircuitBreakers();
 });
 
 describe('median', () => {
@@ -278,6 +304,67 @@ describe('fetchFromAllSources', () => {
     const results = await fetchFromAllSources('XLM', null);
 
     expect(results).toEqual([{ source: 'stellar_dex', price: 0.1 }]);
+  });
+
+  // #130: a source that doesn't support the requested asset must never
+  // reach the circuit breaker at all — that's a permanent, per-asset
+  // condition, not a signal about the source's health.
+  describe('unsupported-asset false-trip regression (#130)', () => {
+    test('skips a source entirely, never calling fetch, when it does not support the asset', async () => {
+      mockCoingeckoIsSupported.mockReturnValue(false);
+      mockStellarFetch.mockResolvedValueOnce(0.1);
+      mockCoinmarketcapFetch.mockResolvedValueOnce(0.12);
+
+      const results = await fetchFromAllSources('USDC', null);
+
+      expect(mockCoingeckoFetch).not.toHaveBeenCalled();
+      expect(results).toEqual([
+        { source: 'stellar_dex', price: 0.1 },
+        { source: 'coinmarketcap', price: 0.12 },
+      ]);
+    });
+
+    test('many repeated lookups for an unsupported asset never trip that source open, and a supported asset keeps succeeding via it throughout', async () => {
+      mockCoingeckoIsSupported.mockImplementation((assetCode) => assetCode === 'XLM');
+
+      // Simulate 5 consecutive refresh-cycle lookups for an asset CoinGecko
+      // was never mapped for (default failureThreshold is 3 — if these
+      // reached the breaker, it would already be open by the 3rd).
+      for (let i = 0; i < 5; i += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        await fetchFromAllSources('SOME_UNMAPPED_ASSET', null);
+      }
+
+      expect(mockCoingeckoFetch).not.toHaveBeenCalled();
+      expect(oracle.getCircuitStates().coingecko).toBe('closed');
+
+      // A CoinGecko-supported asset fetched right after still gets a
+      // CoinGecko contribution — the breaker was never touched.
+      mockCoingeckoFetch.mockResolvedValueOnce(0.11);
+      const results = await fetchFromAllSources('XLM', null);
+
+      expect(results).toContainEqual({ source: 'coingecko', price: 0.11 });
+    });
+
+    test('a source still trips open after failureThreshold genuine failures for an asset it supports', async () => {
+      mockCoingeckoIsSupported.mockReturnValue(true);
+      mockCoingeckoFetch.mockResolvedValue(null); // genuine "no data" every time, for a supported asset
+
+      // Default failureThreshold is 3 (no config.price.circuitBreaker override in this suite).
+      await fetchFromAllSources('XLM', null);
+      await fetchFromAllSources('XLM', null);
+      await fetchFromAllSources('XLM', null);
+
+      expect(oracle.getCircuitStates().coingecko).toBe('open');
+
+      // Once open, the breaker itself skips the call — fetch is not
+      // invoked a 4th time even though this asset is supported.
+      mockCoingeckoFetch.mockClear();
+      mockCoingeckoFetch.mockResolvedValueOnce(0.11);
+      await fetchFromAllSources('XLM', null);
+
+      expect(mockCoingeckoFetch).not.toHaveBeenCalled();
+    });
   });
 });
 

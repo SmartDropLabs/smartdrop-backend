@@ -173,4 +173,20 @@ describe('Stellar DEX source', () => {
       { code: 'USDC', issuer: config.stellar.usdcIssuer }
     );
   });
+
+  describe('isSupported', () => {
+    test('is true for XLM regardless of issuer', () => {
+      expect(stellarDex.isSupported('XLM')).toBe(true);
+      expect(stellarDex.isSupported('xlm')).toBe(true);
+    });
+
+    test('is true for a non-XLM asset with an issuer', () => {
+      expect(stellarDex.isSupported('USDC', ISSUER)).toBe(true);
+    });
+
+    test('is false for a non-XLM asset with no issuer', () => {
+      expect(stellarDex.isSupported('USDC')).toBe(false);
+      expect(stellarDex.isSupported('USDC', null)).toBe(false);
+    });
+  });
 });

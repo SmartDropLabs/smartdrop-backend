@@ -13,17 +13,20 @@ const SOURCES = [
   {
     name: 'stellar_dex',
     fetch: stellarDex.fetchPrice,
+    isSupported: stellarDex.isSupported,
     breaker: new CircuitBreaker('stellar_dex', breakerOptions),
   },
   {
     name: 'coingecko',
     fetch: coingecko.fetchPrice,
+    isSupported: coingecko.isSupported,
     breaker: new CircuitBreaker('coingecko', breakerOptions),
     getCircuitState: coingecko.getCircuitState,
   },
   {
     name: 'coinmarketcap',
     fetch: coinmarketcap.fetchPrice,
+    isSupported: coinmarketcap.isSupported,
     breaker: new CircuitBreaker('coinmarketcap', breakerOptions),
     getCircuitState: coinmarketcap.getCircuitState,
   },
@@ -106,6 +109,16 @@ async function fetchFromAllSources(assetCode, issuer) {
   const results = [];
 
   for (const source of SOURCES) {
+    // A source that cannot serve this asset at all (e.g. CoinGecko has no
+    // mapping for a non-XLM asset) is a permanent, per-asset condition, not
+    // a source failure — skip the breaker-wrapped call entirely so it never
+    // counts toward that source's failure threshold. Without this, a
+    // source asked about even one asset it doesn't support would eventually
+    // trip its circuit open for every asset it *does* support (#130).
+    if (typeof source.isSupported === 'function' && !source.isSupported(assetCode, issuer)) {
+      continue;
+    }
+
     try {
       const price = await source.breaker.call(() => source.fetch(assetCode, issuer));
       if (price !== null && price > 0) {

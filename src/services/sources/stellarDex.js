@@ -42,6 +42,20 @@ async function fetchOrderBookMidpoint(horizon, base, counter) {
   return midpointFromOrderBook(orderBook);
 }
 
+/**
+ * Whether this source can serve the given asset/issuer at all — distinct
+ * from a transient fetch failure. Callers (priceOracle's fetchFromAllSources)
+ * check this before ever invoking the circuit-breaker-wrapped fetchPrice, so
+ * an issued asset queried without an issuer never counts toward this
+ * source's failure threshold (#130). Matches fetchPrice's own
+ * issuer-required check exactly.
+ */
+function isSupported(assetCode, issuer = null) {
+  const normalizedCode = (assetCode || '').toUpperCase();
+  if (normalizedCode === 'XLM') return true;
+  return Boolean(issuer);
+}
+
 async function fetchPrice(assetCode, issuer) {
   try {
     const horizon = getServer();
@@ -81,4 +95,4 @@ async function getXlmUsdPrice(horizon) {
   }
 }
 
-module.exports = { fetchPrice };
+module.exports = { fetchPrice, isSupported };

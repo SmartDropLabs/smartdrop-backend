@@ -187,4 +187,16 @@ describe('CoinGecko source', () => {
       expect(coingecko.getCircuitState().open).toBe(false);
     });
   });
+
+  describe('isSupported', () => {
+    test('is true for XLM', () => {
+      const coingecko = loadSource();
+      expect(coingecko.isSupported('XLM')).toBe(true);
+    });
+
+    test('is false for an asset with no CoinGecko mapping (e.g. USDC)', () => {
+      const coingecko = loadSource();
+      expect(coingecko.isSupported('USDC')).toBe(false);
+    });
+  });
 });

@@ -68,6 +68,33 @@ app.use(helmet());
 app.use(buildCorsMiddleware(config.corsAllowedOrigins));
 app.use(express.json({ limit: config.airdrops.jsonMaxBytes }));
 
+/**
+ * Computes the overall aggregate health status of the application based on Redis connection state
+ * and a list of leader-elected background job health statistics.
+ *
+ * Status levels:
+ *  - unhealthy: Redis is disconnected, or any job is stalled.
+ *  - degraded: No job is stalled, but at least one job is not yet healthy (meaning it's in its startup grace period).
+ *  - ok: Redis is connected and all jobs are healthy.
+ */
+function computeAggregateStatus(redisConnected, jobHealths) {
+  if (!redisConnected) {
+    return 'unhealthy';
+  }
+
+  const anyStalled = jobHealths.some((job) => job.stalled);
+  if (anyStalled) {
+    return 'unhealthy';
+  }
+
+  const anyUnhealthy = jobHealths.some((job) => !job.healthy);
+  if (anyUnhealthy) {
+    return 'degraded';
+  }
+
+  return 'ok';
+}
+
 app.get('/health', (req, res) => {
   const redisConnected = cache.isConnected();
   const priceRefreshHealth = wrappedPriceRefreshJob.getHealth();
@@ -83,15 +110,11 @@ app.get('/health', (req, res) => {
   // aren't running locally), but that's expected — the leader is doing the
   // work. The health check distinguishes "not leader" from "stalled" via the
   // `leader` field.
-  let status = 'ok';
-  if (!redisConnected || !priceRefreshHealth.healthy || !webhookWorkerHealth.healthy) {
-    const jobsDegraded =
-      (!priceRefreshHealth.healthy && !priceRefreshHealth.stalled) ||
-      (!webhookWorkerHealth.healthy && !webhookWorkerHealth.stalled);
-    status = (!redisConnected || priceRefreshHealth.stalled || webhookWorkerHealth.stalled)
-      ? 'unhealthy'
-      : jobsDegraded ? 'degraded' : 'unhealthy';
-  }
+  const status = computeAggregateStatus(redisConnected, [
+    priceRefreshHealth,
+    webhookWorkerHealth,
+    airdropExpiryHealth,
+  ]);
 
   res.json({
     status,

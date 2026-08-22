@@ -33,6 +33,13 @@ jest.mock('../src/jobs/webhookRetryWorker', () => ({
   getHealth: () => ({ healthy: true, lastSuccessAt: Date.now(), lastError: null, stalled: false }),
 }));
 
+jest.mock('../src/jobs/airdropExpiry', () => ({
+  start: jest.fn(),
+  stop: jest.fn(),
+  tick: jest.fn(),
+  getHealth: () => ({ healthy: true, lastSuccessAt: Date.now(), lastError: null, stalled: false }),
+}));
+
 jest.mock('../src/ws/priceWebSocket', () => ({
   attach: jest.fn(),
 }));
@@ -115,7 +122,7 @@ describe('GET /health – response shape', () => {
     });
   });
 
-  test('jobs field contains price_refresh and webhook_retry_worker entries', async () => {
+  test('jobs field contains price_refresh, webhook_retry_worker, and airdrop_expiry entries', async () => {
     jest.resetModules();
     const app = loadApp();
 
@@ -123,8 +130,9 @@ describe('GET /health – response shape', () => {
 
     expect(res.body.jobs).toHaveProperty('price_refresh');
     expect(res.body.jobs).toHaveProperty('webhook_retry_worker');
+    expect(res.body.jobs).toHaveProperty('airdrop_expiry');
 
-    for (const key of ['price_refresh', 'webhook_retry_worker']) {
+    for (const key of ['price_refresh', 'webhook_retry_worker', 'airdrop_expiry']) {
       const job = res.body.jobs[key];
       expect(job).toHaveProperty('healthy');
       expect(job).toHaveProperty('last_success_at');
@@ -266,6 +274,72 @@ describe('GET /health – status computation', () => {
     const res = await request(app).get('/health');
 
     expect(res.body.status).not.toBe('ok');
+  });
+
+  test('status is unhealthy when airdrop-expiry job is stalled', async () => {
+    jest.resetModules();
+
+    jest.mock('../src/services/cache', () => ({
+      isConnected: () => true,
+      disconnect: jest.fn(),
+    }));
+    jest.mock('../src/jobs/priceRefresh', () => ({
+      start: jest.fn(),
+      stop: jest.fn(),
+      getHealth: () => ({ healthy: true, lastSuccessAt: Date.now(), lastError: null, stalled: false }),
+    }));
+    jest.mock('../src/jobs/webhookRetryWorker', () => ({
+      start: jest.fn(),
+      stop: jest.fn(),
+      tick: jest.fn(),
+      getHealth: () => ({ healthy: true, lastSuccessAt: Date.now(), lastError: null, stalled: false }),
+    }));
+    jest.mock('../src/jobs/airdropExpiry', () => ({
+      start: jest.fn(),
+      stop: jest.fn(),
+      tick: jest.fn(),
+      getHealth: () => ({ healthy: false, lastSuccessAt: null, lastError: 'Horizon unreachable', stalled: true }),
+    }));
+
+    const app = loadApp();
+    const res = await request(app).get('/health');
+
+    expect(res.body.status).toBe('unhealthy');
+    expect(res.body.jobs.airdrop_expiry.stalled).toBe(true);
+    expect(res.body.jobs.airdrop_expiry.last_error).toBe('Horizon unreachable');
+  });
+
+  test('status is degraded when airdrop-expiry job has not yet run', async () => {
+    jest.resetModules();
+
+    jest.mock('../src/services/cache', () => ({
+      isConnected: () => true,
+      disconnect: jest.fn(),
+    }));
+    jest.mock('../src/jobs/priceRefresh', () => ({
+      start: jest.fn(),
+      stop: jest.fn(),
+      getHealth: () => ({ healthy: true, lastSuccessAt: Date.now(), lastError: null, stalled: false }),
+    }));
+    jest.mock('../src/jobs/webhookRetryWorker', () => ({
+      start: jest.fn(),
+      stop: jest.fn(),
+      tick: jest.fn(),
+      getHealth: () => ({ healthy: true, lastSuccessAt: Date.now(), lastError: null, stalled: false }),
+    }));
+    jest.mock('../src/jobs/airdropExpiry', () => ({
+      start: jest.fn(),
+      stop: jest.fn(),
+      tick: jest.fn(),
+      getHealth: () => ({ healthy: false, lastSuccessAt: null, lastError: null, stalled: false }),
+    }));
+
+    const app = loadApp();
+    const res = await request(app).get('/health');
+
+    expect(res.body.status).toBe('degraded');
+    expect(res.body.jobs.airdrop_expiry.healthy).toBe(false);
+    expect(res.body.jobs.airdrop_expiry.stalled).toBe(false);
   });
 });
 

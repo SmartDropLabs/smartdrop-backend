@@ -1,5 +1,10 @@
 'use strict';
 
+// None of the pool events are actually dispatched by the codebase today (the
+// event indexer only parses airdrop lifecycle events). They are registered
+// here as forward-looking placeholders, but subscribing to them will not
+// trigger any deliveries until the corresponding indexer and dispatch logic
+// are implemented.
 const POOL_EVENTS = Object.freeze([
   'pool.created',
   'pool.assets_locked',

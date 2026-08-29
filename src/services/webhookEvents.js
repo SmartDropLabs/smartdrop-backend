@@ -28,6 +28,7 @@ const ALL_EVENTS = Object.freeze([...POOL_EVENTS, ...PRICE_EVENTS, ...AIRDROP_EV
 const EVENT_SET = new Set(ALL_EVENTS);
 
 const WILDCARD = '*';
+const MAX_EXPLICIT_SUBSCRIPTIONS = 25;
 
 function isKnownEvent(eventType) {
   return typeof eventType === 'string' && EVENT_SET.has(eventType);
@@ -35,6 +36,9 @@ function isKnownEvent(eventType) {
 
 function isValidSubscription(events) {
   if (!Array.isArray(events) || events.length === 0) return false;
+  if (events.length === 1 && events[0] === WILDCARD) return true;
+  if (events.includes(WILDCARD)) return false;
+  if (events.length > MAX_EXPLICIT_SUBSCRIPTIONS) return false;
   return events.every((e) => e === WILDCARD || EVENT_SET.has(e));
 }
 
@@ -50,6 +54,7 @@ module.exports = {
   AIRDROP_EVENTS,
   ALL_EVENTS,
   WILDCARD,
+  MAX_EXPLICIT_SUBSCRIPTIONS,
   isKnownEvent,
   isValidSubscription,
   matchesSubscription,

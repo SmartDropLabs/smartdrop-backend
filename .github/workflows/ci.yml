@@ -41,14 +41,89 @@ jobs:
                   node-version: 20
                   cache: npm
 
+            - name: Validate manifest and source files parse
+              run: |
+                  node -e "JSON.parse(require('fs').readFileSync('package.json','utf8'))"
+                  find src -name '*.js' -exec node -c {} +
+
             - name: Install dependencies
               run: npm ci
+
+            - name: Audit dependencies for known vulnerabilities
+              run: npm audit --audit-level=high
 
             - name: Lint OpenAPI spec
               run: npx @redocly/cli lint openapi.yaml
 
+            - name: Lint source (ESLint)
+              run: npx eslint .
+              continue-on-error: true
+
             - name: Run tests
               run: npm test
+
+    migrations:
+        name: Migration up/rollback
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        services:
+            postgres:
+                image: postgres:16-alpine
+                env:
+                    POSTGRES_USER: smartdrop
+                    POSTGRES_PASSWORD: smartdrop
+                    POSTGRES_DB: smartdrop_test
+                ports:
+                    - 5432:5432
+                options: >-
+                    --health-cmd pg_isready
+                    --health-interval 10s
+                    --health-timeout 5s
+                    --health-retries 5
+        env:
+            NODE_ENV: test
+            DATABASE_URL: postgres://smartdrop:smartdrop@127.0.0.1:5432/smartdrop_test
+        steps:
+            - name: Check out repository
+              uses: actions/checkout@v4
+
+            - name: Set up Node.js 20
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 20
+                  cache: npm
+
+            - name: Install dependencies
+              run: npm ci
+
+            # Rollback was previously never exercised anywhere, so a broken
+            # down() would only be discovered during an incident (issue #252).
+            - name: Preview migrations (dry run)
+              run: npm run migrate:dry-run
+
+            - name: Apply migrations
+              run: npm run migrate
+
+            - name: Show migration status
+              run: npm run migrate:status
+
+            - name: Roll back the last batch
+              run: npm run migrate:rollback
+
+            - name: Re-apply migrations after rollback
+              run: npm run migrate
+
+            - name: Verify destructive migrations are blocked in production
+              run: |
+                  set +e
+                  NODE_ENV=production npm run migrate --silent
+                  status=$?
+                  set -e
+                  if [ "$status" -eq 0 ]; then
+                    echo "Expected the production guard to block destructive migrations, but it exited 0"
+                    exit 1
+                  fi
+                  echo "Production guard correctly blocked destructive migrations (exit $status)"
 
     docker-build:
         runs-on: ubuntu-latest

@@ -72,6 +72,16 @@ describe('CORS rejected origins', () => {
     expect(res.status).toBe(403);
   });
 
+  test('rejected origin includes the offending origin in the error message', async () => {
+    const res = await request(app)
+      .get('/test')
+      .set('Origin', 'https://evil.com');
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBeDefined();
+    expect(res.body.error.message).toContain('https://evil.com');
+    expect(res.body.error.message).toContain('not allowed');
+  });
+
   test('rejected origin does not receive Access-Control-Allow-Origin', async () => {
     const res = await request(app)
       .get('/test')

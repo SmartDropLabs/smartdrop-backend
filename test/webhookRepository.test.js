@@ -12,6 +12,7 @@ jest.mock('../src/logger', () => ({
 
 const webhookRepo = require('../src/repositories/webhookRepository');
 const events = require('../src/services/webhookEvents');
+const { isEncrypted } = require('../src/services/webhookEncryption');
 
 beforeEach(() => reset());
 
@@ -93,5 +94,58 @@ describe('webhookRepository', () => {
     expect(ids).toEqual([a.id].sort());
     expect(ids).not.toContain(b.id);
     expect(ids).not.toContain(c.id);
+  });
+
+  describe('secret encryption at rest (#145)', () => {
+    test('the secret stored in the backend is encrypted, not the plaintext', async () => {
+      const plaintext = 'whsec_plaintextvalue0000000';
+      const w = await webhookRepo.create({ url: 'https://a.com', events: ['*'], secret: plaintext });
+      const raw = mockHelper.store.get(`webhook:${w.id}`);
+      expect(raw.secret).not.toBe(plaintext);
+      expect(isEncrypted(raw.secret)).toBe(true);
+    });
+
+    test('findById/listAll return the decrypted plaintext secret to callers', async () => {
+      const plaintext = 'whsec_plaintextvalue0000001';
+      const w = await webhookRepo.create({ url: 'https://a.com', events: ['*'], secret: plaintext });
+      expect((await webhookRepo.findById(w.id)).secret).toBe(plaintext);
+      expect((await webhookRepo.listAll())[0].secret).toBe(plaintext);
+    });
+
+    test('updating the secret re-encrypts the new value at rest', async () => {
+      const w = await webhookRepo.create({ url: 'https://a.com', events: ['*'], secret: 'whsec_original00000000000' });
+      const rotated = 'whsec_rotatedsecret00000000';
+      await webhookRepo.update(w.id, { secret: rotated });
+
+      const raw = mockHelper.store.get(`webhook:${w.id}`);
+      expect(raw.secret).not.toBe(rotated);
+      expect(isEncrypted(raw.secret)).toBe(true);
+      expect((await webhookRepo.findById(w.id)).secret).toBe(rotated);
+    });
+
+    test('a patch that does not touch the secret leaves the encrypted value untouched', async () => {
+      const w = await webhookRepo.create({ url: 'https://a.com', events: ['*'], secret: 'whsec_untouched000000000' });
+      const before = mockHelper.store.get(`webhook:${w.id}`).secret;
+      await webhookRepo.update(w.id, { active: false });
+      const after = mockHelper.store.get(`webhook:${w.id}`).secret;
+      expect(after).toBe(before);
+    });
+
+    test('a legacy plaintext-stored record is still read correctly (backward compatibility)', async () => {
+      const cache = require('../src/services/cache');
+      const legacy = {
+        id: 'wh_legacy0000000000000',
+        url: 'https://legacy.com',
+        events: ['*'],
+        secret: 'whsec_neverencrypted00000',
+        active: true,
+        description: null,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+      await cache.set(`webhook:${legacy.id}`, legacy);
+      const found = await webhookRepo.findById(legacy.id);
+      expect(found.secret).toBe('whsec_neverencrypted00000');
+    });
   });
 });

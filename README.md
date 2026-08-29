@@ -4,6 +4,15 @@
 
 HTTP APIs, webhooks, and **indexing** for SmartDrop. This repository contains Node.js services that talk to **Horizon**, **Soroban RPC**, and external APIs.
 
+## API Versioning
+
+The public HTTP API uses path-based versioning under `/api/v1`.
+
+- Backward-compatible additions stay in the existing version.
+- Breaking changes ship under a new path, such as `/api/v2`.
+- Deprecated endpoints should include deprecation guidance in the changelog and OpenAPI docs, and may add `Deprecation` / `Sunset` headers when an endpoint is scheduled for removal.
+- Consumers should treat `/api/v1` as stable until a newer version is explicitly documented.
+
 ## Related repositories
 
 | Repository | Role |
@@ -65,7 +74,24 @@ Registers subscriber endpoints for SmartDrop lifecycle events and delivers signe
 - Timestamped HMAC-SHA256 request signatures
 - At-least-once delivery attempts with exponential backoff
 - Delivery logs with response code, error, duration, and attempt count
+- Delivery records expire after 30 days to keep Redis usage bounded
 - Dead-letter storage after retry exhaustion
+
+### Airdrop Lifecycle & On-Chain Status
+
+**Important:** `POST /api/v1/airdrops` creates an off-chain bookkeeping record
+only — it does **not** submit any transaction to the Stellar network. The
+Soroban contract that actually executes airdrops lives in a separate repository
+(`smartdrop-contracts`). Once the on-chain airdrop ID is known, populate the
+`contract_airdrop_id` field via `PATCH /api/v1/airdrops/:id` to link the REST
+record with indexer-observed on-chain state.
+
+The indexer (`src/indexer/eventStore.js`) independently tracks on-chain
+airdrop events (`airdrop_created`, `recipient_added`, `token_claimed`,
+`airdrop_expired`) keyed by the contract's own airdrop ID. Until the linking
+field is set, the REST-managed airdrop and the indexer's view are
+un correlated — `GET /airdrops/:id/recipients` reflects only the
+originally-submitted intent and does **not** reflect on-chain claim status.
 
 ### Airdrop Expiry Reconciliation
 
@@ -262,7 +288,198 @@ Each price source (`stellar_dex`, `coingecko`, `coinmarketcap`) gets one circuit
 | `LEASE_TTL_MS` | Leader lease TTL in milliseconds — how long a lease is valid without renewal | 15000 | No |
 | `LEASE_RENEW_INTERVAL_MS` | How often the leader renews its lease (and followers check to acquire) | 5000 | No |
 | `LOG_LEVEL` | Logging level: `debug`, `info`, `warn`, or `error` | info | No |
+| `API_KEY_RATELIMIT_WINDOW_SECONDS` | Per-API-key rate-limit window in seconds | 60 | No |
+| `API_KEY_RATELIMIT_FREE_MAX` | Requests per window for `free`-tier keys | 100 | No |
+| `API_KEY_RATELIMIT_PRO_MAX` | Requests per window for `pro`-tier keys | 1000 | No |
+| `API_KEY_RATELIMIT_ADMIN_MAX` | Requests per window for `admin`-tier keys | 10000 | No |
 
+
+---
+
+## Observability
+
+### Startup banner
+
+On startup the server logs a single summary line so an operator can tell what is running without shelling in: application version, Node version, `NODE_ENV`, port, watched asset count and codes, whether the indexer is enabled, the leader-election instance id, and the configured log level.
+
+Redis and database URLs are included with their credentials stripped — a URL that cannot be parsed is logged as `[unparseable]` rather than verbatim, since a URL we cannot parse is also one whose password we cannot locate and remove.
+
+### Request ID correlation
+
+Every request is assigned an id (or adopts an inbound `X-Request-Id`), returned to the caller in the `X-Request-ID` response header and included in JSON response bodies as `request_id`. The id flows through all layers via `AsyncLocalStorage`, so every log line emitted while handling that request carries it automatically — as both `requestId` and the snake_case `request_id` alias — with no manual threading through service and repository calls.
+
+The id is also stamped onto webhook delivery records and forwarded to receivers as an `X-Request-Id` header. Because it is persisted on the delivery, a retry that fires hours later still reports the request that originally caused it. Deliveries originated by background jobs have no inbound request and carry `null`.
+
+---
+
+## Indexer Resilience
+
+The Soroban event indexer polls for contract events on an interval. A
+circuit breaker already guarded individual RPC calls, but the poll loop
+itself woke at a fixed rate, so a struggling node kept being re-probed at
+full speed regardless of how many calls were failing (issue #255).
+
+The poll interval is now adaptive:
+
+- Each consecutive failed cycle multiplies the interval by
+  `INDEXER_BACKOFF_FACTOR` (default 2), capped at
+  `INDEXER_MAX_POLL_INTERVAL_MS` (default 5 minutes) so a long outage cannot
+  push the next attempt arbitrarily far out.
+- The first successful cycle resets the interval to the configured base.
+- While the circuit breaker is open the indexer pauses rather than calling
+  the node at all, and the cycle is counted as skipped rather than attempted.
+
+Lag against the chain tip is tracked and alerted on. Crossing
+`INDEXER_LAG_ALERT_THRESHOLD` ledgers (default 100, roughly 8 minutes at
+Stellar's ~5s ledger close time) logs an error once, and a matching recovery
+line is logged once when lag falls back below it — edge-triggered, so a
+persistently lagging indexer does not bury the moment the lag began under an
+identical warning on every poll.
+
+`GET /api/v1/indexer/status` reports the resulting state:
+
+| Field | Description |
+|-------|-------------|
+| `circuit_state` | `closed`, `open`, or `half-open` |
+| `paused` | `true` while the breaker is open and polling is suspended |
+| `consecutive_failures` | Failed cycles since the last success |
+| `current_poll_interval_ms` | Interval in effect, including any backoff |
+| `ledger_lag` | Ledgers behind the chain tip, or `null` if unknown |
+| `lag_alerting` | `true` while lag exceeds the threshold |
+| `metrics.events_per_second` | Indexing throughput since start |
+| `metrics.error_rate` | Failed cycles as a fraction of completed cycles |
+| `metrics.polls_skipped` | Cycles skipped because the breaker was open |
+
+Rates are `null` rather than `0` before there is anything to divide by, so
+"no data yet" stays distinguishable from "genuinely zero".
+
+---
+
+## Error Codes
+
+Every error response uses the same envelope. Clients should switch on
+`error.code`, which is stable, rather than on `error.message`, which may be
+reworded at any time (issue #253):
+
+```json
+{
+  "error": {
+    "code": "WEBHOOK_NOT_FOUND",
+    "message": "Webhook not found",
+    "request_id": "req_V1StGXR8Z5jdHi6BmyT",
+    "details": { "webhook_id": "wh_123" }
+  }
+}
+```
+
+`details` is present only when an error carries structured context — the
+columns a CSV was missing, the rows that failed validation, the limit that
+was exceeded.
+
+| Code | Status | Meaning |
+|------|--------|---------|
+| `VALIDATION_ERROR` | 400 | Request failed schema validation |
+| `UNAUTHORIZED` | 401 | Missing or invalid API key |
+| `FORBIDDEN` | 403 | Authenticated but not permitted |
+| `NOT_FOUND` | 404 | Generic resource miss |
+| `CONFLICT` | 409 | Request conflicts with current state |
+| `PAYLOAD_TOO_LARGE` | 413 | Request body or upload exceeds its limit |
+| `UNSUPPORTED_MEDIA_TYPE` | 415 | Unsupported content type |
+| `RATE_LIMITED` | 429 | Request rate exceeded; retry after the delay |
+| `INTERNAL_ERROR` | 500 | Unexpected server error |
+| `UPSTREAM_ERROR` | 502 | An upstream dependency failed |
+| `SERVICE_UNAVAILABLE` | 503 | Dependency unavailable |
+| `AIRDROP_NOT_FOUND` | 404 | No airdrop with that id |
+| `AIRDROP_NOT_INDEXED` | 404 | Airdrop exists on chain but is not indexed yet |
+| `RECIPIENT_LIMIT_EXCEEDED` | 400 | Recipient count above the configured maximum |
+| `CSV_INVALID_ENCODING` | 400 | Upload is not valid UTF-8 |
+| `CSV_MISSING_COLUMNS` | 400 | Required `address` / `amount` columns absent |
+| `CSV_MALFORMED` | 400 | One or more rows failed validation |
+| `CSV_EMPTY` | 400 | Upload contained no data rows |
+| `WEBHOOK_NOT_FOUND` | 404 | No webhook with that id |
+| `WEBHOOK_LIMIT_EXCEEDED` | 429 | Subscriber's webhook quota is full |
+| `ALERT_NOT_FOUND` | 404 | No alert with that id |
+| `API_KEY_NOT_FOUND` | 404 | No API key with that id |
+| `PRICE_UNAVAILABLE` | 503 | No price could be sourced |
+| `INDEXER_UNAVAILABLE` | 503 | Indexer could not answer |
+
+Note that `WEBHOOK_LIMIT_EXCEEDED` and `RATE_LIMITED` share a 429 status but
+mean different things: the former is a standing quota on how many webhooks a
+subscriber may own and will not clear by waiting, while the latter is a
+request rate that will.
+
+---
+
+## Recipient CSV Uploads
+
+`POST /api/v1/airdrops/:id/recipients` accepts a CSV with `address` and
+`amount` columns. Column names are matched case-insensitively and ignore
+surrounding whitespace.
+
+Uploads are rejected rather than silently trimmed (issue #254). Previously a
+file whose columns were misnamed, or whose amounts were unparseable, returned
+`201` having imported nothing — indistinguishable from a successful import.
+Now:
+
+- Files above `AIRDROP_CSV_MAX_BYTES` are rejected with `413`.
+- A missing `address` or `amount` column returns `CSV_MISSING_COLUMNS`,
+  naming the columns that were absent and the ones that were found.
+- A file with no data rows returns `CSV_EMPTY`.
+- Any invalid row fails the whole upload with `CSV_MALFORMED`; nothing is
+  partially imported. `details.invalid_rows` lists the offending line numbers
+  (counting the header, so they match a text editor) and why each failed, up
+  to 20 entries.
+- More than `maxRecipients` rows returns `RECIPIENT_LIMIT_EXCEEDED`.
+
+Parsing is streaming — rows are consumed as the parser produces them and an
+oversized file is abandoned partway rather than fully materialized first.
+
+---
+
+## Database Migrations
+
+Migrations live in `src/db/migrations` and run through knex (issue #252):
+
+```bash
+npm run migrate            # apply pending migrations
+npm run migrate:dry-run    # preview without applying
+npm run migrate:status     # show applied and pending migrations
+npm run migrate:rollback   # roll back the last batch
+```
+
+### Safety rails
+
+Before anything is applied, the migration SQL is scanned for destructive
+patterns — `DROP TABLE`/`COLUMN`/`SCHEMA`/`INDEX`/`CONSTRAINT`, `TRUNCATE`,
+`DELETE FROM`, column type changes, `SET NOT NULL`, and renames. Keywords
+inside SQL comments are ignored.
+
+Against `NODE_ENV=production`, a migration containing any of those is
+**refused** unless `--allow-destructive` is passed:
+
+```bash
+NODE_ENV=production node src/db/migrate.js up --allow-destructive
+```
+
+The scan is a safety net, not a SQL parser: a migration that builds
+statements dynamically at runtime can still evade it, which is why the
+production path requires a human-supplied flag rather than trusting the scan
+to be exhaustive.
+
+`--dry-run` reports which migrations are pending and which destructive
+operations each contains. It degrades to static analysis of all migration
+files when no database is reachable, so "what would this drop?" is
+answerable before pointing the CLI at a live database.
+
+Every run is preceded by a pre-flight check that the database is reachable
+and readable, and each attempt — applied, failed, or rolled back — appends a
+row to `migration_audit_log`. That table is deliberately separate from knex's
+own `knex_migrations`: the latter records only which migrations are currently
+applied, while the audit log records every attempt, which is what is actually
+needed when reconstructing what happened to a database.
+
+CI exercises the full up → rollback → up cycle against a real PostgreSQL
+service, and asserts that the production guard blocks destructive migrations.
 
 ---
 
@@ -353,7 +570,21 @@ DELETE /api/v1/keys/:id
 
 ```
 
-`POST /api/v1/keys` returns the raw `api_key` only once. Stored keys are hashed with SHA-256 and listed with metadata only (`label`, `created_at`, `last_used_at`, `scopes`, and `key_prefix`).
+`POST /api/v1/keys` returns the raw `api_key` only once. Stored keys are hashed with SHA-256 and listed with metadata only (`label`, `created_at`, `last_used_at`, `scopes`, `tier`, and `key_prefix`).
+
+#### Per-key rate limit tiers
+
+Every authenticated request is metered in a bucket keyed by the API key itself, not by IP, so one abusive key can no longer consume the capacity of every other key behind the same address. Each key carries a `tier` that sizes its bucket:
+
+| Tier | Default limit | Environment variable |
+|------|---------------|----------------------|
+| `free` | 100 requests / minute | `API_KEY_RATELIMIT_FREE_MAX` |
+| `pro` | 1000 requests / minute | `API_KEY_RATELIMIT_PRO_MAX` |
+| `admin` | 10000 requests / minute | `API_KEY_RATELIMIT_ADMIN_MAX` |
+
+The window is set by `API_KEY_RATELIMIT_WINDOW_SECONDS` (default 60). Pass `tier` when creating a key; omit it and the key gets `free`. Keys created before tiers existed also resolve to `free` rather than being locked out.
+
+Every metered response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`, and `X-RateLimit-Tier`. Exceeding the limit returns `429` with a `Retry-After` header. As with the per-IP limiter, a Redis outage fails open — a cache problem must not lock every consumer out of the platform.
 
 ### Webhook Endpoints
 
@@ -403,6 +634,15 @@ Returns the overall health of the service and its dependencies.
 | `last_error` | Error message from the last failed tick, or `null` |
 | `stalled` | `true` when no successful tick has occurred within 2× the job interval |
 
+**Additional `jobs.webhook_retry_worker` fields** — queue depth, so operators can see retries backing up rather than only that the worker is alive:
+
+| Field | Description |
+|-------|-------------|
+| `pending_retries` | Deliveries currently queued for retry. `null` means Redis could not be read, which is not the same as an empty queue |
+| `last_batch_size` | Number of retries claimed on the most recent tick |
+| `avg_delivery_latency_ms` | Mean time per retry attempt since process start, or `null` before the first attempt |
+| `total_retries_processed` | Retry attempts made since process start |
+
 **Example response:**
 
 ```json
@@ -421,7 +661,11 @@ Returns the overall health of the service and its dependencies.
       "healthy": true,
       "last_success_at": "2024-01-15T10:29:58.000Z",
       "last_error": null,
-      "stalled": false
+      "stalled": false,
+      "pending_retries": 4,
+      "last_batch_size": 2,
+      "avg_delivery_latency_ms": 12.5,
+      "total_retries_processed": 91
     }
   },
   "database": { "configured": true, "checked": false, "status": "unused" },
@@ -517,12 +761,13 @@ Content-Type: application/json
 ```
 
 The response includes the secret in plaintext **exactly once**. Subsequent reads only return `secret_preview`.
+Wildcard subscriptions are supported as `["*"]`, but explicit event lists are capped at 25 known events.
 
 #### Manage webhooks
 ```
 GET    /api/v1/webhooks               # list
 GET    /api/v1/webhooks/:id           # fetch one
-PATCH  /api/v1/webhooks/:id           # update url / events / active / description
+PATCH  /api/v1/webhooks/:id           # update url / events / filters / active / description
 DELETE /api/v1/webhooks/:id           # remove
 ```
 
@@ -538,8 +783,9 @@ Sends a synthetic `pool.assets_locked` payload to the registered URL and returns
 #### Inspect deliveries (admin dashboard feed)
 ```
 GET /api/v1/webhooks/:id/deliveries?limit=50
+GET /api/v1/webhooks/:id/deliveries?limit=50&status=failed
 ```
-Returns the most recent delivery records: `status` (`success | pending | failed`), `attempts`, `response_status`, `last_error`, `next_retry_at`.
+Returns the most recent delivery records: `status` (`success | pending | failed`), `attempts`, `response_status`, `last_error`, `next_retry_at`, and `trace_id`. Use `status=failed` to inspect dead-lettered deliveries.
 
 ### Outgoing request shape
 
@@ -619,10 +865,25 @@ The API returns appropriate HTTP status codes:
 ```json
 {
   "error": "Error type",
-  "message": "Detailed error message"
+  "message": "Detailed error message",
+  "request_id": "req_…"
 }
-
 ```
+
+### `X-Request-ID` correlation header
+
+Every response carries an `X-Request-ID` header, and every JSON response body
+(and every error body) includes a `request_id` field, so you can correlate a
+client request with the server's logs.
+
+`X-Request-ID` is an **optional client hint**, not an authoritative or
+guaranteed-unique identifier. A client may supply its own value via the
+`X-Request-ID` request header to tie its own logs to SmartDrop's; if the value
+is missing, malformed (contains characters outside `[A-Za-z0-9_-]`), or longer
+than 128 characters, the server **ignores it and generates a fresh ID instead**.
+Treat the returned `request_id` purely as a correlation aid — multiple unrelated
+requests can share a client-chosen value, so it must not be used as a security
+or uniqueness anchor. See issue #133.
 
 ---
 

@@ -125,13 +125,18 @@ describe('pagination envelope contract (#131)', () => {
   });
 
   test('GET /webhooks matches the canonical envelope', async () => {
-    await request(app).post('/api/v1/webhooks').send({
-      url: 'https://example.com/hook',
-      events: ['*'],
-      secret: 'whsec_aaaaaaaaaaaaaaaa',
-    });
+    await request(app)
+      .post('/api/v1/webhooks')
+      .set('Authorization', `Bearer ${adminApiKey}`)
+      .send({
+        url: 'https://example.com/hook',
+        events: ['*'],
+        secret: 'whsec_aaaaaaaaaaaaaaaa',
+      });
 
-    const res = await request(app).get('/api/v1/webhooks');
+    const res = await request(app)
+      .get('/api/v1/webhooks')
+      .set('Authorization', `Bearer ${adminApiKey}`);
     expect(res.status).toBe(200);
     expectValidPaginationEnvelope(res.body);
   });

@@ -59,6 +59,31 @@ async function sendSignedRequest(webhookUrl, secret, payload, options = {}) {
   }
 }
 
+async function probeReachability(webhookUrl, options = {}) {
+  const timeoutMs = options.timeoutMs || 3000;
+  const lastError = { message: 'No response received' };
+
+  for (const method of ['head', 'get']) {
+    try {
+      const response = await axios[method](webhookUrl, {
+        timeout: timeoutMs,
+        validateStatus: () => true,
+      });
+
+      if (response && response.status >= 200 && response.status < 400) {
+        return { reachable: true, status: response.status, method };
+      }
+      if (response && response.status) {
+        return { reachable: false, status: response.status, method, error: `Target responded with HTTP ${response.status}` };
+      }
+    } catch (err) {
+      lastError.message = err?.message || 'Request failed';
+    }
+  }
+
+  return { reachable: false, method: 'head', error: lastError.message };
+}
+
 async function deliver(webhookUrl, secret, payload) {
   try {
     const result = await sendSignedRequest(webhookUrl, secret, payload);
@@ -84,6 +109,7 @@ async function deliver(webhookUrl, secret, payload) {
 module.exports = {
   buildSignatureHeaders,
   deliver,
+  probeReachability,
   sendSignedRequest,
   signPayload,
   verifySignature,

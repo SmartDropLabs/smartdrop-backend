@@ -177,6 +177,8 @@ function createCacheMock() {
   const cacheMock = {
     getClient: () => redis,
     isConnected: () => true,
+    getCommandQueueLength: () => 0,
+    getConcurrencyStats: () => ({ active: 0, waiting: 0, available: 50, max: 50 }),
     get: jest.fn(async (key) => {
       const v = store.get(key);
       return v !== undefined ? JSON.parse(JSON.stringify(v)) : null;

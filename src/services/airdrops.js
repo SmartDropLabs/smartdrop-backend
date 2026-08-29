@@ -14,6 +14,12 @@ function recipientsKey(airdropId) {
   return `airdrop:${airdropId}:recipients`;
 }
 
+// Tracks the set of addresses already stored for an airdrop for O(1) cross-request
+// duplicate detection. Kept in sync with the recipients list by create/addRecipients/remove.
+function recipientAddressSetKey(airdropId) {
+  return `airdrop:${airdropId}:addresses`;
+}
+
 function generateId() {
   return `drop_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
 }
@@ -42,7 +48,7 @@ async function getCurrentLedger() {
 }
 
 async function create(data) {
-  const { name, description, asset, asset_issuer, total_amount, expiry_ledger, recipients = [] } = data;
+  const { name, description, asset, asset_issuer, total_amount, expiry_ledger, contract_airdrop_id, recipients = [] } = data;
   const id = generateId();
 
   const airdrop = {
@@ -53,6 +59,10 @@ async function create(data) {
     asset_issuer,
     total_amount,
     expiry_ledger,
+    // Linking field: once the on-chain airdrop ID is known (e.g. after the
+    // Soroban contract is invoked externally), populate this so the REST
+    // record can be correlated with indexer-observed on-chain state (#122).
+    contract_airdrop_id: contract_airdrop_id || null,
     status: 'draft',
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
@@ -63,7 +73,8 @@ async function create(data) {
   await redis.zadd(IDS_KEY, Date.now(), id);
 
   if (recipients.length > 0) {
-    await redis.lpush(recipientsKey(id), ...recipients.map((r) => JSON.stringify(r)));
+    await redis.rpush(recipientsKey(id), ...recipients.map((r) => JSON.stringify(r)));
+    await redis.sadd(recipientAddressSetKey(id), ...recipients.map((r) => r.address));
   }
 
   return airdrop;
@@ -156,12 +167,13 @@ async function update(id, data) {
   const airdrop = await get(id);
   if (!airdrop) return null;
 
-  const { name, description, expiry_ledger } = data;
+  const { name, description, expiry_ledger, contract_airdrop_id } = data;
   const updated = {
     ...airdrop,
     name: name !== undefined ? name : airdrop.name,
     description: description !== undefined ? description : airdrop.description,
     expiry_ledger: expiry_ledger !== undefined ? expiry_ledger : airdrop.expiry_ledger,
+    contract_airdrop_id: contract_airdrop_id !== undefined ? contract_airdrop_id : airdrop.contract_airdrop_id,
     updated_at: new Date().toISOString(),
   };
 
@@ -176,6 +188,7 @@ async function remove(id) {
 
   await cache.del(airdropKey(id));
   await cache.del(recipientsKey(id));
+  await cache.del(recipientAddressSetKey(id));
   await redis.zrem(IDS_KEY, id);
   return existing;
 }
@@ -198,9 +211,29 @@ async function cancel(id) {
   return updated;
 }
 
+// Returns an array of addresses that were already present in a prior call.
+// An empty array means all recipients were accepted and stored.
 async function addRecipients(airdropId, recipients) {
   const redis = cache.getClient();
+  const addresses = recipients.map((r) => r.address);
+
+  // SADD returns 1 for each newly added member, 0 for duplicates.
+  // By comparing the added count against the total we identify which
+  // addresses were already stored from the initial POST /airdrops body
+  // or a prior POST /airdrops/:id/recipients call.
+  const addedCounts = await Promise.all(
+    addresses.map((addr) => redis.sadd(recipientAddressSetKey(airdropId), addr)),
+  );
+
+  const duplicates = addresses.filter((_, i) => addedCounts[i] === 0);
+  if (duplicates.length > 0) {
+    // Roll back the addresses we just added so the set stays consistent.
+    await redis.srem(recipientAddressSetKey(airdropId), ...addresses.filter((_, i) => addedCounts[i] === 1));
+    return duplicates;
+  }
+
   await redis.rpush(recipientsKey(airdropId), ...recipients.map((r) => JSON.stringify(r)));
+  return [];
 }
 
 // Returns { recipients, total } — see list()'s comment above.

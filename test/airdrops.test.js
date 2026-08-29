@@ -429,10 +429,33 @@ describe('POST /api/v1/airdrops/:id/recipients', () => {
 
     expect(response.status).toBe(400);
     expect(response.body.error).toMatchObject({
-      code: 'VALIDATION_ERROR',
-      message: 'recipients cannot exceed 10,000',
+      code: 'RECIPIENT_LIMIT_EXCEEDED',
+      message: 'CSV cannot exceed 10000 recipients',
     });
     expect(mockRedis.rpush).not.toHaveBeenCalled();
+  });
+
+  test('rejects a CSV file with non-UTF-8 encoding', async () => {
+    const createResponse = await request(app)
+      .post('/api/v1/airdrops')
+      .send({
+        name: 'Test Airdrop',
+        asset: 'USDC',
+        asset_issuer: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA',
+        total_amount: 100,
+        expiry_ledger: 123456,
+      });
+
+    const invalidUtf8Buffer = Buffer.from([0x61, 0x64, 0x64, 0x72, 0x65, 0x73, 0x73, 0x2c, 0x61, 0x6d, 0x6f, 0x75, 0x6e, 0x74, 0x0a, 0xa0, 0xa1, 0xc0]);
+    const response = await request(app)
+      .post(`/api/v1/airdrops/${createResponse.body.id}/recipients`)
+      .attach('file', invalidUtf8Buffer, 'recipients.csv');
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toMatchObject({
+      code: 'CSV_INVALID_ENCODING',
+      message: expect.stringContaining('UTF-8'),
+    });
   });
 
   test('rate limits repeated recipient additions', async () => {
@@ -483,5 +506,162 @@ describe('GET /api/v1/airdrops/:id/recipients', () => {
     // Canonical pagination envelope (#131): array under `data`, not `recipients`.
     expect(listResponse.body.data).toHaveLength(2);
     expect(listResponse.body.pagination.total).toBe(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CSV structure validation (issue #254)
+// ---------------------------------------------------------------------------
+
+describe('POST /api/v1/airdrops/:id/recipients — CSV structure validation', () => {
+  async function createAirdrop() {
+    const res = await request(app)
+      .post('/api/v1/airdrops')
+      .send({
+        name: 'Test Airdrop',
+        asset: 'USDC',
+        asset_issuer: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA',
+        total_amount: 100,
+        expiry_ledger: 123456,
+      });
+    return res.body.id;
+  }
+
+  async function uploadCsv(id, content) {
+    return request(app)
+      .post(`/api/v1/airdrops/${id}/recipients`)
+      .attach('file', Buffer.from(content), 'recipients.csv');
+  }
+
+  test('rejects a CSV whose required columns are missing', async () => {
+    const id = await createAirdrop();
+
+    const res = await uploadCsv(id, `wallet,value
+${validAddress1},50`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('CSV_MISSING_COLUMNS');
+    expect(res.body.error.details.missing_columns).toEqual(
+      expect.arrayContaining(['address', 'amount']),
+    );
+  });
+
+  test('names only the column that is actually missing', async () => {
+    const id = await createAirdrop();
+
+    const res = await uploadCsv(id, `address,value
+${validAddress1},50`);
+
+    expect(res.body.error.details.missing_columns).toEqual(['amount']);
+  });
+
+  test('accepts columns regardless of case and surrounding whitespace', async () => {
+    const id = await createAirdrop();
+
+    const res = await uploadCsv(id, ` Address , AMOUNT 
+${validAddress1},50`);
+
+    expect(res.status).toBe(201);
+  });
+
+  test('rejects a CSV with no data rows instead of importing nothing silently', async () => {
+    const id = await createAirdrop();
+
+    const res = await uploadCsv(id, 'address,amount');
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('CSV_EMPTY');
+  });
+
+  test('reports rows whose amount is not a number rather than dropping them', async () => {
+    const id = await createAirdrop();
+
+    const res = await uploadCsv(id, `address,amount
+${validAddress1},not-a-number`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('CSV_MALFORMED');
+    expect(res.body.error.details.invalid_rows).toEqual([
+      { line: 2, reason: 'amount is not a number' },
+    ]);
+  });
+
+  test('reports rows with a missing address', async () => {
+    const id = await createAirdrop();
+
+    const res = await uploadCsv(id, 'address,amount\n,50');
+
+    expect(res.body.error.details.invalid_rows).toEqual([
+      { line: 2, reason: 'missing address' },
+    ]);
+  });
+
+  test('reports rows whose amount is zero or negative', async () => {
+    const id = await createAirdrop();
+
+    const res = await uploadCsv(id, `address,amount
+${validAddress1},0`);
+
+    expect(res.body.error.details.invalid_rows).toEqual([
+      { line: 2, reason: 'amount must be greater than zero' },
+    ]);
+  });
+
+  test('line numbers account for the header, matching a text editor', async () => {
+    const id = await createAirdrop();
+
+    const res = await uploadCsv(
+      id,
+      `address,amount
+${validAddress1},50
+${validAddress2},bad`,
+    );
+
+    expect(res.body.error.details.invalid_rows).toEqual([
+      { line: 3, reason: 'amount is not a number' },
+    ]);
+  });
+
+  test('rejects the whole upload rather than partially importing a mixed file', async () => {
+    const id = await createAirdrop();
+
+    const res = await uploadCsv(
+      id,
+      `address,amount
+${validAddress1},50
+${validAddress2},bad`,
+    );
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.details.valid_rows).toBe(1);
+    expect(res.body.error.details.total_rows).toBe(2);
+    expect(mockRedis.rpush).not.toHaveBeenCalled();
+  });
+
+  test('caps how many invalid rows are echoed back to the uploader', async () => {
+    const id = await createAirdrop();
+    const rows = Array.from({ length: 40 }, () => ',0').join('\n');
+
+    const res = await uploadCsv(id, `address,amount
+${rows}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('CSV_MALFORMED');
+    expect(res.body.error.details.truncated).toBe(true);
+    expect(res.body.error.details.invalid_rows.length).toBeLessThanOrEqual(20);
+  });
+
+  test('still accepts a fully valid CSV', async () => {
+    const id = await createAirdrop();
+
+    const res = await uploadCsv(
+      id,
+      `address,amount
+${validAddress1},50
+${validAddress2},25.5`,
+    );
+
+    expect(res.status).toBe(201);
+    expect(res.body.added).toBe(2);
   });
 });

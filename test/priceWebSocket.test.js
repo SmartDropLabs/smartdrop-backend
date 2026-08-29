@@ -20,6 +20,10 @@ jest.mock('../src/services/cache', () => ({
   getClient: jest.fn(),
 }));
 
+jest.mock('../src/services/apiKeys', () => ({
+  validateApiKey: jest.fn(async (token) => token === 'valid-key' ? { id: 'test-key' } : null),
+}));
+
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 function waitForMessage(ws, matcher) {
@@ -35,11 +39,24 @@ function waitForMessage(ws, matcher) {
   });
 }
 
-function connect(port) {
+function connect(port, token = 'valid-key') {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://localhost:${port}/ws`);
+    const ws = new WebSocket(`ws://localhost:${port}/ws`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
     ws.once('open', () => resolve(ws));
     ws.once('error', reject);
+  });
+}
+
+function connectExpectingRejection(port) {
+  return new Promise((resolve) => {
+    const ws = new WebSocket(`ws://localhost:${port}/ws`);
+    ws.once('unexpected-response', (_request, response) => {
+      response.resume();
+      resolve(response.statusCode);
+    });
+    ws.once('error', () => resolve(null));
   });
 }
 
@@ -61,10 +78,9 @@ describe('WebSocket price stream', () => {
     const { PriceSubscriptionManager } = require('../src/ws/PriceSubscriptionManager');
     subscriptionManager = new PriceSubscriptionManager();
 
-    const { WebSocketServer } = require('ws');
     httpServer = http.createServer();
-    const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
-    wss.on('connection', (ws, req) => subscriptionManager.add(ws));
+    const priceWebSocket = require('../src/ws/priceWebSocket');
+    priceWebSocket.attach(httpServer);
 
     httpServer.listen(0, () => {
       port = httpServer.address().port;
@@ -80,6 +96,11 @@ describe('WebSocket price stream', () => {
     }
     setTimeout(() => httpServer.close(done), 100);
   }, 10000);
+
+  test('rejects clients without an API key during the handshake', async () => {
+    await expect(connectExpectingRejection(port)).resolves.toBe(401);
+    expect(subscriptionManager.connectionCount).toBe(0);
+  });
 
   test('client receives subscribed confirmation after subscribe action', async () => {
     const ws = await connect(port);
@@ -175,5 +196,29 @@ describe('WebSocket price stream', () => {
     ws.close();
     await new Promise((r) => setTimeout(r, 100));
     expect(subscriptionManager.connectionCount).toBe(before);
+  });
+
+  test('enforces a per-IP connection cap', async () => {
+    const { PriceSubscriptionManager } = require('../src/ws/PriceSubscriptionManager');
+    const manager = new PriceSubscriptionManager();
+    const sockets = [];
+
+    for (let i = 0; i < 6; i += 1) {
+      const socket = {
+        readyState: 1,
+        close: jest.fn(),
+        send: jest.fn(),
+        on: jest.fn(),
+        terminate: jest.fn(),
+        constructor: { OPEN: 1 },
+      };
+      const accepted = manager.add(socket, { socket: { remoteAddress: '203.0.113.40' } });
+      if (accepted) sockets.push(socket);
+    }
+
+    expect(manager.connectionCount).toBeLessThanOrEqual(5);
+    for (const socket of sockets) {
+      manager._remove(socket);
+    }
   });
 });

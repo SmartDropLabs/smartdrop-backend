@@ -5,6 +5,8 @@ info:
     SmartDrop backend services — price oracle, webhook delivery, health monitoring, and indexing.
 
     This specification covers all current REST endpoints and planned future endpoints.
+    The public HTTP API is versioned by URL path under `/api/v1`; breaking
+    changes are introduced in a new versioned path rather than in place.
   version: 0.1.0
   license:
     name: MIT
@@ -30,28 +32,125 @@ paths:
       tags:
         - Health
       responses:
-        '200':
+        "200":
           description: Service is healthy
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/HealthResponse'
+                $ref: "#/components/schemas/HealthResponse"
               example:
                 status: ok
-                timestamp: '2026-06-27T12:00:00.000Z'
+                timestamp: "2026-06-27T12:00:00.000Z"
                 redis_connected: true
                 redis_unavailable: false
-        '503':
+        "503":
           description: Service is not healthy
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: "#/components/schemas/ErrorResponse"
               example:
-                error: Service unavailable
-                message: Redis connection failed
-        '500':
-          $ref: '#/components/responses/InternalError'
+                error:
+                  code: SERVICE_UNAVAILABLE
+                  message: Redis connection failed
+                  request_id: req_V1StGXR8Z5jdHi6BmyT
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/keys:
+    get:
+      operationId: listApiKeys
+      summary: List API keys
+      description: Returns sanitized API key metadata. Secret key material and key hashes are never returned.
+      tags:
+        - API Keys
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Existing API keys
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiKeyListResponse"
+              example:
+                keys:
+                  - id: key_1234567890abcdef
+                    label: Production webhook worker
+                    key_prefix: 3b28a419
+                    scopes:
+                      - webhooks:write
+                    created_at: "2026-06-27T12:00:00.000Z"
+                    last_used_at: null
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      operationId: createApiKey
+      summary: Create API key
+      description: Creates a new API key and returns the plaintext secret once. Store it securely; subsequent responses only include metadata.
+      tags:
+        - API Keys
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ApiKeyCreateRequest"
+            example:
+              label: Production webhook worker
+              scopes:
+                - webhooks:write
+      responses:
+        "201":
+          description: API key created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiKeyCreateResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/keys/{id}:
+    delete:
+      operationId: revokeApiKey
+      summary: Revoke API key
+      description: Revokes an API key by ID and returns the sanitized record that was removed.
+      tags:
+        - API Keys
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: ^key_
+          description: API key ID
+          example: key_1234567890abcdef
+      responses:
+        "200":
+          description: API key revoked
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiKeyRevokeResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
 
   /api/v1/prices/{asset_code}:
     get:
@@ -67,60 +166,62 @@ paths:
           in: path
           required: true
           schema:
-            $ref: '#/components/schemas/AssetCode'
+            $ref: "#/components/schemas/AssetCode"
           description: Stellar asset code (1–12 uppercase alphanumeric characters)
           example: XLM
         - name: issuer
           in: query
           required: false
           schema:
-            $ref: '#/components/schemas/StellarAddress'
+            $ref: "#/components/schemas/StellarAddress"
           description: Stellar issuer public key (G…)
           example: GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA
       x-rate-limit:
         window: 60s
         max: 30
       responses:
-        '200':
+        "200":
           description: Price data for the requested asset
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/PriceResponse'
+                $ref: "#/components/schemas/PriceResponse"
               example:
                 asset_code: XLM
                 issuer: null
                 price_usd: 0.1234
                 source: stellar_dex
-                fetched_at: '2026-06-27T12:00:00.000Z'
+                fetched_at: "2026-06-27T12:00:00.000Z"
                 is_stale: false
                 stale_warning: null
                 sources_attempted:
                   - stellar_dex
                   - coingecko
                 redis_unavailable: false
-        '400':
-          $ref: '#/components/responses/ValidationError'
-        '404':
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "404":
           description: Price data is not available for the requested asset
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/PriceNotFoundResponse'
+                $ref: "#/components/schemas/PriceNotFoundResponse"
               example:
-                error: Price not available
-                message: 'No price data found for UNKNOWN'
+                error:
+                  code: NOT_FOUND
+                  message: "No price data found for UNKNOWN"
+                  request_id: req_V1StGXR8Z5jdHi6BmyT
                 asset_code: UNKNOWN
                 issuer: null
                 price_usd: null
                 source: unavailable
-                fetched_at: '2026-06-27T12:00:00.000Z'
+                fetched_at: "2026-06-27T12:00:00.000Z"
                 is_stale: true
-                stale_warning: 'No price data available from any source'
+                stale_warning: "No price data available from any source"
                 sources_attempted: []
                 redis_unavailable: false
-        '500':
-          $ref: '#/components/responses/InternalError'
+        "500":
+          $ref: "#/components/responses/InternalError"
 
   /api/v1/prices/batch:
     post:
@@ -138,7 +239,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/BatchPriceRequest'
+              $ref: "#/components/schemas/BatchPriceRequest"
             example:
               assets:
                 - asset_code: XLM
@@ -148,20 +249,20 @@ paths:
                 - asset_code: BTC
                   issuer: GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA
       responses:
-        '200':
+        "200":
           description: Batch price results
           content:
             application/json:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/PriceResponse'
-        '400':
-          $ref: '#/components/responses/ValidationError'
-        '422':
-          $ref: '#/components/responses/UnprocessableEntity'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                  $ref: "#/components/schemas/PriceResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "422":
+          $ref: "#/components/responses/UnprocessableEntity"
+        "500":
+          $ref: "#/components/responses/InternalError"
 
   /api/v1/webhooks:
     post:
@@ -177,7 +278,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CreateWebhookRequest'
+              $ref: "#/components/schemas/CreateWebhookRequest"
             example:
               url: https://example.com/webhooks/smartdrop
               events:
@@ -188,12 +289,12 @@ paths:
         window: 60s
         max: 20
       responses:
-        '201':
+        "201":
           description: Webhook endpoint created
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/WebhookEndpoint'
+                $ref: "#/components/schemas/WebhookEndpoint"
               example:
                 id: wh_a1b2c3d4e5f6g7h8
                 url: https://example.com/webhooks/smartdrop
@@ -202,14 +303,14 @@ paths:
                   - price.alert
                 active: true
                 secret_preview: whse...key
-                created_at: '2026-06-27T12:00:00.000Z'
-                updated_at: '2026-06-27T12:00:00.000Z'
-        '400':
-          $ref: '#/components/responses/ValidationError'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                created_at: "2026-06-27T12:00:00.000Z"
+                updated_at: "2026-06-27T12:00:00.000Z"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
     get:
       operationId: listWebhookEndpoints
       summary: List all registered webhook endpoints
@@ -220,10 +321,10 @@ paths:
       tags:
         - Webhooks
       parameters:
-        - $ref: '#/components/parameters/PageParam'
-        - $ref: '#/components/parameters/LimitParam'
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/LimitParam"
       responses:
-        '200':
+        "200":
           description: Paginated list of webhook endpoints
           content:
             application/json:
@@ -233,9 +334,9 @@ paths:
                   data:
                     type: array
                     items:
-                      $ref: '#/components/schemas/WebhookEndpoint'
+                      $ref: "#/components/schemas/WebhookEndpoint"
                   pagination:
-                    $ref: '#/components/schemas/PaginationMeta'
+                    $ref: "#/components/schemas/PaginationMeta"
               example:
                 data:
                   - id: wh_a1b2c3d4e5f6g7h8
@@ -244,8 +345,8 @@ paths:
                       - airdrop.failed
                     active: true
                     secret_preview: whse...key
-                    created_at: '2026-06-27T12:00:00.000Z'
-                    updated_at: '2026-06-27T12:00:00.000Z'
+                    created_at: "2026-06-27T12:00:00.000Z"
+                    updated_at: "2026-06-27T12:00:00.000Z"
                 pagination:
                   page: 1
                   limit: 20
@@ -253,8 +354,8 @@ paths:
                   total_pages: 1
                   has_next: false
                   has_prev: false
-        '500':
-          $ref: '#/components/responses/InternalError'
+        "500":
+          $ref: "#/components/responses/InternalError"
 
   /api/v1/webhooks/{id}:
     delete:
@@ -268,11 +369,11 @@ paths:
           in: path
           required: true
           schema:
-            $ref: '#/components/schemas/WebhookId'
+            $ref: "#/components/schemas/WebhookId"
           description: Webhook endpoint ID
           example: wh_a1b2c3d4e5f6g7h8
       responses:
-        '200':
+        "200":
           description: Webhook endpoint removed
           content:
             application/json:
@@ -284,7 +385,7 @@ paths:
                     enum:
                       - true
                   webhook:
-                    $ref: '#/components/schemas/WebhookEndpoint'
+                    $ref: "#/components/schemas/WebhookEndpoint"
               example:
                 deleted: true
                 webhook:
@@ -294,12 +395,12 @@ paths:
                     - airdrop.failed
                   active: false
                   secret_preview: whse...key
-                  created_at: '2026-06-27T12:00:00.000Z'
-                  updated_at: '2026-06-27T12:00:01.000Z'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                  created_at: "2026-06-27T12:00:00.000Z"
+                  updated_at: "2026-06-27T12:00:01.000Z"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
 
   /api/v1/webhooks/{id}/test:
     post:
@@ -320,7 +421,7 @@ paths:
           in: path
           required: true
           schema:
-            $ref: '#/components/schemas/WebhookId'
+            $ref: "#/components/schemas/WebhookId"
           example: wh_a1b2c3d4e5f6g7h8
       x-rate-limit:
         window: 60s
@@ -334,7 +435,7 @@ paths:
                 type: object
                 properties:
                   delivery:
-                    $ref: '#/components/schemas/WebhookDelivery'
+                    $ref: "#/components/schemas/WebhookDelivery"
               example:
                 delivery:
                   id: dlv_x1y2z3
@@ -347,91 +448,564 @@ paths:
                   attempt_count: 0
                   attempts: []
                   next_retry_at: null
-                  created_at: '2026-06-27T12:00:00.000Z'
-                  updated_at: '2026-06-27T12:00:00.000Z'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-        '500':
-          $ref: '#/components/responses/InternalError'
+                  created_at: "2026-06-27T12:00:00.000Z"
+                  updated_at: "2026-06-27T12:00:00.000Z"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/airdrops:
+    post:
+      operationId: createAirdrop
+      summary: Create an airdrop
+      description: Creates a new airdrop with optional initial recipients.
+      tags:
+        - Airdrops
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAirdropRequest"
+      responses:
+        "201":
+          description: Airdrop created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Airdrop"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      operationId: listAirdrops
+      summary: List airdrops
+      description: Returns a paginated list of airdrops.
+      tags:
+        - Airdrops
+      parameters:
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/LimitParam"
+      responses:
+        "200":
+          description: Paginated list of airdrops
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Airdrop"
+                  pagination:
+                    $ref: "#/components/schemas/PaginationMeta"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/airdrops/{id}:
+    get:
+      operationId: getAirdrop
+      summary: Get an airdrop
+      description: Returns a single airdrop by ID.
+      tags:
+        - Airdrops
+      parameters:
+        - $ref: "#/components/parameters/AirdropIdParam"
+      responses:
+        "200":
+          description: Airdrop details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Airdrop"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    patch:
+      operationId: updateAirdrop
+      summary: Update an airdrop
+      description: Updates an airdrop's name, description, or expiry ledger.
+      tags:
+        - Airdrops
+      parameters:
+        - $ref: "#/components/parameters/AirdropIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateAirdropRequest"
+      responses:
+        "200":
+          description: Airdrop updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Airdrop"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    delete:
+      operationId: deleteAirdrop
+      summary: Delete an airdrop
+      description: Permanently deletes an airdrop.
+      tags:
+        - Airdrops
+      parameters:
+        - $ref: "#/components/parameters/AirdropIdParam"
+      responses:
+        "200":
+          description: Airdrop deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted:
+                    type: boolean
+                    enum: [true]
+                  id:
+                    type: string
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/airdrops/{id}/cancel:
+    post:
+      operationId: cancelAirdrop
+      summary: Cancel an airdrop
+      description: Cancels an airdrop, preventing further execution.
+      tags:
+        - Airdrops
+      parameters:
+        - $ref: "#/components/parameters/AirdropIdParam"
+      responses:
+        "200":
+          description: Airdrop cancelled
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Airdrop"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/airdrops/{id}/recipients:
+    post:
+      operationId: addAirdropRecipients
+      summary: Add recipients to an airdrop
+      description: |
+        Adds recipients to an airdrop via JSON body or CSV file upload.
+        Duplicate addresses within the request are rejected.
+      tags:
+        - Airdrops
+      parameters:
+        - $ref: "#/components/parameters/AirdropIdParam"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddRecipientsRequest"
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: CSV file with address and amount columns
+      responses:
+        "201":
+          description: Recipients added
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  added:
+                    type: integer
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "409":
+          description: Duplicate recipient addresses
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      operationId: listAirdropRecipients
+      summary: List airdrop recipients
+      description: Returns a paginated list of recipients for an airdrop.
+      tags:
+        - Airdrops
+      parameters:
+        - $ref: "#/components/parameters/AirdropIdParam"
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/LimitParam"
+      responses:
+        "200":
+          description: Paginated list of recipients
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Recipient"
+                  pagination:
+                    $ref: "#/components/schemas/PaginationMeta"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/alerts:
+    post:
+      operationId: createAlert
+      summary: Create a price alert
+      description: Creates a new price alert that triggers a webhook when conditions are met.
+      tags:
+        - Alerts
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAlertRequest"
+      responses:
+        "201":
+          description: Alert created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Alert"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    get:
+      operationId: listAlerts
+      summary: List alerts
+      description: Returns a paginated list of price alerts.
+      tags:
+        - Alerts
+      parameters:
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/LimitParam"
+      responses:
+        "200":
+          description: Paginated list of alerts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Alert"
+                  pagination:
+                    $ref: "#/components/schemas/PaginationMeta"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/alerts/{id}:
+    delete:
+      operationId: deleteAlert
+      summary: Delete an alert
+      description: Permanently deletes a price alert.
+      tags:
+        - Alerts
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: ^alrt_
+          description: Alert ID
+          example: alrt_a1b2c3d4e5f6g7h8
+      responses:
+        "200":
+          description: Alert deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  deleted:
+                    type: boolean
+                    enum: [true]
+                  id:
+                    type: string
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/airdrops/{id}/status:
+    get:
+      operationId: getAirdropOnchainStatus
+      summary: Get airdrop on-chain status
+      description: Returns the on-chain indexing status of an airdrop.
+      tags:
+        - Indexer
+      parameters:
+        - $ref: "#/components/parameters/AirdropIdParam"
+      responses:
+        "200":
+          description: Airdrop on-chain status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  airdrop_id:
+                    type: string
+                  status:
+                    type: string
+                  events_count:
+                    type: integer
+        "400":
+          description: Invalid airdrop ID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Airdrop not indexed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/airdrops/{id}/onchain-recipients:
+    get:
+      operationId: getAirdropOnchainRecipients
+      summary: Get on-chain recipients
+      description: |
+        Returns recipients derived from indexed on-chain claim events.
+        Pagination is a slice of the fully-materialized list.
+      tags:
+        - Indexer
+      parameters:
+        - $ref: "#/components/parameters/AirdropIdParam"
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/LimitParam"
+      responses:
+        "200":
+          description: Paginated on-chain recipients
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                  pagination:
+                    $ref: "#/components/schemas/PaginationMeta"
+        "400":
+          description: Invalid airdrop ID
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /api/v1/recipients/{address}/claims:
+    get:
+      operationId: getRecipientClaims
+      summary: Get recipient claims
+      description: Returns on-chain claim events for a specific recipient address.
+      tags:
+        - Indexer
+      parameters:
+        - name: address
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Stellar recipient address
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/LimitParam"
+      responses:
+        "200":
+          description: Paginated claim events
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                  pagination:
+                    $ref: "#/components/schemas/PaginationMeta"
+        "400":
+          description: Invalid recipient address
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "500":
+          $ref: "#/components/responses/InternalError"
 
   /api/v1/indexer/status:
     get:
       operationId: getIndexerStatus
-      summary: Indexer service status (planned)
+      summary: Indexer service status
       description: |
-        **⚠️ Planned — not yet implemented.**
-        Returns the current status and ledger height of the on-chain indexer service.
+        Returns the current status, ledger height, and lag of the on-chain indexer.
+        This endpoint is rate limited to 1 request per second per IP.
       tags:
         - Indexer
-      x-draft: true
       responses:
-        '200':
+        "200":
           description: Indexer status
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  status:
-                    type: string
-                    enum:
-                      - syncing
-                      - synced
-                      - error
-                  current_ledger:
-                    type: integer
+                  running:
+                    type: boolean
                   latest_ledger:
                     type: integer
-                  last_indexed_at:
-                    type: string
-                    format: date-time
-              example:
-                status: synced
-                current_ledger: 52489123
-                latest_ledger: 52489123
-                last_indexed_at: '2026-06-27T12:00:00.000Z'
-        '503':
-          description: Indexer is not responding
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-              example:
-                error: Indexer unavailable
-                message: Indexer service is not responding
-        '500':
-          $ref: '#/components/responses/InternalError'
+                    nullable: true
+                  last_ledger:
+                    type: integer
+                    nullable: true
+                  events_count:
+                    type: integer
+                  lag:
+                    type: integer
+                    nullable: true
+                  ledger_lag:
+                    type: integer
+                    nullable: true
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
 
   /ws:
     get:
       operationId: websocketEndpoint
-      summary: Real-time event stream (planned)
+      summary: Real-time price stream
       description: |
-        **⚠️ Planned — not yet implemented.**
-        WebSocket endpoint for streaming real-time SmartDrop events
-        (price updates, airdrop status changes, webhook delivery logs).
+        WebSocket endpoint for streaming real-time price updates.
+
+        **Connection:**
+        ```
+        ws://<host>/ws
+        Authorization: Bearer <api_key>
+        ```
+
+        After the WebSocket handshake completes, the client sends JSON
+        messages to manage subscriptions. The server pushes price updates
+        whenever a watched asset's price changes by more than 0.1%.
+
+        **Client → Server messages:**
+
+        Subscribe to asset price updates (max 5 assets per client):
+        ```json
+        { "action": "subscribe", "assets": ["XLM", "USDC:GA5ZSEJYB37J..."] }
+        ```
+
+        Unsubscribe from assets:
+        ```json
+        { "action": "unsubscribe", "assets": ["XLM"] }
+        ```
+
+        Respond to server heartbeat pings:
+        ```json
+        { "action": "pong" }
+        ```
+
+        **Server → Client messages:**
+
+        Confirmation of subscription change:
+        ```json
+        { "type": "subscribed", "assets": ["XLM", "USDC:GA5ZSEJYB37J..."] }
+        ```
+
+        Price update (pushed when change > 0.1%):
+        ```json
+        {
+          "type": "price_update",
+          "asset": "XLM",
+          "price_usd": 0.1234,
+          "previous_price_usd": 0.1230,
+          "change_pct": 0.3252,
+          "source": "coingecko",
+          "timestamp": "2026-08-24T12:00:00.000Z"
+        }
+        ```
+
+        Heartbeat ping (client must respond with `{"action":"pong"}`):
+        ```json
+        { "type": "ping" }
+        ```
+
+        Error:
+        ```json
+        { "type": "error", "message": "Subscription cap reached (5 max)" }
+        ```
+
+        **Limits:**
+        - Max connections: 100 (configurable via `WS_MAX_CONNECTIONS`)
+        - Max connections per IP: 5 (`WS_MAX_CONNECTIONS_PER_IP`)
+        - Max assets per client: 5
+        - Idle timeout: 90s (3 missed pings at 30s intervals)
       tags:
         - WebSocket
-      x-draft: true
       x-websocket: true
+      security:
+        - BearerAuth: []
       responses:
-        '101':
-          description: WebSocket protocol upgrade (future)
-        '400':
-          $ref: '#/components/responses/ValidationError'
+        "101":
+          description: WebSocket protocol upgrade
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "400":
+          $ref: "#/components/responses/ValidationError"
 
 components:
   securitySchemes:
     BearerAuth:
-      type: http
-      scheme: bearer
-      bearerFormat: JWT
+      type: apiKey
+      name: Authorization
+      in: header
       description: |
-        API key authentication. Provide your API key as a Bearer token in the
+        API key authentication. Provide your API key with the "Bearer " prefix in the
         `Authorization` header. Keys are created via `POST /api/v1/keys` and
         can be scoped to specific resources.
+
+        Example: `Authorization: Bearer key_1234567890abcdef...`
 
   parameters:
     PageParam:
@@ -453,6 +1027,15 @@ components:
         maximum: 100
         default: 20
       description: Results per page (max 100).
+    AirdropIdParam:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        pattern: ^drop_
+      description: Airdrop ID
+      example: drop_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6
 
   schemas:
     StellarAddress:
@@ -526,6 +1109,7 @@ components:
           enum:
             - ok
             - degraded
+            - unhealthy
           description: Service health status
         timestamp:
           type: string
@@ -537,6 +1121,26 @@ components:
         redis_unavailable:
           type: boolean
           description: Inverse of redis_connected (for legacy monitoring)
+        database:
+          type: object
+          description: PostgreSQL connectivity status
+          properties:
+            configured:
+              type: boolean
+              description: Whether a DATABASE_URL is configured
+            checked:
+              type: boolean
+              description: Whether a connectivity check was performed
+            status:
+              type: string
+              enum:
+                - ok
+                - error
+                - unavailable
+              description: Database check result
+            error:
+              type: string
+              description: Error message if status is error
         price_source_circuits:
           type: array
           description: Circuit-breaker state for each price source with a nonRetryable failure mode (e.g. an invalid API key)
@@ -559,14 +1163,15 @@ components:
         - timestamp
         - redis_connected
         - redis_unavailable
+        - database
 
     PriceResponse:
       type: object
       properties:
         asset_code:
-          $ref: '#/components/schemas/AssetCode'
+          $ref: "#/components/schemas/AssetCode"
         issuer:
-          $ref: '#/components/schemas/StellarAddressNullable'
+          $ref: "#/components/schemas/StellarAddressNullable"
         price_usd:
           type: number
           nullable: true
@@ -612,13 +1217,13 @@ components:
 
     PriceNotFoundResponse:
       allOf:
-        - $ref: '#/components/schemas/ErrorResponse'
+        - $ref: "#/components/schemas/ErrorResponse"
         - type: object
           properties:
             asset_code:
-              $ref: '#/components/schemas/AssetCode'
+              $ref: "#/components/schemas/AssetCode"
             issuer:
-              $ref: '#/components/schemas/StellarAddressNullable'
+              $ref: "#/components/schemas/StellarAddressNullable"
             price_usd:
               type: number
               nullable: true
@@ -651,9 +1256,9 @@ components:
             type: object
             properties:
               asset_code:
-                $ref: '#/components/schemas/AssetCode'
+                $ref: "#/components/schemas/AssetCode"
               issuer:
-                $ref: '#/components/schemas/StellarAddressNullable'
+                $ref: "#/components/schemas/StellarAddressNullable"
             required:
               - asset_code
       required:
@@ -671,8 +1276,21 @@ components:
           type: array
           minItems: 1
           items:
-            $ref: '#/components/schemas/WebhookEvent'
+            $ref: "#/components/schemas/WebhookEvent"
           description: Events the endpoint wishes to subscribe to
+          maxItems: 25
+          x-note: Wildcard subscriptions must be `["*"]` by themselves.
+        filters:
+          type: object
+          additionalProperties: false
+          properties:
+            asset:
+              type: string
+              example: USDC
+            pool_id:
+              type: string
+              example: pool_123
+          description: Optional asset/pool selector applied after event matching
         secret:
           type: string
           minLength: 8
@@ -687,14 +1305,18 @@ components:
       type: object
       properties:
         id:
-          $ref: '#/components/schemas/WebhookId'
+          $ref: "#/components/schemas/WebhookId"
         url:
           type: string
           format: uri
         events:
           type: array
           items:
-            $ref: '#/components/schemas/WebhookEvent'
+            $ref: "#/components/schemas/WebhookEvent"
+        filters:
+          type: object
+          additionalProperties: false
+          nullable: true
         active:
           type: boolean
           description: Whether the endpoint is currently active
@@ -712,6 +1334,7 @@ components:
         - id
         - url
         - events
+        - filters
         - active
         - secret_preview
         - created_at
@@ -757,25 +1380,26 @@ components:
           type: string
           pattern: ^dlv_
         endpoint_id:
-          $ref: '#/components/schemas/WebhookId'
+          $ref: "#/components/schemas/WebhookId"
         event:
-          $ref: '#/components/schemas/WebhookEvent'
+          $ref: "#/components/schemas/WebhookEvent"
         payload:
           type: object
         status:
           type: string
           enum:
             - pending
-            - delivered
+            - success
             - failed
-            - dead_letter
+        trace_id:
+          type: string
         attempt_count:
           type: integer
           minimum: 0
         attempts:
           type: array
           items:
-            $ref: '#/components/schemas/DeliveryAttempt'
+            $ref: "#/components/schemas/DeliveryAttempt"
         next_retry_at:
           type: string
           format: date-time
@@ -794,6 +1418,7 @@ components:
         - status
         - attempt_count
         - attempts
+        - trace_id
         - created_at
         - updated_at
 
@@ -838,16 +1463,169 @@ components:
 
     ErrorResponse:
       type: object
+      description: >-
+        Canonical error envelope. Clients should switch on `error.code`,
+        which is stable, rather than on `error.message`, which may be
+        reworded at any time.
       properties:
         error:
-          type: string
-          description: Machine-readable error type
-        message:
-          type: string
-          description: Human-readable error description
+          type: object
+          properties:
+            code:
+              type: string
+              description: Machine-readable error code
+              enum:
+                - VALIDATION_ERROR
+                - UNAUTHORIZED
+                - FORBIDDEN
+                - NOT_FOUND
+                - CONFLICT
+                - PAYLOAD_TOO_LARGE
+                - UNSUPPORTED_MEDIA_TYPE
+                - RATE_LIMITED
+                - INTERNAL_ERROR
+                - UPSTREAM_ERROR
+                - SERVICE_UNAVAILABLE
+                - AIRDROP_NOT_FOUND
+                - AIRDROP_NOT_INDEXED
+                - RECIPIENT_LIMIT_EXCEEDED
+                - CSV_INVALID_ENCODING
+                - CSV_MISSING_COLUMNS
+                - CSV_MALFORMED
+                - CSV_EMPTY
+                - WEBHOOK_NOT_FOUND
+                - WEBHOOK_LIMIT_EXCEEDED
+                - ALERT_NOT_FOUND
+                - API_KEY_NOT_FOUND
+                - PRICE_UNAVAILABLE
+                - INDEXER_UNAVAILABLE
+              example: WEBHOOK_NOT_FOUND
+            message:
+              type: string
+              description: Human-readable error description
+              example: Webhook not found
+            request_id:
+              type: string
+              description: Correlates this response with server logs
+              example: req_V1StGXR8Z5jdHi6BmyT
+            details:
+              type: object
+              additionalProperties: true
+              description: Optional structured context specific to the error code
+          required:
+            - code
+            - message
       required:
         - error
-        - message
+
+    ApiKey:
+      type: object
+      properties:
+        id:
+          type: string
+          pattern: ^key_
+          example: key_1234567890abcdef
+        label:
+          type: string
+          example: Production webhook worker
+        key_prefix:
+          type: string
+          description: First eight characters of the generated API key for display only
+          example: 3b28a419
+        scopes:
+          type: array
+          items:
+            type: string
+          example:
+            - webhooks:write
+        tier:
+          type: string
+          enum:
+            - free
+            - pro
+            - admin
+          description: >-
+            Rate limit tier for this key. Each key is metered in its own
+            fixed-window bucket sized by its tier, so one key exhausting its
+            limit does not affect any other key.
+          example: free
+        created_at:
+          type: string
+          format: date-time
+        last_used_at:
+          type: string
+          format: date-time
+          nullable: true
+      required:
+        - id
+        - label
+        - key_prefix
+        - scopes
+        - created_at
+        - last_used_at
+
+    ApiKeyCreateRequest:
+      type: object
+      properties:
+        label:
+          type: string
+          minLength: 1
+          maxLength: 120
+          example: Production webhook worker
+        scopes:
+          type: array
+          items:
+            type: string
+          default:
+            - default
+          example:
+            - webhooks:write
+        tier:
+          type: string
+          enum:
+            - free
+            - pro
+            - admin
+          default: free
+          description: Rate limit tier for the new key. Defaults to free.
+          example: pro
+      required:
+        - label
+
+    ApiKeyCreateResponse:
+      type: object
+      properties:
+        api_key:
+          type: string
+          description: Plaintext API key secret. Returned only once at creation time.
+          example: 7a75e39a0fb34c0c90b2343f61b557aa7f0fd965baf0e5a97d30c384d83d1d75
+        key:
+          $ref: "#/components/schemas/ApiKey"
+      required:
+        - api_key
+        - key
+
+    ApiKeyListResponse:
+      type: object
+      properties:
+        keys:
+          type: array
+          items:
+            $ref: "#/components/schemas/ApiKey"
+      required:
+        - keys
+
+    ApiKeyRevokeResponse:
+      type: object
+      properties:
+        deleted:
+          type: boolean
+          example: true
+        key:
+          $ref: "#/components/schemas/ApiKey"
+      required:
+        - deleted
+        - key
 
     ValidationErrorDetail:
       type: object
@@ -871,20 +1649,224 @@ components:
         - error
         - message
 
-    RateLimitInfo:
+    Airdrop:
       type: object
       properties:
-        error:
+        id:
           type: string
-          example: Too many requests
-        message:
+          description: Unique airdrop identifier (prefixed with `drop_`)
+          example: drop_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p6
+        name:
           type: string
-          example: Rate limit exceeded. Try again in 42 seconds.
-        retry_after_seconds:
+          description: Human-readable airdrop name
+          example: Community rewards
+        description:
+          type: string
+          nullable: true
+          description: Optional description
+        asset:
+          $ref: "#/components/schemas/AssetCode"
+        asset_issuer:
+          $ref: "#/components/schemas/StellarAddress"
+        total_amount:
+          type: number
+          description: Total airdrop amount in asset units
+          example: 10000
+        expiry_ledger:
           type: integer
+          description: Ledger number after which the airdrop expires
+          example: 52489123
+        contract_airdrop_id:
+          type: string
+          nullable: true
+          description: On-chain contract airdrop ID, set after execution
+        status:
+          type: string
+          enum:
+            - draft
+            - completed
+            - failed
+            - cancelled
+            - expired
+          description: Current airdrop status
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
       required:
-        - error
-        - message
+        - id
+        - name
+        - asset
+        - asset_issuer
+        - total_amount
+        - expiry_ledger
+        - status
+        - created_at
+        - updated_at
+
+    CreateAirdropRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          description: Human-readable airdrop name
+          example: Community rewards
+        description:
+          type: string
+          description: Optional description
+        asset:
+          $ref: "#/components/schemas/AssetCode"
+        asset_issuer:
+          $ref: "#/components/schemas/StellarAddress"
+        total_amount:
+          type: number
+          exclusiveMinimum: 0
+          description: Total airdrop amount in asset units
+          example: 10000
+        expiry_ledger:
+          type: integer
+          description: Ledger number after which the airdrop expires
+          example: 52489123
+        recipients:
+          type: array
+          description: Optional initial recipients
+          items:
+            $ref: "#/components/schemas/Recipient"
+      required:
+        - name
+        - asset
+        - asset_issuer
+        - total_amount
+        - expiry_ledger
+
+    UpdateAirdropRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          minLength: 1
+          description: New airdrop name
+        description:
+          type: string
+          description: New description
+        expiry_ledger:
+          type: integer
+          description: New expiry ledger (must be greater than current ledger)
+      minProperties: 1
+
+    AddRecipientsRequest:
+      type: object
+      properties:
+        recipients:
+          type: array
+          description: Recipients to add to the airdrop
+          items:
+            $ref: "#/components/schemas/Recipient"
+      required:
+        - recipients
+
+    Recipient:
+      type: object
+      properties:
+        address:
+          $ref: "#/components/schemas/StellarAddress"
+        amount:
+          type: number
+          exclusiveMinimum: 0
+          description: Amount in asset units (at most 7 decimal places)
+          example: 100.5
+      required:
+        - address
+        - amount
+
+    Alert:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Unique alert identifier (prefixed with `alrt_`)
+          example: alrt_a1b2c3d4e5f6g7h8
+        asset:
+          $ref: "#/components/schemas/AssetCode"
+        type:
+          type: string
+          enum:
+            - above
+            - below
+            - change_pct
+          description: Alert trigger condition
+        threshold_usd:
+          type: number
+          description: Price threshold in USD (or percentage for change_pct)
+          example: 0.5
+        webhook_url:
+          type: string
+          format: uri
+          description: Webhook URL to notify on trigger
+        webhook_secret:
+          type: string
+          description: Secret used for HMAC signature verification (not returned in responses)
+        repeat:
+          type: boolean
+          description: Whether the alert re-fires after cooldown
+        created_at:
+          type: string
+          format: date-time
+        last_fired_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the alert last fired
+        baseline_price:
+          type: number
+          nullable: true
+          description: Baseline price for change_pct alerts
+      required:
+        - id
+        - asset
+        - type
+        - threshold_usd
+        - webhook_url
+        - repeat
+        - created_at
+
+    CreateAlertRequest:
+      type: object
+      properties:
+        asset:
+          $ref: "#/components/schemas/AssetCode"
+        type:
+          type: string
+          enum:
+            - above
+            - below
+            - change_pct
+          description: Alert trigger condition
+        threshold_usd:
+          type: number
+          exclusiveMinimum: 0
+          description: Price threshold in USD (or percentage for change_pct)
+          example: 0.5
+        webhook_url:
+          type: string
+          format: uri
+          description: Webhook URL to notify on trigger
+        webhook_secret:
+          type: string
+          minLength: 8
+          description: Secret used for HMAC signature verification
+        repeat:
+          type: boolean
+          description: Whether the alert should re-fire after cooldown
+      required:
+        - asset
+        - type
+        - threshold_usd
+        - webhook_url
+        - webhook_secret
 
   responses:
     ValidationError:
@@ -892,44 +1874,53 @@ components:
       content:
         application/json:
           schema:
-            $ref: '#/components/schemas/ValidationErrorDetail'
+            $ref: "#/components/schemas/ValidationErrorDetail"
     Unauthorized:
       description: Missing or invalid authentication
       content:
         application/json:
           schema:
-            $ref: '#/components/schemas/ErrorResponse'
+            $ref: "#/components/schemas/ErrorResponse"
           example:
-            error: Missing or invalid API key
-            message: Missing or invalid API key
+            error:
+              code: UNAUTHORIZED
+              message: Missing or invalid API key
+              request_id: req_V1StGXR8Z5jdHi6BmyT
     NotFound:
       description: Resource not found
       content:
         application/json:
           schema:
-            $ref: '#/components/schemas/ErrorResponse'
+            $ref: "#/components/schemas/ErrorResponse"
           example:
-            error: Webhook endpoint not found
-            message: Webhook endpoint not found
+            error:
+              code: WEBHOOK_NOT_FOUND
+              message: Webhook endpoint not found
+              request_id: req_V1StGXR8Z5jdHi6BmyT
     UnprocessableEntity:
       description: Request body is semantically invalid
       content:
         application/json:
           schema:
-            $ref: '#/components/schemas/ErrorResponse'
+            $ref: "#/components/schemas/ErrorResponse"
           example:
-            error: Unprocessable entity
-            message: One or more field values are invalid
+            error:
+              code: VALIDATION_ERROR
+              message: One or more field values are invalid
+              request_id: req_V1StGXR8Z5jdHi6BmyT
     RateLimited:
       description: Rate limit exceeded
       content:
         application/json:
           schema:
-            $ref: '#/components/schemas/RateLimitInfo'
+            $ref: "#/components/schemas/ErrorResponse"
           example:
-            error: Too many requests
-            message: Rate limit exceeded. Try again in 42 seconds.
-            retry_after_seconds: 42
+            error:
+              code: RATE_LIMITED
+              message: Rate limit exceeded. Try again in 42 seconds.
+              request_id: req_V1StGXR8Z5jdHi6BmyT
+              details:
+                retry_after_seconds: 42
       headers:
         Retry-After:
           schema:
@@ -947,12 +1938,20 @@ components:
           schema:
             type: integer
           description: Unix timestamp when the window resets
+        X-RateLimit-Tier:
+          schema:
+            type: string
+          description: >-
+            Rate limit tier the limit was applied from. Only present when the
+            request was metered per API key rather than per IP.
     InternalError:
       description: Internal server error
       content:
         application/json:
           schema:
-            $ref: '#/components/schemas/ErrorResponse'
+            $ref: "#/components/schemas/ErrorResponse"
           example:
-            error: Internal server error
-            message: An unexpected error occurred
+            error:
+              code: INTERNAL_ERROR
+              message: An unexpected error occurred
+              request_id: req_V1StGXR8Z5jdHi6BmyT

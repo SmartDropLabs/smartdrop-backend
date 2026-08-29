@@ -120,3 +120,52 @@ describe('requestId on app routes', () => {
     expect(res.headers['x-request-id']).toBeDefined();
   });
 });
+
+describe('requestId client-supplied X-Request-ID validation (#133)', () => {
+  function buildApp() {
+    const app = express();
+    app.use(requestIdMiddleware);
+    app.get('/echo', (req, res) => res.json({ ok: true }));
+    app.post('/boom', (req, res) => {
+      res.status(400).json({ error: { code: 'BAD', message: 'bad', request_id: req.id } });
+    });
+    return app;
+  }
+
+  test('honors a well-formed, reasonably-sized client X-Request-ID', async () => {
+    const app = buildApp();
+    const res = await request(app).get('/echo').set('X-Request-ID', 'client-corr-123_X');
+
+    expect(res.headers['x-request-id']).toBe('client-corr-123_X');
+    expect(res.body.request_id).toBe('client-corr-123_X');
+  });
+
+  test('rejects an oversized X-Request-ID and generates a server ID instead', async () => {
+    const app = buildApp();
+    // Exceeds MAX_REQUEST_ID_LENGTH (128) but stays within Node's header-size
+    // limit so the server actually receives and re-evaluates it.
+    const huge = 'A'.repeat(200);
+    const res = await request(app).get('/echo').set('X-Request-ID', huge);
+
+    expect(res.headers['x-request-id']).not.toBe(huge);
+    expect(res.headers['x-request-id'].length).toBeLessThan(200);
+    expect(res.headers['x-request-id']).toMatch(/^req_[0-9A-Za-z_-]+$/);
+    expect(res.body.request_id).toBe(res.headers['x-request-id']);
+  });
+
+  test('rejects a malformed (disallowed-character) X-Request-ID and generates a server ID instead', async () => {
+    const app = buildApp();
+    const res = await request(app).get('/echo').set('X-Request-ID', 'evil.example.com/path');
+
+    expect(res.headers['x-request-id']).not.toBe('evil.example.com/path');
+    expect(res.headers['x-request-id']).toMatch(/^req_[0-9A-Za-z_-]+$/);
+  });
+
+  test('a rejected client value is not reflected into error response bodies', async () => {
+    const app = buildApp();
+    const res = await request(app).post('/boom').set('X-Request-ID', '::malformed::');
+
+    expect(res.body.error.request_id).toMatch(/^req_[0-9A-Za-z_-]+$/);
+    expect(res.body.error.request_id).not.toBe('::malformed::');
+  });
+});

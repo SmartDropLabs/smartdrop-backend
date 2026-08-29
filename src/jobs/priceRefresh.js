@@ -6,6 +6,8 @@ const config = require('../config');
 const logger = require('../logger');
 
 let scheduledTask = null;
+let running = false;
+let cycleStartedAt = null;
 
 const health = {
   startedAt: null,
@@ -20,6 +22,25 @@ function start() {
   health.startedAt = Date.now();
 
   scheduledTask = cron.schedule(cronExpression, async () => {
+    if (running) {
+      logger.warn('Skipping price refresh tick, previous cycle still running', {
+        runningForMs: Date.now() - cycleStartedAt,
+      });
+      return;
+    }
+
+    running = true;
+    cycleStartedAt = Date.now();
+    health.running = true;
+
+    const maxCycleMs = config.price.refreshMaxCycleMs || 90000;
+    const overrunTimer = setTimeout(() => {
+      logger.error('Price refresh cycle exceeded max duration', {
+        durationMs: Date.now() - cycleStartedAt,
+        maxCycleMs,
+      });
+    }, maxCycleMs);
+
     try {
       logger.info('Starting scheduled price refresh');
       const freshPrices = await priceOracle.refreshAllCachedPrices();
@@ -32,6 +53,11 @@ function start() {
     } catch (err) {
       logger.error('Scheduled price refresh failed', { error: err.message });
       health.lastError = err.message;
+    } finally {
+      clearTimeout(overrunTimer);
+      running = false;
+      cycleStartedAt = null;
+      health.running = false;
     }
   }, {
     scheduled: true,

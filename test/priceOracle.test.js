@@ -56,6 +56,18 @@ jest.mock('../src/config', () => ({
     refreshInterval: 30,
     staleThresholdMinutes: 5,
     anomalyThresholdPercent: 20,
+    minSources: 2,
+    anomalyAction: 'warn',
+    refreshMaxCycleMs: 90000,
+    circuitBreaker: {
+      failureThreshold: 3,
+      successThreshold: 1,
+      timeoutMs: 30000,
+    },
+  },
+  priceSources: {
+    circuitCooldownMs: 900000,
+    circuitReminderIntervalMs: 300000,
   },
 }));
 
@@ -133,12 +145,12 @@ describe('detectAnomaly', () => {
   const { detectAnomaly } = oracle;
   const ASSET = 'XLM';
 
-  test('stores the price and returns false when no history exists', async () => {
+  test('stores the price and returns anomalous: false when no history exists', async () => {
     mockCacheGet.mockResolvedValueOnce(null);
 
     const result = await detectAnomaly(0.1, ASSET, null);
 
-    expect(result).toBe(false);
+    expect(result).toEqual({ anomalous: false, changePercent: 0 });
     expect(mockCacheSet).toHaveBeenCalledWith(
       'price:history:XLM',
       expect.objectContaining({ price: 0.1 }),
@@ -151,7 +163,7 @@ describe('detectAnomaly', () => {
 
     const result = await detectAnomaly(0.1, ASSET, null);
 
-    expect(result).toBe(false);
+    expect(result).toEqual({ anomalous: false, changePercent: 0 });
     expect(mockCacheSet).toHaveBeenCalledWith(
       'price:history:XLM',
       expect.objectContaining({ price: 0.1 }),
@@ -159,30 +171,31 @@ describe('detectAnomaly', () => {
     );
   });
 
-  test('returns false for a change below the threshold', async () => {
+  test('returns anomalous: false for a change below the threshold', async () => {
     mockCacheGet.mockResolvedValueOnce({ price: 1.0, timestamp: Date.now() });
 
     const result = await detectAnomaly(1.1, ASSET, null); // +10%, threshold 20
 
-    expect(result).toBe(false);
+    expect(result.anomalous).toBe(false);
     expect(mockLogger.warn).not.toHaveBeenCalled();
   });
 
-  test('returns false at exactly the threshold (strict greater-than boundary)', async () => {
+  test('returns anomalous: false at exactly the threshold (strict greater-than boundary)', async () => {
     mockCacheGet.mockResolvedValueOnce({ price: 1.0, timestamp: Date.now() });
 
     const result = await detectAnomaly(1.2, ASSET, null); // exactly +20%
 
-    expect(result).toBe(false);
+    expect(result.anomalous).toBe(false);
     expect(mockLogger.warn).not.toHaveBeenCalled();
   });
 
-  test('logs a warning and returns true just past the threshold', async () => {
+  test('logs a warning and returns anomalous: true just past the threshold', async () => {
     mockCacheGet.mockResolvedValueOnce({ price: 1.0, timestamp: Date.now() });
 
     const result = await detectAnomaly(1.21, ASSET, null); // +21%
 
-    expect(result).toBe(true);
+    expect(result.anomalous).toBe(true);
+    expect(result.changePercent).toBeCloseTo(21, 0);
     expect(mockLogger.warn).toHaveBeenCalledWith(
       'Price anomaly detected',
       expect.objectContaining({ assetCode: ASSET, previousPrice: 1.0, currentPrice: 1.21 })
@@ -194,7 +207,7 @@ describe('detectAnomaly', () => {
 
     const result = await detectAnomaly(0.5, ASSET, null); // -50%
 
-    expect(result).toBe(true);
+    expect(result.anomalous).toBe(true);
   });
 
   test('re-stores the current price even when an anomaly fires', async () => {
@@ -222,7 +235,7 @@ describe('detectAnomaly', () => {
 
     const result = await detectAnomaly(1.0, ASSET, null);
 
-    expect(result).toBe(false);
+    expect(result).toEqual({ anomalous: false, changePercent: 0 });
     expect(mockLogger.warn).toHaveBeenCalledWith(
       'Cache read failed in anomaly detection, skipping',
       expect.objectContaining({ error: 'redis down' })
@@ -234,7 +247,7 @@ describe('detectAnomaly', () => {
     mockCacheGet.mockResolvedValueOnce(null);
     mockCacheSet.mockRejectedValueOnce(new Error('write failed'));
 
-    await expect(detectAnomaly(1.0, ASSET, null)).resolves.toBe(false);
+    await expect(detectAnomaly(1.0, ASSET, null)).resolves.toEqual({ anomalous: false, changePercent: 0 });
     expect(mockLogger.warn).toHaveBeenCalledWith(
       'Cache write failed in anomaly detection',
       expect.objectContaining({ error: 'write failed' })
@@ -257,6 +270,19 @@ describe('fetchFromAllSources', () => {
       { source: 'coingecko', price: 0.11 },
       { source: 'coinmarketcap', price: 0.12 },
     ]);
+  });
+
+  test('fetchFreshPrice aggregates successful source prices by median', async () => {
+    mockCacheGet.mockResolvedValue(null);
+    mockStellarFetch.mockResolvedValueOnce(100);
+    mockCoingeckoFetch.mockResolvedValueOnce(10);
+    mockCoinmarketcapFetch.mockResolvedValueOnce(11);
+
+    const result = await oracle.fetchFreshPrice('XLM', null);
+
+    expect(result.price_usd).toBe(11);
+    expect(result.quorum_met).toBe(true);
+    expect(result.sources_attempted).toEqual(['stellar_dex', 'coingecko', 'coinmarketcap']);
   });
 
   test('swallows a throwing source and returns the healthy ones', async () => {
@@ -576,5 +602,138 @@ describe('refreshAllCachedPrices', () => {
       'Redis scan failed during price refresh, aborting cycle',
       expect.objectContaining({ error: 'scan failed' })
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #69: single-flight dedup — concurrent callers share one in-flight promise
+// ---------------------------------------------------------------------------
+describe('fetchFreshPrice single-flight dedup (#69)', () => {
+  const { fetchFreshPrice, inFlight } = oracle;
+
+  beforeEach(() => {
+    // Ensure no stale in-flight entries from prior tests
+    inFlight.clear();
+  });
+
+  test('coalesces concurrent callers for the same asset:issuer', async () => {
+    let callCount = 0;
+    mockStellarFetch.mockImplementation(async () => {
+      callCount += 1;
+      // Simulate async delay
+      await new Promise((r) => setTimeout(r, 20));
+      return 0.1;
+    });
+    mockCoingeckoFetch.mockImplementation(async () => 0.1);
+    mockCoinmarketcapFetch.mockImplementation(async () => 0.1);
+    mockCacheGet.mockResolvedValue(null);
+
+    const [a, b, c] = await Promise.all([
+      fetchFreshPrice('XLM', null),
+      fetchFreshPrice('XLM', null),
+      fetchFreshPrice('XLM', null),
+    ]);
+
+    // All three should get the same result object
+    expect(a.price_usd).toBe(0.1);
+    expect(b.price_usd).toBe(0.1);
+    expect(c.price_usd).toBe(0.1);
+
+    // Sources should have been hit only once, not three times
+    expect(callCount).toBe(1);
+
+    // In-flight map should be clean after completion
+    expect(inFlight.has('XLM:null')).toBe(false);
+  });
+
+  test('does not coalesce calls for different assets', async () => {
+    mockStellarFetch.mockImplementation(async () => {
+      await new Promise((r) => setTimeout(r, 10));
+      return 0.1;
+    });
+    mockCoingeckoFetch.mockImplementation(async () => 0.1);
+    mockCoinmarketcapFetch.mockImplementation(async () => 0.1);
+    mockCacheGet.mockResolvedValue(null);
+
+    const [a, b] = await Promise.all([
+      fetchFreshPrice('XLM', null),
+      fetchFreshPrice('USDC', null),
+    ]);
+
+    expect(a.price_usd).toBe(0.1);
+    expect(b.price_usd).toBe(0.1);
+    // Each asset should have hit the sources independently
+    expect(mockStellarFetch).toHaveBeenCalledTimes(2);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #70: quorum_met, anomalous fields, anomaly rejection
+// ---------------------------------------------------------------------------
+describe('fetchFreshPrice quorum and anomaly fields (#70)', () => {
+  const { fetchFreshPrice } = oracle;
+
+  test('includes quorum_met and anomalous in response', async () => {
+    mockCacheGet.mockResolvedValue(null);
+    mockStellarFetch.mockResolvedValueOnce(1.0);
+    mockCoingeckoFetch.mockResolvedValueOnce(1.0);
+    mockCoinmarketcapFetch.mockResolvedValueOnce(1.0);
+
+    const result = await fetchFreshPrice('XLM', null);
+
+    expect(result).toHaveProperty('quorum_met');
+    expect(result).toHaveProperty('anomalous');
+    expect(result.quorum_met).toBe(true); // 3 sources >= minSources(2)
+    expect(result.anomalous).toBe(false);
+  });
+
+  test('quorum_met is false when fewer sources than minSources respond', async () => {
+    mockCacheGet.mockResolvedValue(null);
+    mockStellarFetch.mockResolvedValueOnce(1.0);
+    mockCoingeckoFetch.mockResolvedValue(null);
+    mockCoinmarketcapFetch.mockRejectedValueOnce(new Error('down'));
+
+    const result = await fetchFreshPrice('XLM', null);
+
+    expect(result.quorum_met).toBe(false); // 1 source < minSources(2)
+    expect(result.price_usd).toBe(1.0);
+  });
+
+  test('rejects anomalous price and returns cached price when anomalyAction is reject', async () => {
+    // Temporarily override config for reject mode
+    const configMock = require('../src/config');
+    const originalAction = configMock.price.anomalyAction;
+    configMock.price.anomalyAction = 'reject';
+
+    try {
+      // Prior history says price was 1.0; current sources report 5.0 (+400%)
+      // detectAnomaly will detect this as anomalous since 400% > 20% threshold
+      let callCount = 0;
+      mockCacheGet.mockReset();
+      mockCacheGet.mockImplementation(async () => {
+        callCount += 1;
+        if (callCount === 1) return { price: 1.0, timestamp: Date.now() }; // detectAnomaly reads history
+        if (callCount === 2) return {     // anomaly rejection reads cached price
+          price: 1.0,
+          source: 'coingecko',
+          fetchedAt: Date.now(),
+        };
+        return null;
+      });
+
+      // Sources report 5.0 — a +400% jump from history, well above 20% threshold
+      mockStellarFetch.mockResolvedValueOnce(5.0);
+      mockCoingeckoFetch.mockResolvedValueOnce(5.0);
+      mockCoinmarketcapFetch.mockResolvedValueOnce(5.0);
+
+      const result = await fetchFreshPrice('XLM', null);
+
+      expect(result.price_usd).toBe(1.0); // rejected anomalous, returned cached
+      expect(result.anomalous).toBe(true);
+      expect(result.is_stale).toBe(true);
+      expect(result.stale_warning).toMatch(/Anomalous price rejected/);
+    } finally {
+      configMock.price.anomalyAction = originalAction;
+    }
   });
 });

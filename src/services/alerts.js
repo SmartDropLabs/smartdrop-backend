@@ -100,6 +100,10 @@ async function fire(alert, priceUsd) {
   await webhook.deliver(alert.webhook_url, alert.webhook_secret, payload);
 }
 
+function assetCooldownKey(asset) {
+  return `alert:cooldown:${asset.toUpperCase()}`;
+}
+
 async function evaluateForAsset(asset, priceUsd) {
   const redis = cache.getClient();
   const ids = await redis.zrevrange(IDS_KEY, 0, -1);
@@ -110,9 +114,16 @@ async function evaluateForAsset(asset, priceUsd) {
 
     if (!isTriggered(alert, priceUsd)) continue;
 
-    if (alert.repeat && alert.last_fired_at) {
-      const elapsed = Date.now() - new Date(alert.last_fired_at).getTime();
-      if (elapsed < COOLDOWN_MS) continue;
+    if (alert.repeat) {
+      if (alert.last_fired_at) {
+        const elapsed = Date.now() - new Date(alert.last_fired_at).getTime();
+        if (elapsed < COOLDOWN_MS) continue;
+      }
+      const assetLastFired = await cache.get(assetCooldownKey(alert.asset));
+      if (assetLastFired) {
+        const assetElapsed = Date.now() - new Date(assetLastFired).getTime();
+        if (assetElapsed < COOLDOWN_MS) continue;
+      }
     }
 
     await fire(alert, priceUsd);
@@ -120,8 +131,13 @@ async function evaluateForAsset(asset, priceUsd) {
     if (!alert.repeat) {
       await remove(id);
     } else {
-      alert.last_fired_at = new Date().toISOString();
+      const nowIso = new Date().toISOString();
+      alert.last_fired_at = nowIso;
+      if (alert.type === 'change_pct') {
+        alert.baseline_price = priceUsd;
+      }
       await cache.set(alertKey(id), alert);
+      await cache.set(assetCooldownKey(alert.asset), nowIso);
     }
   }
 }

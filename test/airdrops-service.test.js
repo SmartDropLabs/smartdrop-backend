@@ -33,9 +33,14 @@ function getSortedZSetMembers(key) {
 
 const mockRedis = {
   smembers: jest.fn(async (key) => [...(mockSets.get(key) || [])]),
-  sadd: jest.fn(async (key, val) => {
+  sadd: jest.fn(async (key, ...vals) => {
     if (!mockSets.has(key)) mockSets.set(key, new Set());
-    mockSets.get(key).add(val);
+    const set = mockSets.get(key);
+    let added = 0;
+    for (const val of vals) {
+      if (!set.has(val)) { set.add(val); added++; }
+    }
+    return added;
   }),
   srem: jest.fn(async (key, val) => {
     mockSets.get(key)?.delete(val);
@@ -292,6 +297,326 @@ describe('airdrops service', () => {
     test('returns null for a nonexistent airdrop id', async () => {
       const updated = await airdropsService.markExpired('drop_does_not_exist', 150);
       expect(updated).toBeNull();
+    });
+  });
+
+  describe('create with initial recipients', () => {
+    test('stores recipients and address set when provided', async () => {
+      const recipients = [
+        { address: 'GAAA', amount: '100' },
+        { address: 'GBBB', amount: '200' },
+      ];
+      const airdrop = await airdropsService.create({
+        name: 'Test Drop',
+        asset: 'USDC',
+        asset_issuer: 'GISSUER',
+        total_amount: '300',
+        expiry_ledger: 1000,
+        recipients,
+      });
+
+      expect(airdrop.id).toMatch(/^drop_/);
+      expect(mockRedis.rpush).toHaveBeenCalled();
+      expect(mockRedis.sadd).toHaveBeenCalled();
+
+      const addressSet = mockSets.get(`airdrop:${airdrop.id}:addresses`);
+      expect(addressSet).toBeDefined();
+      expect(addressSet.has('GAAA')).toBe(true);
+      expect(addressSet.has('GBBB')).toBe(true);
+    });
+
+    test('creates without recipients when none provided', async () => {
+      const airdrop = await airdropsService.create({
+        name: 'Empty Drop',
+        asset: 'USDC',
+        asset_issuer: 'GISSUER',
+        total_amount: '100',
+        expiry_ledger: 1000,
+      });
+      expect(airdrop.id).toMatch(/^drop_/);
+    });
+  });
+
+  describe('addRecipients', () => {
+    test('adds new recipients and returns empty duplicates array', async () => {
+      const airdrop = await airdropsService.create({
+        name: 'Drop', asset: 'USDC', asset_issuer: 'GI', total_amount: '100', expiry_ledger: 1000,
+      });
+
+      const dupes = await airdropsService.addRecipients(airdrop.id, [
+        { address: 'GAAA', amount: '50' },
+        { address: 'GBBB', amount: '50' },
+      ]);
+
+      expect(dupes).toEqual([]);
+      expect(mockRedis.rpush).toHaveBeenCalled();
+    });
+
+    test('detects duplicate addresses and rolls back new ones', async () => {
+      const airdrop = await airdropsService.create({
+        name: 'Drop', asset: 'USDC', asset_issuer: 'GI', total_amount: '100', expiry_ledger: 1000,
+        recipients: [{ address: 'GAAA', amount: '50' }],
+      });
+
+      // Reset mocks to isolate this call
+      mockRedis.sadd.mockClear();
+      mockRedis.srem.mockClear();
+      mockRedis.rpush.mockClear();
+
+      const dupes = await airdropsService.addRecipients(airdrop.id, [
+        { address: 'GAAA', amount: '50' },
+        { address: 'GBBB', amount: '50' },
+      ]);
+
+      expect(dupes).toEqual(['GAAA']);
+      // No rpush since there were duplicates
+      expect(mockRedis.rpush).not.toHaveBeenCalled();
+    });
+
+    test('rolls back newly added addresses when some are duplicates', async () => {
+      const airdrop = await airdropsService.create({
+        name: 'Drop', asset: 'USDC', asset_issuer: 'GI', total_amount: '100', expiry_ledger: 1000,
+        recipients: [{ address: 'GAAA', amount: '50' }],
+      });
+
+      mockRedis.sadd.mockClear();
+      mockRedis.srem.mockClear();
+      mockRedis.rpush.mockClear();
+
+      const dupes = await airdropsService.addRecipients(airdrop.id, [
+        { address: 'GAAA', amount: '50' },
+        { address: 'GCCC', amount: '50' },
+      ]);
+
+      expect(dupes).toEqual(['GAAA']);
+      // GCCC was newly added but rolled back because GAAA was a duplicate
+      expect(mockRedis.srem).toHaveBeenCalled();
+      expect(mockRedis.rpush).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('cancel', () => {
+    test('sets status to cancelled', async () => {
+      const airdrop = await airdropsService.create({
+        name: 'Drop', asset: 'USDC', asset_issuer: 'GI', total_amount: '100', expiry_ledger: 1000,
+      });
+
+      const cancelled = await airdropsService.cancel(airdrop.id);
+      expect(cancelled.status).toBe('cancelled');
+
+      const fetched = await airdropsService.get(airdrop.id);
+      expect(fetched.status).toBe('cancelled');
+    });
+
+    test('returns airdrop as-is if already cancelled', async () => {
+      const airdrop = await airdropsService.create({
+        name: 'Drop', asset: 'USDC', asset_issuer: 'GI', total_amount: '100', expiry_ledger: 1000,
+      });
+
+      await airdropsService.cancel(airdrop.id);
+      const result = await airdropsService.cancel(airdrop.id);
+      expect(result.status).toBe('cancelled');
+    });
+
+    test('returns null for nonexistent airdrop', async () => {
+      const result = await airdropsService.cancel('drop_nope');
+      expect(result).toBeNull();
+    });
+  });
+
+  describe('update', () => {
+    test('updates name and description', async () => {
+      const airdrop = await airdropsService.create({
+        name: 'Old Name', asset: 'USDC', asset_issuer: 'GI', total_amount: '100', expiry_ledger: 1000,
+      });
+
+      const updated = await airdropsService.update(airdrop.id, {
+        name: 'New Name',
+        description: 'Updated description',
+      });
+
+      expect(updated.name).toBe('New Name');
+      expect(updated.description).toBe('Updated description');
+      expect(updated.updated_at).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    });
+
+    test('preserves unspecified fields', async () => {
+      const airdrop = await airdropsService.create({
+        name: 'Keep', asset: 'USDC', asset_issuer: 'GI', total_amount: '100', expiry_ledger: 1000,
+      });
+
+      const updated = await airdropsService.update(airdrop.id, { name: 'Changed' });
+      expect(updated.name).toBe('Changed');
+      expect(updated.asset).toBe('USDC');
+      expect(updated.expiry_ledger).toBe(1000);
+    });
+
+    test('returns null for nonexistent airdrop', async () => {
+      const result = await airdropsService.update('drop_nope', { name: 'X' });
+      expect(result).toBeNull();
+    });
+  });
+
+  describe('remove', () => {
+    test('deletes airdrop and its associated data', async () => {
+      const airdrop = await airdropsService.create({
+        name: 'Drop', asset: 'USDC', asset_issuer: 'GI', total_amount: '100', expiry_ledger: 1000,
+        recipients: [{ address: 'GAAA', amount: '50' }],
+      });
+
+      const removed = await airdropsService.remove(airdrop.id);
+      expect(removed.id).toBe(airdrop.id);
+
+      const fetched = await airdropsService.get(airdrop.id);
+      expect(fetched).toBeNull();
+
+      const ids = await airdropsService.list();
+      expect(ids.airdrops).toHaveLength(0);
+    });
+
+    test('returns null for nonexistent airdrop', async () => {
+      const result = await airdropsService.remove('drop_nope');
+      expect(result).toBeNull();
+    });
+  });
+
+  describe('list pagination', () => {
+    test('returns paginated results', async () => {
+      for (let i = 0; i < 5; i++) {
+        await airdropsService.create({
+          name: `Drop ${i}`, asset: 'USDC', asset_issuer: 'GI', total_amount: '100', expiry_ledger: 1000,
+        });
+      }
+
+      const page1 = await airdropsService.list(1, 2);
+      expect(page1.airdrops).toHaveLength(2);
+      expect(page1.total).toBe(5);
+
+      const page2 = await airdropsService.list(2, 2);
+      expect(page2.airdrops).toHaveLength(2);
+
+      const page3 = await airdropsService.list(3, 2);
+      expect(page3.airdrops).toHaveLength(1);
+    });
+
+    test('returns empty for page beyond total', async () => {
+      await airdropsService.create({
+        name: 'Drop', asset: 'USDC', asset_issuer: 'GI', total_amount: '100', expiry_ledger: 1000,
+      });
+
+      const result = await airdropsService.list(10, 20);
+      expect(result.airdrops).toHaveLength(0);
+      expect(result.total).toBe(1);
+    });
+  });
+
+  describe('listRecipients', () => {
+    test('returns recipients for an airdrop', async () => {
+      const airdrop = await airdropsService.create({
+        name: 'Drop', asset: 'USDC', asset_issuer: 'GI', total_amount: '100', expiry_ledger: 1000,
+        recipients: [
+          { address: 'GAAA', amount: '50' },
+          { address: 'GBBB', amount: '50' },
+        ],
+      });
+
+      const result = await airdropsService.listRecipients(airdrop.id);
+      expect(result.recipients).toHaveLength(2);
+      expect(result.total).toBe(2);
+    });
+
+    test('returns empty for airdrop with no recipients', async () => {
+      const airdrop = await airdropsService.create({
+        name: 'Drop', asset: 'USDC', asset_issuer: 'GI', total_amount: '100', expiry_ledger: 1000,
+      });
+
+      const result = await airdropsService.listRecipients(airdrop.id);
+      expect(result.recipients).toHaveLength(0);
+      expect(result.total).toBe(0);
+    });
+  });
+
+  describe('TERMINAL_STATUSES', () => {
+    test('contains expected terminal statuses', async () => {
+      expect(airdropsService.TERMINAL_STATUSES.has('completed')).toBe(true);
+      expect(airdropsService.TERMINAL_STATUSES.has('failed')).toBe(true);
+      expect(airdropsService.TERMINAL_STATUSES.has('cancelled')).toBe(true);
+      expect(airdropsService.TERMINAL_STATUSES.has('expired')).toBe(true);
+      expect(airdropsService.TERMINAL_STATUSES.has('draft')).toBe(false);
+    });
+  });
+
+  describe('cancel preserves recipients', () => {
+    test('recipients remain accessible after cancelling', async () => {
+      const airdrop = await airdropsService.create({
+        name: 'Drop', asset: 'USDC', asset_issuer: 'GI', total_amount: '100', expiry_ledger: 1000,
+        recipients: [{ address: 'GAAA', amount: '50' }, { address: 'GBBB', amount: '50' }],
+      });
+
+      await airdropsService.cancel(airdrop.id);
+
+      const { recipients, total } = await airdropsService.listRecipients(airdrop.id);
+      expect(total).toBe(2);
+      expect(recipients).toHaveLength(2);
+    });
+  });
+
+  describe('addRecipients with empty array', () => {
+    test('returns empty duplicates for empty input', async () => {
+      const airdrop = await airdropsService.create({
+        name: 'Drop', asset: 'USDC', asset_issuer: 'GI', total_amount: '100', expiry_ledger: 1000,
+      });
+
+      const dupes = await airdropsService.addRecipients(airdrop.id, []);
+      expect(dupes).toEqual([]);
+    });
+  });
+
+  describe('listRecipients pagination', () => {
+    test('paginates recipients', async () => {
+      const airdrop = await airdropsService.create({
+        name: 'Drop', asset: 'USDC', asset_issuer: 'GI', total_amount: '100', expiry_ledger: 1000,
+        recipients: [
+          { address: 'GAAA', amount: '10' },
+          { address: 'GBBB', amount: '20' },
+          { address: 'GCCC', amount: '30' },
+        ],
+      });
+
+      const page1 = await airdropsService.listRecipients(airdrop.id, 1, 2);
+      expect(page1.recipients).toHaveLength(2);
+      expect(page1.total).toBe(3);
+
+      const page2 = await airdropsService.listRecipients(airdrop.id, 2, 2);
+      expect(page2.recipients).toHaveLength(1);
+    });
+  });
+
+  describe('update contract_airdrop_id', () => {
+    test('sets contract_airdrop_id', async () => {
+      const airdrop = await airdropsService.create({
+        name: 'Drop', asset: 'USDC', asset_issuer: 'GI', total_amount: '100', expiry_ledger: 1000,
+      });
+
+      const updated = await airdropsService.update(airdrop.id, { contract_airdrop_id: '0xabc123' });
+      expect(updated.contract_airdrop_id).toBe('0xabc123');
+    });
+  });
+
+  describe('create with contract_airdrop_id', () => {
+    test('stores contract_airdrop_id when provided', async () => {
+      const airdrop = await airdropsService.create({
+        name: 'Drop', asset: 'USDC', asset_issuer: 'GI', total_amount: '100', expiry_ledger: 1000,
+        contract_airdrop_id: '0xcontract',
+      });
+      expect(airdrop.contract_airdrop_id).toBe('0xcontract');
+    });
+
+    test('defaults contract_airdrop_id to null', async () => {
+      const airdrop = await airdropsService.create({
+        name: 'Drop', asset: 'USDC', asset_issuer: 'GI', total_amount: '100', expiry_ledger: 1000,
+      });
+      expect(airdrop.contract_airdrop_id).toBeNull();
     });
   });
 });

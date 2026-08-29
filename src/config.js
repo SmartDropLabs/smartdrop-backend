@@ -70,6 +70,7 @@ const env = cleanEnv(rawEnv, {
   REDIS_URL: url({ devDefault: 'redis://localhost:6379' }),
   DATABASE_URL: url({ devDefault: databaseDevDefault }),
   STELLAR_HORIZON_URL: url({ default: 'https://horizon.stellar.org' }),
+  SOROBAN_RPC_URL: url({ default: 'https://soroban-rpc.mainnet.stellar.gateway.fm' }),
   USDC_ISSUER: stellarAddress({
     default: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA',
   }),
@@ -79,6 +80,10 @@ const env = cleanEnv(rawEnv, {
   LEASE_TTL_MS: positiveInteger({ default: 15000 }),
   LEASE_RENEW_INTERVAL_MS: positiveInteger({ default: 5000 }),
   ADMIN_API_KEY: str({ default: '' }),
+  // 32-byte AES-256 key for encrypting webhook secrets at rest (issue #145),
+  // hex or base64 encoded. Empty in dev — webhookEncryption falls back to an
+  // insecure fixed key and logs a warning; production must set this.
+  WEBHOOK_SECRET_ENCRYPTION_KEY: str({ default: '' }),
   AIRDROP_CSV_MAX_BYTES: positiveInteger({ default: 5 * 1024 * 1024 }),
   AIRDROP_JSON_MAX_BYTES: positiveInteger({ default: 2 * 1024 * 1024 }),
   AIRDROP_RATELIMIT_WINDOW: positiveInteger({ default: 60 }),
@@ -87,6 +92,10 @@ const env = cleanEnv(rawEnv, {
   PRICE_REFRESH_INTERVAL_SECONDS: num({ default: 30 }),
   PRICE_STALE_THRESHOLD_MINUTES: num({ default: 5 }),
   PRICE_ANOMALY_THRESHOLD_PCT: num({ default: 20 }),
+  PRICE_MIN_SOURCES: num({ default: 2 }),
+  PRICE_ANOMALY_ACTION: str({ default: 'warn', choices: ['warn', 'reject'] }),
+  PRICE_SOURCE_PRIORITY: str({ default: '' }),
+  PRICE_REFRESH_MAX_CYCLE_MS: num({ default: 90000 }),
   CIRCUIT_BREAKER_FAILURE_THRESHOLD: num({ default: 3 }),
   CIRCUIT_BREAKER_SUCCESS_THRESHOLD: num({ default: 1 }),
   CIRCUIT_BREAKER_TIMEOUT_MS: num({ default: 30000 }),
@@ -96,10 +105,23 @@ const env = cleanEnv(rawEnv, {
   AIRDROP_LEDGER_CACHE_TTL_MS: num({ default: 5000 }),
   AIRDROP_EXPIRY_SCAN_BATCH_SIZE: num({ default: 100 }),
   WATCHED_ASSETS: watchedAssets({ default: '' }),
+  SENTRY_DSN: str({ default: '' }),
   LOG_LEVEL: str({
     default: 'info',
     choices: ['debug', 'info', 'warn', 'error'],
   }),
+  // Requests slower than this get a distinct warn-level log line from
+  // requestLogger.js, in addition to the routine per-request log (issue
+  // #244) — so slow requests are greppable/alertable without external APM.
+  SLOW_REQUEST_THRESHOLD_MS: num({ default: 1000 }),
+  ROUTE_TIMEOUT_MS: num({ default: 30000 }),
+  // Per-API-key rate limit tiers (issue #251). Each authenticated key is
+  // metered in its own bucket sized by the key's tier, so one abusive key
+  // can no longer exhaust the shared IP-keyed bucket for everybody else.
+  API_KEY_RATELIMIT_WINDOW_SECONDS: positiveInteger({ default: 60 }),
+  API_KEY_RATELIMIT_FREE_MAX: positiveInteger({ default: 100 }),
+  API_KEY_RATELIMIT_PRO_MAX: positiveInteger({ default: 1000 }),
+  API_KEY_RATELIMIT_ADMIN_MAX: positiveInteger({ default: 10000 }),
 });
 
 const usdcIssuer = env.USDC_ISSUER;
@@ -116,7 +138,7 @@ module.exports = {
   },
   stellar: {
     horizonUrl: env.STELLAR_HORIZON_URL,
-    sorobanRpcUrl: process.env.SOROBAN_RPC_URL || 'https://soroban-rpc.mainnet.stellar.gateway.fm',
+    sorobanRpcUrl: env.SOROBAN_RPC_URL,
     usdcIssuer,
   },
   indexer: {
@@ -125,6 +147,10 @@ module.exports = {
     pollIntervalMs: parseInt(process.env.INDEXER_POLL_INTERVAL_MS, 10) || 5000,
     pollLimit: parseInt(process.env.INDEXER_POLL_LIMIT, 10) || 100,
     startLedger: parseInt(process.env.INDEXER_START_LEDGER, 10) || 0,
+    // Adaptive polling and lag alerting (issue #255).
+    maxPollIntervalMs: parseInt(process.env.INDEXER_MAX_POLL_INTERVAL_MS, 10) || 5 * 60 * 1000,
+    backoffFactor: parseFloat(process.env.INDEXER_BACKOFF_FACTOR) || 2,
+    lagAlertThreshold: parseInt(process.env.INDEXER_LAG_ALERT_THRESHOLD, 10) || 100,
   },
   coingecko: {
     apiKey: env.COINGECKO_API_KEY,
@@ -143,6 +169,12 @@ module.exports = {
     refreshInterval: env.PRICE_REFRESH_INTERVAL_SECONDS,
     staleThresholdMinutes: env.PRICE_STALE_THRESHOLD_MINUTES,
     anomalyThresholdPercent: env.PRICE_ANOMALY_THRESHOLD_PCT,
+    minSources: env.PRICE_MIN_SOURCES,
+    anomalyAction: env.PRICE_ANOMALY_ACTION,
+    sourcePriority: env.PRICE_SOURCE_PRIORITY
+      ? env.PRICE_SOURCE_PRIORITY.split(',').map((s) => s.trim()).filter(Boolean)
+      : [],
+    refreshMaxCycleMs: env.PRICE_REFRESH_MAX_CYCLE_MS,
     circuitBreaker: {
       failureThreshold: env.CIRCUIT_BREAKER_FAILURE_THRESHOLD,
       successThreshold: env.CIRCUIT_BREAKER_SUCCESS_THRESHOLD,
@@ -187,6 +219,21 @@ module.exports = {
   auth: {
     adminApiKey: env.ADMIN_API_KEY,
   },
+  apiKeyRateLimit: {
+    windowSeconds: env.API_KEY_RATELIMIT_WINDOW_SECONDS,
+    // `free` is the tier assigned to any key created without an explicit
+    // tier, so existing keys keep working after this change.
+    defaultTier: 'free',
+    tiers: {
+      free: env.API_KEY_RATELIMIT_FREE_MAX,
+      pro: env.API_KEY_RATELIMIT_PRO_MAX,
+      admin: env.API_KEY_RATELIMIT_ADMIN_MAX,
+    },
+  },
+  sentryDsn: env.SENTRY_DSN,
+  slowRequestThresholdMs: env.SLOW_REQUEST_THRESHOLD_MS,
+  routeTimeoutMs: env.ROUTE_TIMEOUT_MS,
+  webhookSecretEncryptionKey: env.WEBHOOK_SECRET_ENCRYPTION_KEY,
   corsAllowedOrigins: (process.env.CORS_ALLOWED_ORIGINS || 'http://localhost:3000,http://localhost:3001')
     .split(',')
     .map((o) => o.trim())
@@ -214,6 +261,8 @@ module.exports = {
     // its own measurement rather than a guess made alongside this fix.
     retryPollMs: parseInt(process.env.WEBHOOK_RETRY_POLL_MS, 10) || 5000,
     retryBatchSize: parseInt(process.env.WEBHOOK_RETRY_BATCH, 10) || 25,
+    jsonMaxBytes: parseInt(process.env.WEBHOOK_JSON_MAX_BYTES, 10) || 65536,
+    maxPerSubscriber: parseInt(process.env.WEBHOOK_MAX_PER_SUBSCRIBER, 10) || 100,
     rateLimit: {
       windowSeconds: parseInt(process.env.WEBHOOK_RATELIMIT_WINDOW, 10) || 60,
       max: parseInt(process.env.WEBHOOK_RATELIMIT_MAX, 10) || 60,
@@ -222,5 +271,10 @@ module.exports = {
       windowSeconds: parseInt(process.env.WEBHOOK_TEST_RATELIMIT_WINDOW, 10) || 60,
       max: parseInt(process.env.WEBHOOK_TEST_RATELIMIT_MAX, 10) || 5,
     },
+    orderedDelivery: process.env.WEBHOOK_ORDERED_DELIVERY === 'true',
+  },
+  ws: {
+    maxConnections: parseInt(process.env.WS_MAX_CONNECTIONS, 10) || 100,
+    maxConnectionsPerIp: parseInt(process.env.WS_MAX_CONNECTIONS_PER_IP, 10) || 5,
   },
 };

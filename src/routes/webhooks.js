@@ -63,6 +63,23 @@ router.get("/webhooks/metrics", async (req, res) => {
   return res.json(dispatcher.getMetrics());
 });
 
+/**
+ * Map a raw delivery error string to a coarse, non-leaky category for the
+ * externally-visible test-endpoint response. The raw low-level network error
+ * (ECONNREFUSED/ETIMEDOUT/ECONNRESET, etc.) is kept in server-side logs but
+ * must not be echoed back to the caller, since it is exactly what makes the
+ * test endpoint a useful internal-network reconnaissance oracle (see #96).
+ */
+function deliveryErrorCategory(rawError) {
+  if (!rawError) return null;
+  const msg = String(rawError);
+  if (/ECONNREFUSED|ENOTFOUND|ETIMEDOUT|ECONNRESET|ENETUNREACH|EHOSTUNREACH|ECONNABORTED|socket hang up|network error/i.test(msg)) {
+    return 'unreachable';
+  }
+  if (/^HTTP \d+/.test(msg)) return 'error_response';
+  return 'delivery_failed';
+}
+
 function publicView(webhook) {
   if (!webhook) return null;
   return {

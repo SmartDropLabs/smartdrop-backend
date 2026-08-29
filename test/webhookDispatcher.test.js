@@ -9,6 +9,13 @@ jest.mock('../src/services/cache', () => mockHelper.cacheMock);
 jest.mock('../src/logger', () => ({
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
 }));
+// Passthrough SSRF guard so dispatcher tests don't perform live DNS resolution
+// and so the original (un-pinned) URL reaches the axios mock as before.
+jest.mock('../src/services/ssrfGuard', () => ({
+  assertPublicTarget: jest.fn(async (url) => ({ targetUrl: url, host: null })),
+  assertPublicUrlSync: jest.fn((url) => url),
+  isPrivateIp: jest.fn(() => false),
+}));
 
 const mockAxiosPost = jest.fn();
 jest.mock('axios', () => ({ post: (...args) => mockAxiosPost(...args) }));

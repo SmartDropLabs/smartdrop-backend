@@ -111,3 +111,31 @@ describe("Swagger UI", () => {
       });
   });
 });
+
+describe('Swagger UI CSP exception (#129)', () => {
+  test('docs route sends a relaxed CSP allowing inline scripts/styles (Swagger UI needs them)', () => {
+    const NODE_ENV = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'development';
+
+    jest.resetModules();
+    const apiDocsRouter = require('../src/routes/apiDocs');
+    const { docsCspMiddleware } = require('../src/middleware/csp');
+
+    const app = express();
+    app.use(helmet());
+    app.use('/api-docs', docsCspMiddleware);
+    app.use('/api-docs', apiDocsRouter);
+
+    return request(app)
+      .get('/api-docs/')
+      .expect(200)
+      .then((res) => {
+        const csp = res.headers['content-security-policy'];
+        expect(csp).toBeDefined();
+        expect(csp).toContain("script-src 'self' 'unsafe-inline'");
+        expect(csp).toContain("style-src 'self' 'unsafe-inline'");
+        expect(res.text).toContain('swagger-ui');
+        process.env.NODE_ENV = NODE_ENV;
+      });
+  });
+});

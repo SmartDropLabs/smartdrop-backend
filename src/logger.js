@@ -2,6 +2,7 @@ const winston = require('winston');
 const DailyRotateFile = require('winston-daily-rotate-file');
 const { name: serviceName, version } = require('../package.json');
 const { requestContext } = require('./middleware/requestId');
+const { redactFormat } = require('./services/logRedaction');
 
 // ==================== LOG LEVEL ====================
 const getLogLevel = () => {
@@ -13,37 +14,6 @@ const getLogLevel = () => {
   if (env === 'test') return 'warn';
   return 'debug';
 };
-
-// ==================== REDACTION ====================
-const redactFormat = winston.format((info) => {
-  const sensitiveKeys = ['apikey', 'privatekey', 'secret', 'token'];
-
-  const redactValue = (value, key) => {
-    if (typeof value !== 'string') return '[REDACTED]';
-    if (key.toLowerCase().includes('secret') && value.startsWith('whsec_')) {
-      return 'whsec_****';
-    }
-    return '[REDACTED]';
-  };
-
-  const redact = (obj) => {
-    if (!obj || typeof obj !== 'object') return obj;
-
-    for (const key of Object.keys(obj)) {
-      const lowerKey = key.toLowerCase();
-      const isSensitive = sensitiveKeys.some(k => lowerKey.includes(k));
-
-      if (isSensitive) {
-        obj[key] = redactValue(obj[key], key);
-      } else if (typeof obj[key] === 'object') {
-        redact(obj[key]);
-      }
-    }
-    return obj;
-  };
-
-  return redact(info);
-});
 
 // ==================== FORMAT DECISION ====================
 const env = process.env.NODE_ENV || 'development';

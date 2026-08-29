@@ -784,6 +784,21 @@ POST /api/v1/webhooks/:id/test
 ```
 Sends a synthetic `pool.assets_locked` payload to the registered URL and returns the resulting delivery summary. Limited to 5 calls/min/IP by default.
 
+> **SSRF protection.** Webhook targets are validated against private/internal
+> network ranges (RFC-1918, loopback, link-local, IPv6 ULA/link-local, CGNAT,
+> etc.) both when registered **and** again at delivery time — and the outbound
+> connection is pinned to the validated public IP, with redirects disabled — so
+> a `test` call (or any real dispatch) cannot be used as an internal-network
+> reconnaissance oracle. A blocked target is refused up front with a `422
+> WEBHOOK_TARGET_BLOCKED` error and is never delivered.
+>
+> **Reduced error detail.** The `last_error` field returned by the test endpoint
+> is a coarse category (`unreachable` | `error_response` | `delivery_failed`),
+> not the raw low-level network error string (e.g. `ECONNREFUSED`). The raw
+> detail is still written to server-side logs for operators; only the public
+> response is sanitized, to avoid turning the test endpoint into an information
+> leak about internal reachability. See issue #96.
+
 #### Inspect deliveries (admin dashboard feed)
 ```
 GET /api/v1/webhooks/:id/deliveries?limit=50
@@ -869,10 +884,25 @@ The API returns appropriate HTTP status codes:
 ```json
 {
   "error": "Error type",
-  "message": "Detailed error message"
+  "message": "Detailed error message",
+  "request_id": "req_…"
 }
-
 ```
+
+### `X-Request-ID` correlation header
+
+Every response carries an `X-Request-ID` header, and every JSON response body
+(and every error body) includes a `request_id` field, so you can correlate a
+client request with the server's logs.
+
+`X-Request-ID` is an **optional client hint**, not an authoritative or
+guaranteed-unique identifier. A client may supply its own value via the
+`X-Request-ID` request header to tie its own logs to SmartDrop's; if the value
+is missing, malformed (contains characters outside `[A-Za-z0-9_-]`), or longer
+than 128 characters, the server **ignores it and generates a fresh ID instead**.
+Treat the returned `request_id` purely as a correlation aid — multiple unrelated
+requests can share a client-chosen value, so it must not be used as a security
+or uniqueness anchor. See issue #133.
 
 ---
 

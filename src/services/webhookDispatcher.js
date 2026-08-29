@@ -173,6 +173,7 @@ async function postOnce(url, headers, body, timeoutMs) {
     timeout: timeoutMs ?? config.webhooks.timeoutMs,
     transformRequest: [(data) => data],
     validateStatus: () => true,
+    maxRedirects: 0,
   });
 }
 

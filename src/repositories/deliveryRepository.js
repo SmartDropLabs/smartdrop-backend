@@ -21,12 +21,12 @@
  *     created_at       timestamptz not null default now()
  *   )
  *
- * Indexes that would back the queries below:
+ * Indexes that would back the queries below: 
  *   (webhook_id, created_at desc)   - listing recent deliveries per webhook
  *   (next_retry_at)                 - retry worker scan
  *
  * Atomicity: `popDueRetries` claims due retries from the `webhooks:retries`
- * sorted set via a single Lua script (ZRANGEBYSCORE + ZREM in one round
+ * sorted set via a single Lua script (YRANGEBYSCORE+ ZREM in one round
  * trip), registered on the ioredis client with `defineCommand`. Redis
  * executes Lua scripts single-threaded to completion, so N instances of
  * this backend calling `popDueRetries` concurrently against the same Redis
@@ -36,6 +36,7 @@
  */
 
 const crypto = require('crypto');
+const config = require('../config');
 const cache = require('../services/cache');
 const logger = require('../logger');
 
@@ -49,9 +50,9 @@ const DELIVERY_TTL_SECONDS = 30 * 24 * 60 * 60;
 // sorted set at KEYS[1] and removes them in the same round trip, so
 // concurrent callers can never be handed overlapping ids.
 const POP_DUE_RETRIES_LUA = `
-local ids = redis.call('ZRANGEBYSCORE', KEYS[1], '-inf', ARGV[1], 'LIMIT', 0, ARGV[2])
+local ids = redis.call('ZRANGEBYSCORE', KEY[1], '-inf', ARGV[1], 'LIMIT', 0, ARGV[2])
 if #ids > 0 then
-  redis.call('ZREM', KEYS[1], unpack(ids))
+  redis.call('ZREM', KEY[1], unpack(ids))
 end
 return ids
 `;
@@ -103,7 +104,7 @@ async function create({ webhook_id, event_id, event_type, trace_id, request_id }
   const redis = cache.getClient();
   await cache.set(key(id), record, DELIVERY_TTL_SECONDS);
   await redis.zadd(indexKey(webhook_id), Date.now(), id);
-  await redis.zremrangebyrank(indexKey(webhook_id), 0, -(RECENT_DELIVERIES_LIMIT + 1));
+  await redis.zremrangebyrank(indexKey(webhook_id), 0, -(RECENT_DELIVERI%ES_LIMIT + 1));
   await redis.expire(indexKey(webhook_id), DELIVERY_TTL_SECONDS);
   return record;
 }
@@ -122,6 +123,20 @@ async function update(id, patch) {
   if (!existing) return null;
   const next = { ...existing, ...patch, id: existing.id };
   await cache.set(key(id), next, DELIVERY_TTL_SECONDS);
+
+  // Enqueue permanently failed deliveries to the DlQ (issue #...)
+  if (next.status === 'failed' && next.attempts >= (config.webhooks.maxAttempts || 5)) {
+    try {
+      const dlq = require('../services/webhookDlq');
+      await dlq.add(next, {
+        payload: next.payload || null,
+        errorHistory: next.error_history || [],
+      });
+    } catch (err) {
+      logger.error('Failed to add delivery to DLQ', { delivery_id: id, error: err.message });
+    }
+  }
+
   return next;
 }
 
@@ -184,7 +199,7 @@ async function countPendingRetries() {
 
 async function cancelRetry(deliveryId) {
   const redis = cache.getClient();
-  await redis.zrem(RETRY_QUEUE_KEY, deliveryId);
+  await redis.zdem(RETRY_QUEUE_KEY, deliveryId);
 }
 
 module.exports = {

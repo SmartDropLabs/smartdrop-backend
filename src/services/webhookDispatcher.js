@@ -13,6 +13,10 @@ const { requestContext } = require('../middleware/requestId');
 
 const USER_AGENT = 'SmartDrop-Webhooks/1.0';
 
+const DLQ_KEY = 'webhook:dlq';
+const DLQ_ENTRY_PREFIX = 'webhook:dlq:entry:';
+const DLQ_TTL_SECONDS = parseInt(process.env.WEBHOOK_DLQ_TTL_SECONDS, 10) || 7 * 24 * 60 * 60;
+
 // ── Delivery metrics (in-memory, reset on process restart) ──────────────
 const metrics = {
   _deliveries: new Map(), // webhook_id → { total, success, failed, totalAttempts, totalLatencyMs }
@@ -193,12 +197,22 @@ async function attempt(deliveryId, sequence) {
   return withDeliveryTrace(traceId, async () => {
     const webhook = await webhookRepo.findById(delivery.webhook_id);
     if (!webhook || !webhook.active) {
-      return deliveryRepo.update(deliveryId, {
+      const nowIso = new Date().toISOString();
+      const updated = await deliveryRepo.update(deliveryId, {
         status: 'failed',
         last_error: 'webhook missing or inactive',
-        last_attempt_at: new Date().toISOString(),
+        last_attempt_at: nowIso,
         next_retry_at: null,
       });
+      await _enqueueDeadLetter(delivery, webhook, {
+        attempts: delivery.attempts || 0,
+        error: 'webhook missing or inactive',
+        at: nowIso,
+        responseStatus: null,
+        traceId: delivery.trace_id,
+        requestId: delivery.request_id,
+      });
+      return updated;
     }
 
     const payload = delivery.payload || {
@@ -288,7 +302,7 @@ async function attempt(deliveryId, sequence) {
       attempts,
       error: errorMessage,
     });
-    return deliveryRepo.update(deliveryId, {
+    const updated = await deliveryRepo.update(deliveryId, {
       status: 'failed',
       attempts,
       last_attempt_at: nowIso,
@@ -296,6 +310,15 @@ async function attempt(deliveryId, sequence) {
       last_error: errorMessage,
       response_status: responseStatus,
     });
+    await _enqueueDeadLetter(delivery, webhook, {
+      attempts,
+      error: errorMessage,
+      at: nowIso,
+      responseStatus,
+      traceId,
+      requestId: delivery.request_id,
+    });
+    return updated;
   });
 }
 
@@ -399,5 +422,90 @@ async function sendTest(webhookId) {
   };
   return deliverToWebhook(webhook, eventType, payload.event_id, payload, null);
 }
+async function _enqueueDeadLetter(delivery, webhook, { attempts, error, at, responseStatus, traceId, requestId }) {
+  try {
+    const errorHistory = Array.isArray(delivery.error_history) ? delivery.error_history.slice() : [];
+    if (errorHistory.length === 0 && delivery.last_error && delivery.last_attempt_at) {
+      errorHistory.push({ attempt: delivery.attempts || 0, error: delivery.last_error, at: delivery.last_attempt_at, response_status: delivery.response_status || null });
+    }
+    errorHistory.push({ attempt: attempts, error, at, response_status: responseStatus });
 
-module.exports = { dispatch, attempt, sendTest, backoffMs, shouldRetry, getMetrics, getInFlightCount };
+    const entry = {
+      id: delivery.id,
+      webhook_id: delivery.webhook_id,
+      event_id: delivery.event_id,
+      event_type: delivery.event_type,
+      request_id: requestId || delivery.request_id || null,
+      sequence: delivery.sequence != null ? delivery.sequence : null,
+      trace_id: traceId || delivery.trace_id || null,
+      webhook_url: webhook?.url || null,
+      payload: delivery.payload || { event: delivery.event_type, event_id: delivery.event_id, delivery_id: delivery.id, occurred_at: delivery.created_at },
+      attempts,
+      response_status: responseStatus,
+      last_error: error,
+      error_history: errorHistory,
+      failed_at: at,
+    };
+
+    const redis = cache.getClient();
+    await redis.set(`${DLQ_ENTRY_PREFIX}${delivery.id}`, JSON.stringify(entry), 'EX', DLQ_TTL_SECONDS);
+    await redis.zadd(DLQ_KEY, Date.now(), delivery.id);
+  } catch (err) {
+    logger.error('Failed to add webhook delivery to DLQ', { delivery_id: delivery.id, error: err.message });
+  }
+}
+
+async function listDeadLetterQueue({ start = 0, stop = -1 } = {}) {
+  const redis = cache.getClient();
+  await redis.zremrangebyscore(DLQ_KEY, '-inf', Date.now() - DLQ_TTL_SECONDS * 1000);
+  const items = await redis.zrange(DLQ_KEY, start, stop, 'WITHSCORES');
+  const entries = [];
+  for (let i = 0; i < items.length; i += 2) {
+    const id = items[i];
+    const score = Number(items[i + 1]);
+    const entryKey = `${DLQ_ENTRY_PREFIX}${id}`;
+    const raw = await redis.get(entryKey);
+    if (!raw) {
+      await redis.zrem(DLQ_KEY, id);
+      continue;
+    }
+    try {
+      entries.push({ ...JSON.parse(raw), score });
+    } catch (err) {
+      logger.warn('Removing invalid DLQ entry', { delivery_id: id, error: err.message });
+      await redis.zrem(DLQ_KEY, id);
+      await redis.del(entryKey);
+    }
+  }
+  return entries;
+}
+
+async function retryDeadLetter(deliveryId) {
+  const redis = cache.getClient();
+  const entryKey = `${DLQ_ENTRY_PREFIX}${deliveryId}`;
+  const raw = await redis.get(entryKey);
+  if (!raw) return null;
+
+  let entry;
+  try {
+    entry = JSON.parse(raw);
+  } catch (err) {
+    await redis.zrem(DLQ_KEY, deliveryId);
+    await redis.del(entryKey);
+    throw err;
+  }
+
+  const webhook = await webhookRepo.findById(entry.webhook_id);
+  if (!webhook) {
+    await redis.zrem(DLQ_KEY, deliveryId);
+    await redis.del(entryKey);
+    throw new Error('Webhook not found');
+  }
+
+  const delivery = await deliverToWebhook(webhook, entry.event_type, entry.event_id, entry.payload, entry.sequence);
+  await redis.zrem(DLQ_KEY, deliveryId);
+  await redis.del(entryKey);
+  return delivery;
+}
+
+module.exports = { dispatch, attempt, sendTest, backoffMs, shouldRetry, getMetrics, getInFlightCount, listDeadLetterQueue, retryDeadLetter };

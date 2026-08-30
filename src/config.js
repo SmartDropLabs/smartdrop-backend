@@ -251,6 +251,12 @@ module.exports = {
     retryBaseMs: parseInt(process.env.WEBHOOK_RETRY_BASE_MS, 10) || 30000,
     retryFactor: parseFloat(process.env.WEBHOOK_RETRY_FACTOR) || 2,
     timeoutMs: parseInt(process.env.WEBHOOK_TIMEOUT_MS, 10) || 5000,
+    // Replay window for outgoing delivery signatures (#97). A signature is
+    // only accepted while |now - X-SmartDrop-Timestamp| is within this many
+    // seconds, so a captured payload stops being replayable once it expires.
+    // Applied symmetrically, which also bounds how far a clock-skewed (or
+    // forged) future-dated timestamp can push the window forward.
+    signatureMaxAgeSeconds: parseInt(process.env.WEBHOOK_SIGNATURE_MAX_AGE_SECONDS, 10) || 300,
     // retryPollMs/retryBatchSize: #128 considered retuning these once
     // backoffMs() gained jitter (a wider spread of nextRetryAt values could
     // argue for a shorter poll interval and/or smaller batch, since due

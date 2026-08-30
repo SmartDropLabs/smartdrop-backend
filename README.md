@@ -253,6 +253,7 @@ The application reads configurations from the `.env` file at the root.
 | `WEBHOOK_RETRY_BASE_MS` | Base backoff between retries (ms) | 30000 | No |
 | `WEBHOOK_RETRY_FACTOR` | Exponential backoff multiplier | 2 | No |
 | `WEBHOOK_TIMEOUT_MS` | HTTP timeout per delivery attempt | 5000 | No |
+| `WEBHOOK_SIGNATURE_MAX_AGE_SECONDS` | Replay window for delivery signatures (s) | 300 | No |
 | `WEBHOOK_RETRY_POLL_MS` | Retry worker poll interval | 5000 | No |
 | `WEBHOOK_RETRY_BATCH` | Max retries processed per tick | 25 | No |
 | `WEBHOOK_RATELIMIT_WINDOW` | Mgmt rate-limit window (s) | 60 | No |
@@ -816,7 +817,9 @@ Every delivery is a JSON POST with the following headers:
 | `User-Agent` | `SmartDrop-Webhooks/1.0` |
 | `X-SmartDrop-Event` | event type (e.g. `pool.assets_locked`) |
 | `X-SmartDrop-Delivery` | unique delivery id (`dlv_…`) |
-| `X-SmartDrop-Signature` | `sha256=<hex hmac of the raw body>` |
+| `X-SmartDrop-Signature` | `sha256=` + hex HMAC of `{timestamp}.{rawBody}` |
+| `X-SmartDrop-Timestamp` | epoch milliseconds this attempt was signed at |
+| `X-SmartDrop-Signature-Version` | signing scheme version, currently `2` |
 
 Body:
 ```json
@@ -828,17 +831,45 @@ Body:
 }
 ```
 
+### Signing algorithm
+
+The signed message is the timestamp, a literal `.`, and the raw request body:
+
+```
+signature = "sha256=" + HMAC_SHA256(secret, `${timestamp}.${rawBody}`)
+```
+
+where `timestamp` is the value sent in `X-SmartDrop-Timestamp`, verbatim. The
+timestamp is *inside* the MAC rather than merely alongside it, so a captured
+delivery cannot be re-dated to keep it valid. Combined with the freshness
+check below, that bounds how long an intercepted payload stays replayable.
+
 ### Verifying the signature (Node.js)
 
 ```js
 const crypto = require('crypto');
 
+// Must match the sender's WEBHOOK_SIGNATURE_MAX_AGE_SECONDS (default 300).
+const MAX_AGE_SECONDS = 300;
+
 function verifySmartDrop(req, secret) {
   const provided = req.header('X-SmartDrop-Signature') || '';
+  const timestamp = (req.header('X-SmartDrop-Timestamp') || '').trim();
+
+  // Epoch milliseconds, digits only. Do not use Number() alone to validate:
+  // Number('') and Number(null) are both 0, a valid-looking 1970 timestamp.
+  if (!/^\d+$/.test(timestamp)) return false;
+
+  // Reject BOTH stale and future-dated timestamps. A one-directional
+  // `now - timestamp > maxAge` check accepts anything dated forward, which
+  // hands the holder a signature that never expires.
+  if (Math.abs(Date.now() - Number(timestamp)) > MAX_AGE_SECONDS * 1000) return false;
+
   const expected = 'sha256=' + crypto
     .createHmac('sha256', secret)
-    .update(req.rawBody)        // verify against the RAW body, not re-stringified JSON
+    .update(`${timestamp}.${req.rawBody}`)  // RAW body, not re-stringified JSON
     .digest('hex');
+
   const a = Buffer.from(provided);
   const b = Buffer.from(expected);
   return a.length === b.length && crypto.timingSafeEqual(a, b);
@@ -846,6 +877,49 @@ function verifySmartDrop(req, secret) {
 ```
 
 Express tip: capture the raw body via `express.json({ verify: (req, _res, buf) => { req.rawBody = buf.toString(); } })` so the HMAC matches byte-for-byte.
+
+This snippet is executed verbatim against real signed output in
+`test/webhookSignature.test.js` — it is working code, not illustrative
+pseudocode, and the test fails if this block and the implementation drift
+apart.
+
+Reject the delivery if verification fails. Retries are expected: a delivery
+that is retried after backoff is re-signed at the moment of each attempt, so
+every attempt arrives with its own fresh timestamp and must be verified on
+its own terms. Do not cache a signature or timestamp across attempts.
+
+### Signature scheme v2 — breaking change
+
+**Signature scheme v2 replaces v1 for all deliveries. v1 signatures are no
+longer emitted.** Per the [API Versioning](#api-versioning) policy this is not
+an HTTP route change, so it does not ship under a new `/api/v2` path — but it
+*is* a breaking change to a published contract, and is documented here and in
+[`CHANGELOG.md`](CHANGELOG.md) with the same migration guidance a deprecated
+endpoint would carry.
+
+| | v1 (removed) | v2 (current) |
+|---|---|---|
+| Signed message | `rawBody` | `` `${timestamp}.${rawBody}` `` |
+| Freshness | none — signatures never expired | `±WEBHOOK_SIGNATURE_MAX_AGE_SECONDS` |
+| Headers | `X-SmartDrop-Signature` | adds `X-SmartDrop-Timestamp`, `X-SmartDrop-Signature-Version` |
+
+**What breaks:** any verifier that HMACs the raw body alone. Because v1
+recomputation no longer matches, every correctly-implemented v1 subscriber
+begins rejecting deliveries as soon as v2 ships.
+
+**To migrate:** replace your verification function with the v2 snippet above.
+Two things beyond the message format matter:
+
+1. **Check the timestamp symmetrically.** `Math.abs(now - timestamp)`, not
+   `now - timestamp`. A one-directional check leaves future-dated timestamps
+   permanently valid, which reintroduces the replay window this change closes.
+2. **Keep your clock in sync.** Verification compares your clock to ours, so
+   drift beyond the max-age window rejects otherwise-valid deliveries. Run NTP,
+   or widen `MAX_AGE_SECONDS` on your side if you cannot.
+
+`X-SmartDrop-Signature-Version` is sent so you can branch on the scheme
+explicitly; treat an unrecognised value as a delivery you cannot verify and
+reject it.
 
 ### Retry & failure semantics
 

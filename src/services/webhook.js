@@ -1,39 +1,21 @@
-const crypto = require('crypto');
 const axios = require('axios');
 const logger = require('../logger');
+const signature = require('./webhookSignature');
 
 const DEFAULT_TIMEOUT_MS = 10000;
 
-function payloadBody(payload) {
-  return typeof payload === 'string' ? payload : JSON.stringify(payload);
-}
-
-function signPayload(secret, payload, timestamp = Date.now()) {
-  const body = payloadBody(payload);
-  return crypto
-    .createHmac('sha256', secret)
-    .update(`${timestamp}.${body}`)
-    .digest('hex');
-}
-
+/**
+ * Headers for an alert delivery.
+ *
+ * The signing scheme itself lives entirely in `webhookSignature` — this used
+ * to carry a second, subtly different HMAC implementation, which is how the
+ * alert path and the dispatcher path drifted apart in the first place (#97).
+ */
 function buildSignatureHeaders(secret, payload, timestamp = Date.now()) {
-  const signature = signPayload(secret, payload, timestamp);
   return {
     'Content-Type': 'application/json',
-    'X-SmartDrop-Signature': `sha256=${signature}`,
-    'X-SmartDrop-Timestamp': String(timestamp),
+    ...signature.signatureHeaders(secret, payload, timestamp),
   };
-}
-
-function verifySignature(secret, payload, signatureHeader, timestamp) {
-  if (!signatureHeader || !timestamp || !signatureHeader.startsWith('sha256=')) {
-    return false;
-  }
-
-  const expected = Buffer.from(signPayload(secret, payload, timestamp), 'hex');
-  const actual = Buffer.from(signatureHeader.slice('sha256='.length), 'hex');
-
-  return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
 }
 
 async function sendSignedRequest(webhookUrl, secret, payload, options = {}) {
@@ -111,6 +93,4 @@ module.exports = {
   deliver,
   probeReachability,
   sendSignedRequest,
-  signPayload,
-  verifySignature,
 };

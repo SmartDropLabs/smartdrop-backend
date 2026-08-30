@@ -124,13 +124,22 @@ function shouldRetry(responseStatus, networkError) {
   return false;
 }
 
+/**
+ * Builds the headers for one delivery attempt.
+ *
+ * `timestamp` is the instant *this individual attempt* is being sent at —
+ * not the instant the event was dispatched. It is threaded in explicitly
+ * rather than read from the clock in here so the freshness guarantee is
+ * visible at the call site; see attempt() for why that distinction matters.
+ */
+function buildHeaders(secret, body, eventType, deliveryId, requestId, timestamp) {
 function buildHeaders(secret, body, eventType, deliveryId, requestId, sequence) {
   const headers = {
     'Content-Type': 'application/json',
     'User-Agent': USER_AGENT,
     'X-SmartDrop-Event': eventType,
     'X-SmartDrop-Delivery': deliveryId,
-    'X-SmartDrop-Signature': signature.sign(secret, body),
+    ...signature.signatureHeaders(secret, body, timestamp),
   };
   if (sequence != null) headers['X-SmartDrop-Sequence'] = String(sequence);
   // Lets receivers correlate a delivery with the API request that caused
@@ -208,6 +217,16 @@ async function attempt(deliveryId, sequence) {
       occurred_at: delivery.created_at,
     };
     const body = JSON.stringify(payload);
+    // Signed fresh for THIS attempt, immediately before the request goes
+    // out. A retry can be delivered long after the event was dispatched —
+    // backoff alone compounds across attempts, and a delivery can sit in
+    // the retry queue behind a backlog on top of that — so a timestamp
+    // captured once at dispatch time would arrive already outside the
+    // replay window and be rejected by the subscriber on arrival, breaking
+    // retries entirely. Re-reading the clock per attempt is what keeps a
+    // legitimately late retry legitimately signed (#97).
+    const timestamp = Date.now();
+    const headers = buildHeaders(webhook.secret, body, delivery.event_type, delivery.id, delivery.request_id, timestamp);
     const seq = sequence ?? delivery.sequence;
     const headers = buildHeaders(webhook.secret, body, delivery.event_type, delivery.id, delivery.request_id, seq);
 

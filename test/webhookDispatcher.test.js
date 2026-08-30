@@ -63,7 +63,12 @@ describe('dispatcher delivery success', () => {
     expect(parsed.event).toBe('pool.assets_locked');
     expect(parsed.event_id).toBe('evt_1');
     expect(parsed.data).toEqual({ pool_id: 'p1' });
-    expect(opts.headers['X-SmartDrop-Signature']).toBe(signature.sign(w.secret, body));
+    // The signature is bound to the timestamp that shipped alongside it, so
+    // it can only be recomputed using that same header value.
+    const sentAt = opts.headers['X-SmartDrop-Timestamp'];
+    expect(sentAt).toMatch(/^\d+$/);
+    expect(opts.headers['X-SmartDrop-Signature']).toBe(signature.sign(w.secret, body, Number(sentAt)));
+    expect(opts.headers['X-SmartDrop-Signature-Version']).toBe('2');
     expect(opts.headers['X-SmartDrop-Event']).toBe('pool.assets_locked');
   });
 });
@@ -526,5 +531,107 @@ describe('request id propagation into webhook deliveries (issue #250)', () => {
     expect(delivery.request_id).toBeNull();
     const [, , opts] = mockAxiosPost.mock.calls[0];
     expect(opts.headers['X-Request-Id']).toBeUndefined();
+  });
+});
+
+describe('dispatcher signature freshness across retries (#97)', () => {
+  const MAX_AGE_MS = 300 * 1000;
+  const T0 = 1_700_000_000_000;
+
+  test('a retry delivered past the replay window signs fresh at attempt time', async () => {
+    // The regression this whole change turns on. Backoff can push a retry
+    // past WEBHOOK_SIGNATURE_MAX_AGE_SECONDS from the original dispatch. If
+    // the timestamp were computed once in dispatch() and reused, the retry
+    // would go out stamped with an instant that is already outside the
+    // window and the subscriber would reject it on arrival — a "fix" that
+    // silently breaks retries.
+    const clock = jest.spyOn(Date, 'now').mockReturnValue(T0);
+    try {
+      const w = await createWebhook();
+      mockAxiosPost.mockResolvedValueOnce({ status: 503 });
+
+      const [{ delivery }] = await dispatcher.dispatch({
+        event_type: 'pool.assets_locked',
+        event_id: 'evt_retry_freshness',
+      });
+      expect(delivery.status).toBe('pending');
+
+      const [, firstBody, firstOpts] = mockAxiosPost.mock.calls[0];
+      const firstTimestamp = firstOpts.headers['X-SmartDrop-Timestamp'];
+      expect(Number(firstTimestamp)).toBe(T0);
+
+      // Jump to when the retry actually becomes due, then well past the
+      // replay window. next_retry_at is read back off the delivery record
+      // rather than recomputed from the backoff formula, because backoffMs
+      // applies equal jitter (delay lands anywhere in [det/2, det)) — a
+      // hardcoded delay would make this test flaky.
+      const dueAt = new Date(delivery.next_retry_at).getTime();
+      const retryAt = Math.max(dueAt, T0 + MAX_AGE_MS) + 60_000;
+      expect(retryAt - T0).toBeGreaterThan(MAX_AGE_MS);
+      clock.mockReturnValue(retryAt);
+
+      // Sanity-check that the window really did elapse: the signature from
+      // the first attempt is now stale. Without this the test could pass
+      // trivially by never crossing the boundary at all.
+      expect(signature.verify(
+        w.secret, firstBody, firstOpts.headers['X-SmartDrop-Signature'], firstTimestamp
+      )).toBe(false);
+
+      mockAxiosPost.mockResolvedValueOnce({ status: 200 });
+      const retried = await dispatcher.attempt(delivery.id);
+      expect(retried.status).toBe('success');
+      expect(retried.attempts).toBe(2);
+
+      const [, retryBody, retryOpts] = mockAxiosPost.mock.calls[1];
+      const retryTimestamp = retryOpts.headers['X-SmartDrop-Timestamp'];
+
+      // Fresh clock reading for this attempt, not the dispatch-time one.
+      expect(retryTimestamp).not.toBe(firstTimestamp);
+      expect(Number(retryTimestamp)).toBe(retryAt);
+
+      // The payload is unchanged between attempts, so the timestamp is the
+      // only thing that moved — and the retry verifies as currently valid.
+      expect(retryBody).toBe(firstBody);
+      expect(signature.verify(
+        w.secret, retryBody, retryOpts.headers['X-SmartDrop-Signature'], retryTimestamp
+      )).toBe(true);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  test('each target in one dispatch signs with its own timestamp', async () => {
+    // The other half of the requirement: no timestamp shared across the
+    // targets of a single dispatch either. The clock advances on every
+    // reading, so two targets cannot coincidentally agree.
+    let tick = 0;
+    const clock = jest.spyOn(Date, 'now').mockImplementation(() => T0 + (tick += 1));
+    try {
+      const a = await createWebhook({ url: 'https://a.com' });
+      const b = await createWebhook({ url: 'https://b.com' });
+      mockAxiosPost.mockResolvedValue({ status: 200 });
+
+      await dispatcher.dispatch({
+        event_type: 'pool.assets_locked',
+        event_id: 'evt_per_target_ts',
+      });
+
+      expect(mockAxiosPost).toHaveBeenCalledTimes(2);
+      const sent = mockAxiosPost.mock.calls.map(([url, body, opts]) => ({
+        secret: url === 'https://a.com' ? a.secret : b.secret,
+        body,
+        signature: opts.headers['X-SmartDrop-Signature'],
+        timestamp: opts.headers['X-SmartDrop-Timestamp'],
+      }));
+
+      expect(sent[0].timestamp).not.toBe(sent[1].timestamp);
+      for (const s of sent) {
+        expect(signature.verify(s.secret, s.body, s.signature, s.timestamp)).toBe(true);
+      }
+      // Each signature is bound to its own timestamp: swapping them fails.
+      expect(signature.verify(sent[0].secret, sent[0].body, sent[0].signature, sent[1].timestamp)).toBe(false);
+    } finally {
+      clock.mockRestore();
+    }
   });
 });

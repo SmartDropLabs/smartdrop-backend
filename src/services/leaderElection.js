@@ -80,6 +80,21 @@ function createLeaderElection(jobName, opts = {}) {
   let renewTimer = null;
   let acquiredAt = null;
   let lastRenewedAt = null;
+  let stateChangeHandler = null;
+
+  function notifyStateChange() {
+    if (typeof stateChangeHandler !== 'function') return;
+
+    try {
+      stateChangeHandler();
+    } catch (err) {
+      logger.error('Leader state-change callback failed', {
+        job: jobName,
+        instanceId,
+        error: err.message,
+      });
+    }
+  }
 
   /**
    * Attempt to acquire the leader lease.
@@ -97,6 +112,7 @@ function createLeaderElection(jobName, opts = {}) {
       leader = true;
       acquiredAt = Date.now();
       lastRenewedAt = Date.now();
+      notifyStateChange();
       return true;
     }
 
@@ -112,6 +128,7 @@ function createLeaderElection(jobName, opts = {}) {
       leader = false;
       acquiredAt = null;
       lastRenewedAt = null;
+      notifyStateChange();
     }
 
     return false;
@@ -143,6 +160,7 @@ function createLeaderElection(jobName, opts = {}) {
       leader = false;
       acquiredAt = null;
       lastRenewedAt = null;
+      notifyStateChange();
       return false;
     } catch (err) {
       logger.error('Leader lease renewal error', {
@@ -181,14 +199,15 @@ function createLeaderElection(jobName, opts = {}) {
     leader = false;
     acquiredAt = null;
     lastRenewedAt = null;
+    notifyStateChange();
   }
 
   /**
    * Start the periodic renewal loop.
    */
-  function startRenewLoop() {
+  function startRenewLoop(onStateChange) {
+    if (typeof onStateChange === 'function') stateChangeHandler = onStateChange;
     if (renewTimer) return;
-    stopRenewLoop();
 
     // Try to acquire immediately on start
     tryAcquire().catch((err) => {
@@ -243,6 +262,7 @@ function createLeaderElection(jobName, opts = {}) {
       renewTimer = null;
     }
     await release();
+    stateChangeHandler = null;
     logger.info('Leader election renewal loop stopped', { job: jobName, instanceId });
   }
 

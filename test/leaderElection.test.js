@@ -126,6 +126,40 @@ describe('Leader Election', () => {
       expect(state.acquiredAt).toBeTruthy();
       expect(state.lastRenewedAt).toBeTruthy();
     });
+
+    test('state-change callback errors do not reject acquisition', async () => {
+      const callback = jest.fn(() => {
+        throw new Error('callback failed');
+      });
+      leaderElection.startRenewLoop(callback);
+
+      await jest.advanceTimersByTimeAsync(1);
+      expect(leaderElection.isLeader()).toBe(true);
+      expect(logger.error).toHaveBeenCalledWith(
+        'Leader state-change callback failed',
+        expect.objectContaining({ error: 'callback failed' }),
+      );
+    });
+
+    test('release notifies the state-change callback before clearing it', async () => {
+      const states = [];
+      leaderElection.startRenewLoop(() => states.push(leaderElection.isLeader()));
+      await leaderElection.tryAcquire();
+
+      await leaderElection.stopRenewLoop();
+
+      expect(states).toEqual([true, false]);
+    });
+
+    test('registers a callback when the renewal loop is already running', async () => {
+      const callback = jest.fn();
+      leaderElection.startRenewLoop();
+      leaderElection.startRenewLoop(callback);
+
+      await jest.advanceTimersByTimeAsync(1);
+
+      expect(callback).toHaveBeenCalled();
+    });
   });
 
   /* ------------------------------------------------------------------ */
@@ -259,6 +293,34 @@ describe('Leader Election', () => {
       for (const { wrapped } of instances) {
         await wrapped.stop();
       }
+    });
+
+    test('starting a wrapped job twice does not duplicate its lifecycle', async () => {
+      const { makeLeaderAwareJob } = require('../src/jobs/leaderAwareJob');
+      const job = {
+        start: jest.fn(),
+        stop: jest.fn(),
+      };
+      const wrapped = makeLeaderAwareJob({
+        job,
+        jobName: 'idempotent_test',
+        leaderElection: createLeaderElection('idempotent_test', {
+          instanceId: 'idempotent-instance',
+          leaseTtlMs: 500,
+          renewIntervalMs: 200,
+        }),
+        logger,
+      });
+
+      wrapped.start();
+      wrapped.start();
+      await wrapped.getLeaderElection().tryAcquire();
+      await jest.advanceTimersByTimeAsync(250);
+
+      expect(job.start).toHaveBeenCalledTimes(1);
+
+      await wrapped.stop();
+      expect(job.stop).toHaveBeenCalledTimes(1);
     });
   });
 

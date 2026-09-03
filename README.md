@@ -63,11 +63,11 @@ Polls Soroban RPC for SmartDrop contract events and stores decoded event state i
 Registers subscriber endpoints for SmartDrop lifecycle events and delivers signed JSON payloads with retry tracking.
 
 **Events:**
-- `airdrop.created`
-- `airdrop.executing`
-- `airdrop.completed`
-- `airdrop.failed` — fired automatically when an airdrop expires (see below), in addition to any other failure path
-- `recipient.claimed`
+- `airdrop.failed` — **(Active)** fired automatically when an airdrop expires (see below), in addition to any other failure path
+- `airdrop.created` — *(Planned, not yet implemented)*
+- `airdrop.executing` — *(Planned, not yet implemented)*
+- `airdrop.completed` — *(Planned, not yet implemented)*
+- `recipient.claimed` — *(Planned, not yet implemented)*
 
 **Features:**
 - Webhook endpoint CRUD with secrets kept out of list responses
@@ -730,7 +730,7 @@ curl http://localhost:4000/health
 
 ## Webhooks
 
-Register endpoints that receive HTTP POST callbacks when SmartDrop indexes farming/pool events.
+Register endpoints that receive HTTP POST callbacks when SmartDrop indexes contract lifecycle events or price alerts.
 
 ### Supported event types
 
@@ -741,7 +741,11 @@ Register endpoints that receive HTTP POST callbacks when SmartDrop indexes farmi
 | `pool.assets_unlocked` | Assets were unlocked from a pool | No — registered event type, no dispatch path yet |
 | `pool.rewards_distributed` | Pool distributed rewards to participants | No — registered event type, no dispatch path yet |
 | `pool.closed` | Pool was closed | No — registered event type, no dispatch path yet |
+| `airdrop.created` | A new airdrop was created | No — registered event type, no dispatch path yet |
+| `airdrop.executing` | An airdrop began execution | No — registered event type, no dispatch path yet |
+| `airdrop.completed` | An airdrop completed successfully | No — registered event type, no dispatch path yet |
 | `airdrop.failed` | An airdrop has failed or expired | **Yes** — dispatched by `airdropExpiry.js` on expiry |
+| `recipient.claimed` | A recipient claimed an airdrop | No — registered event type, no dispatch path yet |
 | `price.alert` | Existing price-alert event | **Yes** — dispatched by `alertsService` |
 | `*` | Wildcard — subscribe to every known event | Only matches events with an active dispatch path |
 

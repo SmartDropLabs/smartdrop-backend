@@ -158,6 +158,7 @@ describe('CoinGecko source', () => {
         source: 'coingecko',
         open: false,
         openUntil: null,
+        last_success_at: '2026-01-01T00:15:00.001Z',
       });
     });
 

@@ -19,7 +19,7 @@ const {
 } = require("../validation/schemas");
 const buildRateLimit = require("../middleware/rateLimit");
 const { routeTimeout } = require("../middleware/timeout");
-const { StrKey } = require("stellar-sdk");
+const { StrKey } = require("@stellar/stellar-sdk");
 const { paginateResponse } = require("../utils/paginate");
 
 // Stellar Int64 max in stroops (1 unit = 10_000_000 stroops for XLM/USDC)

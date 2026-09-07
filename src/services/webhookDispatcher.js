@@ -10,6 +10,7 @@ const events = require('./webhookEvents');
 const webhookRepo = require('../repositories/webhookRepository');
 const deliveryRepo = require('../repositories/deliveryRepository');
 const { requestContext } = require('../middleware/requestId');
+const { assertPublicTarget } = require('./ssrfGuard');
 
 const USER_AGENT = 'SmartDrop-Webhooks/1.0';
 
@@ -390,6 +391,10 @@ async function dispatch({ event_type: eventType, event_id: eventId, data }) {
 async function sendTest(webhookId) {
   const webhook = await webhookRepo.findById(webhookId);
   if (!webhook) return null;
+  // Re-validate at test time (not just at create time, see ssrfGuard's
+  // module doc for why): a hostname can be re-pointed after registration,
+  // and a raw private IP could have been seeded directly (#96).
+  await assertPublicTarget(webhook.url);
   const eventType = 'pool.assets_locked';
   const payload = {
     event: eventType,

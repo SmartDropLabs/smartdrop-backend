@@ -187,6 +187,7 @@ describe('CoinMarketCap source', () => {
         source: 'coinmarketcap',
         open: true,
         openUntil: new Date('2026-01-01T00:15:00.000Z').toISOString(),
+        last_success_at: null,
       });
 
       mockGet.mockClear();
@@ -228,6 +229,7 @@ describe('CoinMarketCap source', () => {
         source: 'coinmarketcap',
         open: false,
         openUntil: null,
+        last_success_at: '2026-01-01T00:15:00.001Z',
       });
     });
 

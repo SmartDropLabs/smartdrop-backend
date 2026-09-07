@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const cache = require('./cache');
 const logger = require('../logger');
-const { Horizon } = require('stellar-sdk');
+const { Horizon } = require('@stellar/stellar-sdk');
 const config = require('../config');
 
 const IDS_KEY = 'airdrops:ids';

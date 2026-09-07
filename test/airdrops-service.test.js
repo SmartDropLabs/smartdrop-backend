@@ -125,7 +125,7 @@ jest.mock('../src/logger', () => ({
 
 const mockLedger = { sequence: 12345 };
 const mockHorizonCall = jest.fn(async () => ({ records: [mockLedger] }));
-jest.mock('stellar-sdk', () => ({
+jest.mock('@stellar/stellar-sdk', () => ({
   Horizon: {
     Server: jest.fn(() => ({
       ledgers: jest.fn(() => ({

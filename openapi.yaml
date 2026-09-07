@@ -1700,7 +1700,8 @@ components:
           $ref: "#/components/schemas/StellarAddress"
         total_amount:
           type: number
-          exclusiveMinimum: 0
+          minimum: 0
+          exclusiveMinimum: true
           description: Total airdrop amount in asset units
           example: 10000
         expiry_ledger:
@@ -1752,7 +1753,8 @@ components:
           $ref: "#/components/schemas/StellarAddress"
         amount:
           type: number
-          exclusiveMinimum: 0
+          minimum: 0
+          exclusiveMinimum: true
           description: Amount in asset units (at most 7 decimal places)
           example: 100.5
       required:
@@ -1824,7 +1826,8 @@ components:
           description: Alert trigger condition
         threshold_usd:
           type: number
-          exclusiveMinimum: 0
+          minimum: 0
+          exclusiveMinimum: true
           description: Price threshold in USD (or percentage for change_pct)
           example: 0.5
         webhook_url:

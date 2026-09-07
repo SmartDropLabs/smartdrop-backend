@@ -3,6 +3,7 @@
 const express = require('express');
 const request = require('supertest');
 const buildCorsMiddleware = require('../src/middleware/cors');
+const { errorHandler } = require('../src/middleware/errorHandler');
 
 const ALLOWED = ['http://localhost:3000', 'https://app.smartdrop.io'];
 
@@ -10,9 +11,7 @@ function buildApp(allowedOrigins) {
   const app = express();
   app.use(buildCorsMiddleware(allowedOrigins));
   app.get('/test', (req, res) => res.json({ ok: true }));
-  app.use((err, req, res, _next) => {
-    res.status(err.status || 500).json({ error: err.message });
-  });
+  app.use(errorHandler);
   return app;
 }
 

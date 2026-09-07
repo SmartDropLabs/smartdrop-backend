@@ -1,6 +1,6 @@
 'use strict';
 
-const { nativeToScVal } = require('stellar-sdk');
+const { nativeToScVal } = require('@stellar/stellar-sdk');
 const { EventPoller } = require('../src/indexer/eventPoller');
 
 function contractEvent(overrides = {}) {

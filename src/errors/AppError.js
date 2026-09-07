@@ -26,6 +26,7 @@ const ERROR_CODES = Object.freeze({
   CONFLICT: { statusCode: 409 },
   PAYLOAD_TOO_LARGE: { statusCode: 413 },
   UNSUPPORTED_MEDIA_TYPE: { statusCode: 415 },
+  TIMEOUT: { statusCode: 504 },
   RATE_LIMITED: { statusCode: 429 },
   INTERNAL_ERROR: { statusCode: 500 },
   UPSTREAM_ERROR: { statusCode: 502 },
@@ -43,6 +44,8 @@ const ERROR_CODES = Object.freeze({
   // ── Webhooks ─────────────────────────────────────────────────────────
   WEBHOOK_NOT_FOUND: { statusCode: 404 },
   WEBHOOK_LIMIT_EXCEEDED: { statusCode: 429 },
+  WEBHOOK_TARGET_BLOCKED: { statusCode: 422 },
+  INVALID_URL: { statusCode: 400 },
 
   // ── Alerts ───────────────────────────────────────────────────────────
   ALERT_NOT_FOUND: { statusCode: 404 },

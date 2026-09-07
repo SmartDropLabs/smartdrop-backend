@@ -88,7 +88,7 @@ jest.mock('../src/logger', () => ({
 }));
 
 const mockLedger = { sequence: 12345 };
-jest.mock('stellar-sdk', () => ({
+jest.mock('@stellar/stellar-sdk', () => ({
   Horizon: {
     Server: jest.fn(() => ({
       ledgers: jest.fn(() => ({
@@ -103,7 +103,7 @@ jest.mock('stellar-sdk', () => ({
   StrKey: {
     isValidEd25519PublicKey: jest.fn((address) => address.startsWith('G') && address.length === 56),
   },
-  SorobanRpc: {
+  rpc: {
     Server: jest.fn(() => ({})),
   },
 }));

@@ -75,8 +75,11 @@ describe('WebSocket price stream', () => {
     // Fresh module instances for each test suite run.
     jest.resetModules();
 
-    const { PriceSubscriptionManager } = require('../src/ws/PriceSubscriptionManager');
-    subscriptionManager = new PriceSubscriptionManager();
+    // Use the module's shared singleton, not a fresh instance — that's the
+    // same object `priceWebSocket.attach()` registers real connections on
+    // below, so assertions and manual notifyPriceUpdates() calls actually
+    // reach the sockets under test.
+    subscriptionManager = require('../src/ws/PriceSubscriptionManager');
 
     httpServer = http.createServer();
     const priceWebSocket = require('../src/ws/priceWebSocket');

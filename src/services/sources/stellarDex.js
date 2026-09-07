@@ -1,4 +1,4 @@
-const { Asset, Horizon } = require('stellar-sdk');
+const { Asset, Horizon } = require('@stellar/stellar-sdk');
 const config = require('../../config');
 const logger = require('../../logger');
 

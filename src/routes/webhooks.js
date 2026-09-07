@@ -212,6 +212,16 @@ router.delete(
   },
 );
 
+// Reduces a delivery's raw failure detail to a generic public category so
+// the /test response never leaks low-level network error strings (e.g.
+// "ECONNREFUSED ...") or raw upstream HTTP detail to the caller. The raw
+// value is still stored on the delivery record and logged server-side for
+// operators (#96).
+function categorizePublicError(delivery) {
+  if (!delivery.last_error) return delivery.last_error;
+  return delivery.response_status != null ? "error_response" : "unreachable";
+}
+
 router.post(
   "/webhooks/:id/test",
   routeTimeout(),
@@ -229,7 +239,7 @@ router.post(
         status: delivery.status,
         attempts: delivery.attempts,
         response_status: delivery.response_status,
-        last_error: delivery.last_error,
+        last_error: categorizePublicError(delivery),
       });
     } catch (err) {
       return next(err);

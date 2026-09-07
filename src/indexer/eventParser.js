@@ -1,5 +1,5 @@
 const crypto = require('crypto');
-const { scValToNative } = require('stellar-sdk');
+const { scValToNative } = require('@stellar/stellar-sdk');
 
 const EVENT_FIELDS = {
   airdrop_created: ['airdrop_id', 'creator', 'token', 'total_amount', 'expiry_ledger'],

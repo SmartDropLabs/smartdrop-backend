@@ -1,6 +1,6 @@
 'use strict';
 
-const { nativeToScVal, xdr } = require('stellar-sdk');
+const { nativeToScVal, xdr } = require('@stellar/stellar-sdk');
 const { EVENT_NAMES, parseContractEvent } = require('../src/indexer/eventParser');
 
 function sym(value) {

@@ -4,6 +4,7 @@ const path = require("path");
 const fs = require("fs");
 const express = require("express");
 const request = require("supertest");
+const helmet = require("helmet");
 
 describe("OpenAPI specification", () => {
   test("openapi.yaml exists and is valid YAML", () => {

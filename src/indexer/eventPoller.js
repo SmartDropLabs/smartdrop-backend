@@ -1,4 +1,4 @@
-const { SorobanRpc } = require('stellar-sdk');
+const { rpc } = require('@stellar/stellar-sdk');
 const config = require('../config');
 const logger = require('../logger');
 const eventStore = require('./eventStore');
@@ -25,7 +25,7 @@ class EventPoller {
     this.enabled = options.enabled ?? config.indexer.enabled;
     this.store = options.store || eventStore;
     this.logger = options.logger || logger;
-    this.server = options.server || new SorobanRpc.Server(options.rpcUrl || config.stellar.sorobanRpcUrl);
+    this.server = options.server || new rpc.Server(options.rpcUrl || config.stellar.sorobanRpcUrl);
     this.timer = null;
     this.stopped = false;
     this.lastRun = null;

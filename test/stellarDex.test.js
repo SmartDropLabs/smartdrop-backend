@@ -9,7 +9,7 @@ const mockAsset = jest.fn(function Asset(code, issuer) {
 });
 mockAsset.native = jest.fn(() => mockNativeAsset);
 
-jest.mock('stellar-sdk', () => ({
+jest.mock('@stellar/stellar-sdk', () => ({
   Horizon: {
     Server: mockServerConstructor,
   },

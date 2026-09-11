@@ -143,6 +143,7 @@ jest.mock('@stellar/stellar-sdk', () => ({
 }));
 
 const airdropsService = require('../src/services/airdrops');
+const AppError = require('../src/errors/AppError');
 
 beforeEach(() => {
   mockStore.clear();
@@ -533,6 +534,91 @@ describe('airdrops service', () => {
       const result = await airdropsService.listRecipients(airdrop.id);
       expect(result.recipients).toHaveLength(0);
       expect(result.total).toBe(0);
+    });
+  });
+
+  describe('State machine & status transitions (#87)', () => {
+    test('assertTransition permits valid transitions', () => {
+      expect(() => airdropsService.assertTransition('draft', 'executing')).not.toThrow();
+      expect(() => airdropsService.assertTransition('draft', 'cancelled')).not.toThrow();
+      expect(() => airdropsService.assertTransition('draft', 'expired')).not.toThrow();
+      expect(() => airdropsService.assertTransition('executing', 'completed')).not.toThrow();
+      expect(() => airdropsService.assertTransition('executing', 'failed')).not.toThrow();
+      expect(() => airdropsService.assertTransition('executing', 'cancelled')).not.toThrow();
+      expect(() => airdropsService.assertTransition('executing', 'expired')).not.toThrow();
+    });
+
+    test('assertTransition throws AppError (409) for invalid transitions', () => {
+      // From draft
+      expect(() => airdropsService.assertTransition('draft', 'completed')).toThrow(AppError);
+      expect(() => airdropsService.assertTransition('draft', 'draft')).toThrow(AppError);
+
+      // From executing
+      expect(() => airdropsService.assertTransition('executing', 'draft')).toThrow(AppError);
+
+      // From completed (terminal)
+      expect(() => airdropsService.assertTransition('completed', 'executing')).toThrow(AppError);
+      expect(() => airdropsService.assertTransition('completed', 'cancelled')).toThrow(AppError);
+
+      // From failed (terminal)
+      expect(() => airdropsService.assertTransition('failed', 'completed')).toThrow(AppError);
+      expect(() => airdropsService.assertTransition('failed', 'executing')).toThrow(AppError);
+
+      // From cancelled (terminal)
+      expect(() => airdropsService.assertTransition('cancelled', 'executing')).toThrow(AppError);
+      expect(() => airdropsService.assertTransition('cancelled', 'draft')).toThrow(AppError);
+
+      // From expired (terminal)
+      expect(() => airdropsService.assertTransition('expired', 'executing')).toThrow(AppError);
+    });
+
+    test('transitionTo updates status correctly', async () => {
+      const airdrop = await airdropsService.create({
+        name: 'Drop State', asset: 'USDC', asset_issuer: 'GI', total_amount: '100', expiry_ledger: 1000,
+      });
+
+      const executing = await airdropsService.markExecuting(airdrop.id);
+      expect(executing.status).toBe('executing');
+
+      const completed = await airdropsService.markCompleted(airdrop.id);
+      expect(completed.status).toBe('completed');
+    });
+
+    test('markFailed transitions executing airdrop to failed', async () => {
+      const airdrop = await airdropsService.create({
+        name: 'Drop State 2', asset: 'USDC', asset_issuer: 'GI', total_amount: '100', expiry_ledger: 1000,
+      });
+
+      await airdropsService.markExecuting(airdrop.id);
+      const failed = await airdropsService.markFailed(airdrop.id);
+      expect(failed.status).toBe('failed');
+    });
+
+    test('cancel throws 409 when airdrop is in non-cancellable status (completed)', async () => {
+      const airdrop = await airdropsService.create({
+        name: 'Drop Completed', asset: 'USDC', asset_issuer: 'GI', total_amount: '100', expiry_ledger: 1000,
+      });
+      await airdropsService.markExecuting(airdrop.id);
+      await airdropsService.markCompleted(airdrop.id);
+
+      await expect(async () => {
+        await airdropsService.cancel(airdrop.id);
+      }).rejects.toThrow(AppError);
+    });
+
+    test('update rejects expiry_ledger edit when airdrop is not in draft status', async () => {
+      const airdrop = await airdropsService.create({
+        name: 'Drop Update Expiry', asset: 'USDC', asset_issuer: 'GI', total_amount: '100', expiry_ledger: 1000,
+      });
+      await airdropsService.markExecuting(airdrop.id);
+
+      await expect(async () => {
+        await airdropsService.update(airdrop.id, { expiry_ledger: 2000 });
+      }).rejects.toThrow(AppError);
+
+      // Other fields can still be updated
+      const updated = await airdropsService.update(airdrop.id, { name: 'Renamed Executing Drop' });
+      expect(updated.name).toBe('Renamed Executing Drop');
     });
   });
 

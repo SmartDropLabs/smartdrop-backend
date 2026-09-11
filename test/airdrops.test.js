@@ -329,6 +329,27 @@ describe('POST /api/v1/airdrops/:id/cancel', () => {
     expect(cancelResponse.body.status).toBe('cancelled');
   });
 
+  test('returns 409 conflict when trying to cancel an airdrop in a non-cancellable terminal status', async () => {
+    const createResponse = await request(app)
+      .post('/api/v1/airdrops')
+      .send({
+        name: 'Test Airdrop 2',
+        asset: 'USDC',
+        asset_issuer: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA',
+        total_amount: 100,
+        expiry_ledger: 123456,
+      });
+
+    // Manually set status to completed in mockStore
+    const stored = mockStore.get(`airdrop:${createResponse.body.id}`);
+    mockStore.set(`airdrop:${createResponse.body.id}`, { ...stored, status: 'completed' });
+
+    const cancelResponse = await request(app).post(`/api/v1/airdrops/${createResponse.body.id}/cancel`);
+    expect(cancelResponse.status).toBe(409);
+    expect(cancelResponse.body.error.code).toBe('INVALID_STATE_TRANSITION');
+    expect(cancelResponse.body.error.message).toContain('completed');
+  });
+
   test('idempotent cancellation', async () => {
     const createResponse = await request(app)
       .post('/api/v1/airdrops')

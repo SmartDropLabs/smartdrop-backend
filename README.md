@@ -86,6 +86,21 @@ Soroban contract that actually executes airdrops lives in a separate repository
 `contract_airdrop_id` field via `PATCH /api/v1/airdrops/:id` to link the REST
 record with indexer-observed on-chain state.
 
+#### Airdrop Status State Machine
+
+Airdrops strictly enforce a status state machine across transitions:
+
+| Current Status | Allowed Target Statuses | Notes |
+|---|---|---|
+| `draft` | `executing`, `cancelled`, `expired` | Initial creation state. Mutations like updating `expiry_ledger` are allowed only in `draft`. |
+| `executing` | `completed`, `failed`, `cancelled`, `expired` | In-flight distribution state. |
+| `completed` | *(none)* | Terminal status. Rejects further transitions and cancellations. |
+| `failed` | *(none)* | Terminal status. |
+| `cancelled` | *(none)* | Terminal status. |
+| `expired` | *(none)* | Terminal status set when `expiry_ledger` has passed. |
+
+Attempting an illegal transition or attempting to cancel/modify an immutable terminal airdrop returns a `409 INVALID_STATE_TRANSITION` error. Attempting to update `expiry_ledger` once an airdrop is no longer `draft` returns a `400 VALIDATION_ERROR`.
+
 The indexer (`src/indexer/eventStore.js`) independently tracks on-chain
 airdrop events (`airdrop_created`, `recipient_added`, `token_claimed`,
 `airdrop_expired`) keyed by the contract's own airdrop ID. Until the linking

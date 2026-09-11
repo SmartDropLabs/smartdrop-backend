@@ -1,10 +1,59 @@
 const crypto = require('crypto');
 const cache = require('./cache');
 const logger = require('../logger');
+const AppError = require('../errors/AppError');
 const { Horizon } = require('@stellar/stellar-sdk');
 const config = require('../config');
 
 const IDS_KEY = 'airdrops:ids';
+
+// State machine for airdrop lifecycle transitions (issue #87)
+const ALLOWED_TRANSITIONS = Object.freeze({
+  draft: Object.freeze(['executing', 'cancelled', 'expired']),
+  executing: Object.freeze(['completed', 'failed', 'cancelled', 'expired']),
+  completed: Object.freeze([]),
+  failed: Object.freeze([]),
+  cancelled: Object.freeze([]),
+  expired: Object.freeze([]),
+});
+
+
+function assertTransition(currentStatus, nextStatus) {
+  const allowed = ALLOWED_TRANSITIONS[currentStatus];
+  if (!allowed || !allowed.includes(nextStatus)) {
+    throw new AppError(
+      'INVALID_STATE_TRANSITION',
+      `Cannot transition airdrop from status "${currentStatus}" to "${nextStatus}"`,
+      409,
+      { current_status: currentStatus, target_status: nextStatus },
+    );
+  }
+}
+
+async function transitionTo(id, nextStatus) {
+  const airdrop = await get(id);
+  if (!airdrop) return null;
+  assertTransition(airdrop.status, nextStatus);
+  const updated = {
+    ...airdrop,
+    status: nextStatus,
+    updated_at: new Date().toISOString(),
+  };
+  await cache.set(airdropKey(id), updated);
+  return updated;
+}
+
+async function markExecuting(id) {
+  return transitionTo(id, 'executing');
+}
+
+async function markCompleted(id) {
+  return transitionTo(id, 'completed');
+}
+
+async function markFailed(id) {
+  return transitionTo(id, 'failed');
+}
 
 function airdropKey(id) {
   return `airdrop:${id}`;
@@ -168,6 +217,16 @@ async function update(id, data) {
   if (!airdrop) return null;
 
   const { name, description, expiry_ledger, contract_airdrop_id } = data;
+
+  if (airdrop.status !== 'draft' && expiry_ledger !== undefined && expiry_ledger !== airdrop.expiry_ledger) {
+    throw new AppError(
+      'VALIDATION_ERROR',
+      `Cannot update expiry_ledger for airdrop in "${airdrop.status}" status (only draft airdrops can be updated)`,
+      400,
+      { current_status: airdrop.status, field: 'expiry_ledger' },
+    );
+  }
+
   const updated = {
     ...airdrop,
     name: name !== undefined ? name : airdrop.name,
@@ -200,6 +259,8 @@ async function cancel(id) {
   if (airdrop.status === 'cancelled') {
     return airdrop;
   }
+
+  assertTransition(airdrop.status, 'cancelled');
 
   const updated = {
     ...airdrop,
@@ -255,10 +316,16 @@ module.exports = {
   update,
   remove,
   cancel,
+  transitionTo,
+  markExecuting,
+  markCompleted,
+  markFailed,
   addRecipients,
   listRecipients,
   getCurrentLedger,
   scanIds,
   markExpired,
   TERMINAL_STATUSES,
+  ALLOWED_TRANSITIONS,
+  assertTransition,
 };

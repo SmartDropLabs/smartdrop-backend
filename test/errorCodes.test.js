@@ -59,6 +59,7 @@ describe('error code registry', () => {
       'ALERT_NOT_FOUND',
       'API_KEY_NOT_FOUND',
       'AIRDROP_NOT_INDEXED',
+      'INVALID_STATE_TRANSITION',
     ]) {
       expect(AppError.isKnownCode(code)).toBe(true);
     }

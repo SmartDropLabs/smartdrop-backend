@@ -371,13 +371,19 @@ router.post(
   validateRouteIdParams,
   async (req, res, next) => {
     try {
-      const airdrop = await airdropsService.cancel(req.params.id);
+      const airdrop = await airdropsService.get(req.params.id);
       if (!airdrop) {
         return next(
           new AppError("AIRDROP_NOT_FOUND", "Airdrop not found", 404),
         );
       }
-      return res.json(airdrop);
+
+      if (airdrop.status === 'cancelled') {
+        return res.json(airdrop);
+      }
+
+      const cancelled = await airdropsService.cancel(req.params.id);
+      return res.json(cancelled);
     } catch (err) {
       logger.error("Cancel airdrop error", { error: err.message });
       return next(err);

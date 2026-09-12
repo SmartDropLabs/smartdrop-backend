@@ -346,7 +346,7 @@ paths:
                   - id: wh_a1b2c3d4e5f6g7h8
                     url: https://example.com/webhooks/smartdrop
                     events:
-                      - airdrop.completed
+                      - airdrop.failed
                     active: true
                     secret_preview: whse...key
                     created_at: "2026-06-27T12:00:00.000Z"
@@ -396,7 +396,7 @@ paths:
                   id: wh_a1b2c3d4e5f6g7h8
                   url: https://example.com/webhooks/smartdrop
                   events:
-                    - airdrop.completed
+                    - airdrop.failed
                   active: false
                   secret_preview: whse...key
                   created_at: "2026-06-27T12:00:00.000Z"
@@ -409,10 +409,15 @@ paths:
   /api/v1/webhooks/{id}/test:
     post:
       operationId: testWebhookEndpoint
-      summary: Send a test ping to a webhook endpoint
+      summary: Send a test event to a webhook endpoint
       description: |
-        Queues a test `ping` event delivery to the specified webhook endpoint.
+        Queues a test `pool.assets_locked` event delivery to the specified webhook endpoint.
         The delivery is processed asynchronously.
+
+        ⚠️ **Warning:** A successful test delivery only confirms that the webhook URL can successfully
+        receive deliveries. It does not imply that the subscribed event type will ever fire for real,
+        as pool events are not yet implemented. Only `airdrop.failed` and `price.alert` are actively
+        dispatched today.
       tags:
         - Webhooks
       parameters:
@@ -439,7 +444,7 @@ paths:
                 delivery:
                   id: dlv_x1y2z3
                   endpoint_id: wh_a1b2c3d4e5f6g7h8
-                  event: ping
+                  event: pool.assets_locked
                   payload:
                     event: ping
                     timestamp: "2026-06-27T12:00:00.000Z"
@@ -1347,8 +1352,30 @@ components:
         - airdrop.completed
         - airdrop.failed
         - recipient.claimed
-        - ping
-      description: SmartDrop lifecycle events
+        - pool.created
+        - pool.assets_locked
+        - pool.assets_unlocked
+        - pool.rewards_distributed
+        - pool.closed
+        - price.alert
+        - '*'
+      description: |
+        SmartDrop webhook events.
+
+        **Active / implemented events:**
+        - `airdrop.failed` (fired when an airdrop expires)
+        - `price.alert` (fired when a price alert triggers)
+
+        **Planned / not yet implemented events:**
+        - `airdrop.created`
+        - `airdrop.executing`
+        - `airdrop.completed`
+        - `recipient.claimed`
+        - `pool.created`
+        - `pool.assets_locked`
+        - `pool.assets_unlocked`
+        - `pool.rewards_distributed`
+        - `pool.closed`
 
     WebhookDelivery:
       type: object

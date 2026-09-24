@@ -11,6 +11,7 @@ const webhookRepo = require('../repositories/webhookRepository');
 const deliveryRepo = require('../repositories/deliveryRepository');
 const { requestContext } = require('../middleware/requestId');
 const { assertPublicTarget } = require('./ssrfGuard');
+const dlq = require('../repositories/dlqRepository');
 
 const USER_AGENT = 'SmartDrop-Webhooks/1.0';
 
@@ -289,6 +290,17 @@ async function attempt(deliveryId, sequence) {
       attempts,
       error: errorMessage,
     });
+
+    // Add to Dead Letter Queue for permanent failures (#257)
+    const errorHistory = delivery.last_error
+      ? [...(delivery.error_history || []), delivery.last_error, errorMessage]
+      : [errorMessage];
+    await dlq.addToDLQ(
+      { ...delivery, attempts, last_error: errorMessage, response_status: responseStatus },
+      errorHistory,
+      payload ? JSON.parse(body) : null,
+    );
+
     return deliveryRepo.update(deliveryId, {
       status: 'failed',
       attempts,
@@ -296,6 +308,7 @@ async function attempt(deliveryId, sequence) {
       next_retry_at: null,
       last_error: errorMessage,
       response_status: responseStatus,
+      error_history: errorHistory,
     });
   });
 }
@@ -406,4 +419,4 @@ async function sendTest(webhookId) {
   return deliverToWebhook(webhook, eventType, payload.event_id, payload, null);
 }
 
-module.exports = { dispatch, attempt, sendTest, backoffMs, shouldRetry, getMetrics, getInFlightCount };
+module.exports = { dispatch, attempt, sendTest, backoffMs, shouldRetry, getMetrics, getInFlightCount, dlq };

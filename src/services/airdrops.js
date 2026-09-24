@@ -49,6 +49,20 @@ async function getCurrentLedger() {
 
 async function create(data) {
   const { name, description, asset, asset_issuer, total_amount, expiry_ledger, contract_airdrop_id, recipients = [] } = data;
+
+  // #290 — Validate that total_amount matches the sum of recipient amounts.
+  // Without this check, an airdrop could be created with a total_amount that
+  // doesn't cover all recipients, leading to insufficient on-chain funds.
+  if (recipients.length > 0 && total_amount != null) {
+    const recipientSum = recipients.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+    const total = Number(total_amount);
+    if (Math.abs(total - recipientSum) > 1e-7) {
+      throw new Error(
+        `total_amount (${total_amount}) does not match the sum of recipient amounts (${recipientSum})`,
+      );
+    }
+  }
+
   const id = generateId();
 
   const airdrop = {

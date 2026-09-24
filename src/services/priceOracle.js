@@ -345,8 +345,17 @@ async function fetchFreshPrice(assetCode, issuer = null, redisUnavailable = fals
     return existing;
   }
 
+  // Wrap the promise to handle rejections cleanly: on rejection, remove from
+  // inFlight and re-throw so concurrent callers see the same error (#286).
   const promise = doFetchFreshPrice(assetCode, issuer, redisUnavailable)
-    .finally(() => inFlight.delete(key));
+    .catch((err) => {
+      inFlight.delete(key);
+      throw err;
+    })
+    .then((result) => {
+      inFlight.delete(key);
+      return result;
+    });
 
   inFlight.set(key, promise);
   return promise;

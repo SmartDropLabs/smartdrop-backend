@@ -86,7 +86,11 @@ app.use(requestMetricsMiddleware);
 app.use(compression());
 app.use(helmet());
 app.use(buildCorsMiddleware(config.corsAllowedOrigins));
-app.use(express.json({ limit: config.airdrops.jsonMaxBytes }));
+// Apply a global body size limit to protect all routes from oversized payloads.
+// Individual routes with stricter limits (e.g. airdrops) override this via
+// their own express.json({ limit }) middleware (#287).
+const DEFAULT_BODY_LIMIT = '1mb';
+app.use(express.json({ limit: DEFAULT_BODY_LIMIT }));
 
 const EMPTY_QUEUE_STATS = {
   pendingRetries: null,
@@ -136,15 +140,18 @@ app.get("/health", async (req, res) => {
     !redisConnected ||
     !priceRefreshHealth.healthy ||
     !webhookWorkerHealth.healthy ||
+    !airdropExpiryHealth.healthy ||
     database.status === "error"
   ) {
     const jobsDegraded =
       (!priceRefreshHealth.healthy && !priceRefreshHealth.stalled) ||
-      (!webhookWorkerHealth.healthy && !webhookWorkerHealth.stalled);
+      (!webhookWorkerHealth.healthy && !webhookWorkerHealth.stalled) ||
+      (!airdropExpiryHealth.healthy && !airdropExpiryHealth.stalled);
     status =
       !redisConnected ||
       priceRefreshHealth.stalled ||
       webhookWorkerHealth.stalled ||
+      airdropExpiryHealth.stalled ||
       database.status === "error"
         ? "unhealthy"
         : jobsDegraded

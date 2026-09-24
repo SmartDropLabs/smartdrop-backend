@@ -23,8 +23,11 @@ const IV_BYTES = 12;
 const DEV_FALLBACK_KEY_MATERIAL = 'smartdrop-dev-insecure-webhook-key-do-not-use-in-production';
 
 let warnedAboutDevKey = false;
+let cachedDerivedKey = null;
 
 function deriveKey() {
+  if (cachedDerivedKey) return cachedDerivedKey;
+
   const configured = config.webhookSecretEncryptionKey;
   if (!configured) {
     if (!warnedAboutDevKey) {
@@ -34,9 +37,11 @@ function deriveKey() {
       );
       warnedAboutDevKey = true;
     }
-    return crypto.createHash('sha256').update(DEV_FALLBACK_KEY_MATERIAL).digest();
+    cachedDerivedKey = crypto.createHash('sha256').update(DEV_FALLBACK_KEY_MATERIAL).digest();
+  } else {
+    cachedDerivedKey = crypto.createHash('sha256').update(configured).digest();
   }
-  return crypto.createHash('sha256').update(configured).digest();
+  return cachedDerivedKey;
 }
 
 /**

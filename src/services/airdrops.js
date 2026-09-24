@@ -197,7 +197,10 @@ async function cancel(id) {
   const airdrop = await get(id);
   if (!airdrop) return null;
 
-  if (airdrop.status === 'cancelled') {
+  // Terminal statuses cannot be cancelled — once completed, failed, or
+  // expired, the airdrop's lifecycle is over (#280).
+  const terminalStatuses = ['completed', 'failed', 'expired', 'cancelled'];
+  if (terminalStatuses.includes(airdrop.status)) {
     return airdrop;
   }
 

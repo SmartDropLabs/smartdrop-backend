@@ -77,9 +77,11 @@ async function createKey({ label, scopes = ["default"], tier }) {
   };
 
   const redis = cache.getClient();
-  await cache.set(keyPath(record.id), record);
-  await cache.set(hashPath(hashed), record.id);
-  await redis.zadd(IDS_KEY, Date.now(), record.id);
+  const multi = redis.multi();
+  multi.set(keyPath(record.id), JSON.stringify(record));
+  multi.set(hashPath(hashed), record.id);
+  multi.zadd(IDS_KEY, Date.now(), record.id);
+  await multi.exec();
 
   return {
     api_key: apiKey,
@@ -92,9 +94,11 @@ async function revokeKey(id) {
   if (!record) return null;
 
   const redis = cache.getClient();
-  await cache.del(keyPath(id));
-  await cache.del(hashPath(record.key_hash));
-  await redis.zrem(IDS_KEY, id);
+  const multi = redis.multi();
+  multi.del(keyPath(id));
+  multi.del(hashPath(record.key_hash));
+  multi.zrem(IDS_KEY, id);
+  await multi.exec();
   return sanitize(record);
 }
 
@@ -127,16 +131,19 @@ async function rotateKey(id, options = {}) {
   };
 
   const redis = cache.getClient();
+  const multi = redis.multi();
 
-  // Create new key first
-  await cache.set(keyPath(newRecord.id), newRecord);
-  await cache.set(hashPath(hashed), newRecord.id);
-  await redis.zadd(IDS_KEY, Date.now(), newRecord.id);
+  // Create new key
+  multi.set(keyPath(newRecord.id), JSON.stringify(newRecord));
+  multi.set(hashPath(hashed), newRecord.id);
+  multi.zadd(IDS_KEY, Date.now(), newRecord.id);
 
-  // Then revoke old key
-  await cache.del(keyPath(id));
-  await cache.del(hashPath(oldRecord.key_hash));
-  await redis.zrem(IDS_KEY, id);
+  // Revoke old key
+  multi.del(keyPath(id));
+  multi.del(hashPath(oldRecord.key_hash));
+  multi.zrem(IDS_KEY, id);
+
+  await multi.exec();
 
   return {
     api_key: newApiKey,

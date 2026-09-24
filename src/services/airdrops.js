@@ -167,6 +167,13 @@ async function update(id, data) {
   const airdrop = await get(id);
   if (!airdrop) return null;
 
+  // Terminal statuses cannot be updated — once completed, failed, expired,
+  // or cancelled, the airdrop's lifecycle is over (#281).
+  const terminalStatuses = ['completed', 'failed', 'expired', 'cancelled'];
+  if (terminalStatuses.includes(airdrop.status)) {
+    return airdrop;
+  }
+
   const { name, description, expiry_ledger, contract_airdrop_id } = data;
   const updated = {
     ...airdrop,

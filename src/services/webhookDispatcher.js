@@ -346,8 +346,11 @@ async function dispatch({ event_type: eventType, event_id: eventId, data }) {
   }
 
   const dedupKey = `webhook:dispatched:${eventId}`;
-  const alreadyDispatched = await cache.get(dedupKey);
-  if (alreadyDispatched) {
+  // Use SET NX (set-if-not-exists) to claim the dedup slot atomically before
+  // dispatching. The previous flow checked then set, allowing concurrent calls
+  // with the same event_id to both pass the dedup check (#283).
+  const alreadyDispatched = await cache.getClient().set(dedupKey, Date.now(), 'EX', 86400, 'NX');
+  if (!alreadyDispatched) {
     logger.info('Skipping duplicate webhook dispatch', { event_id: eventId, event_type: eventType });
     return [];
   }
@@ -375,8 +378,6 @@ async function dispatch({ event_type: eventType, event_id: eventId, data }) {
     const batchResults = await processBatch(batch, eventType, eventId, payload, sequence);
     allResults.push(...batchResults);
   }
-
-  await cache.set(dedupKey, Date.now(), 86400);
 
   return allResults.map((result, i) => {
     const webhook_id = targets[i].id;

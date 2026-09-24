@@ -243,6 +243,7 @@ async function attempt(deliveryId, sequence) {
     recordDeliveryStart(deliveryId, webhook.id);
 
     try {
+      await assertPublicTarget(webhook.url);
       const res = await postOnce(webhook.url, headers, body, webhook.timeoutMs);
       responseStatus = res.status;
     } catch (err) {
@@ -365,13 +366,50 @@ async function deliverToWebhook(webhook, eventType, eventId, payload, sequence) 
 
 const DISPATCH_CONCURRENCY = parseInt(process.env.WEBHOOK_DISPATCH_CONCURRENCY, 10) || 10;
 const ORDERED_DELIVERY = process.env.WEBHOOK_ORDERED_DELIVERY === 'true';
+const MAX_IN_FLIGHT = parseInt(process.env.WEBHOOK_MAX_IN_FLIGHT, 10) || 100;
+
+class Semaphore {
+  constructor(max) {
+    this.max = max;
+    this.current = 0;
+    this.queue = [];
+  }
+
+  async acquire() {
+    if (this.current < this.max) {
+      this.current++;
+      return;
+    }
+    await new Promise((resolve) => this.queue.push(resolve));
+  }
+
+  release() {
+    this.current--;
+    const next = this.queue.shift();
+    if (next) {
+      this.current++;
+      next();
+    }
+  }
+}
+
+const deliverySemaphore = new Semaphore(MAX_IN_FLIGHT);
+
+async function deliverWithLimit(webhook, eventType, eventId, payload, sequence) {
+  await deliverySemaphore.acquire();
+  try {
+    return await deliverToWebhook(webhook, eventType, eventId, payload, sequence);
+  } finally {
+    deliverySemaphore.release();
+  }
+}
 
 async function processBatch(batch, eventType, eventId, payload, sequence) {
   if (ORDERED_DELIVERY) {
     const results = [];
     for (const webhook of batch) {
       try {
-        const value = await deliverToWebhook(webhook, eventType, eventId, payload, sequence);
+        const value = await deliverWithLimit(webhook, eventType, eventId, payload, sequence);
         results.push({ status: 'fulfilled', value });
       } catch (reason) {
         results.push({ status: 'rejected', reason });
@@ -380,7 +418,7 @@ async function processBatch(batch, eventType, eventId, payload, sequence) {
     return results;
   }
   return Promise.allSettled(
-    batch.map((webhook) => deliverToWebhook(webhook, eventType, eventId, payload, sequence))
+    batch.map((webhook) => deliverWithLimit(webhook, eventType, eventId, payload, sequence))
   );
 }
 
@@ -393,47 +431,84 @@ async function dispatch({ event_type: eventType, event_id: eventId, data }) {
     throw new Error('event_id is required to dispatch a webhook event');
   }
 
-  const dedupKey = `webhook:dispatched:${eventId}`;
-  // Use SET NX (set-if-not-exists) to claim the dedup slot atomically before
-  // dispatching. The previous flow checked then set, allowing concurrent calls
-  // with the same event_id to both pass the dedup check (#283).
-  const alreadyDispatched = await cache.getClient().set(dedupKey, Date.now(), 'EX', 86400, 'NX');
-  if (!alreadyDispatched) {
-    logger.info('Skipping duplicate webhook dispatch', { event_id: eventId, event_type: eventType });
-    return [];
-  }
-
-  const targets = (await webhookRepo.listActiveForEvent(eventType, events.matchesSubscription))
-    .filter((webhook) => matchesWebhookFilters(webhook.filters, data));
-  if (targets.length === 0) return [];
-
-  const resourceId = data?.pool_id || data?.asset || eventType;
-  const redis = cache.getClient();
-  const sequence = await redis.incr(`seq:${resourceId}`);
-
-  const occurredAt = new Date().toISOString();
-  const payload = {
-    event: eventType,
-    event_id: eventId,
-    occurred_at: occurredAt,
-    sequence,
-    data: data || {},
-  };
-
-  const allResults = [];
-  for (let i = 0; i < targets.length; i += DISPATCH_CONCURRENCY) {
-    const batch = targets.slice(i, i + DISPATCH_CONCURRENCY);
-    const batchResults = await processBatch(batch, eventType, eventId, payload, sequence);
-    allResults.push(...batchResults);
-  }
-
-  return allResults.map((result, i) => {
-    const webhook_id = targets[i].id;
-    if (result.status === 'fulfilled') {
-      return { webhook_id, delivery: result.value, error: null };
+  const traceId = generateDeliveryTraceId();
+  return withDeliveryTrace(traceId, async () => {
+    const dedupKey = `webhook:dispatched:${eventId}`;
+    // Use SET NX (set-if-not-exists) to claim the dedup slot atomically before
+    // dispatching. The previous flow checked then set, allowing concurrent calls
+    // with the same event_id to both pass the dedup check (#283).
+    const alreadyDispatched = await cache.getClient().set(dedupKey, Date.now(), 'EX', 86400, 'NX');
+    if (!alreadyDispatched) {
+      logger.info('Skipping duplicate webhook dispatch', {
+        event_id: eventId,
+        event_type: eventType,
+        trace_id: traceId,
+      });
+      return [];
     }
-    logger.error('Webhook delivery failed', { webhook_id, error: result.reason?.message || String(result.reason) });
-    return { webhook_id, delivery: null, error: result.reason?.message || String(result.reason) };
+
+    const targets = (await webhookRepo.listActiveForEvent(eventType, events.matchesSubscription))
+      .filter((webhook) => matchesWebhookFilters(webhook.filters, data));
+    if (targets.length === 0) {
+      logger.info('Dispatch started, no matching webhooks', {
+        event_id: eventId,
+        event_type: eventType,
+        trace_id: traceId,
+      });
+      return [];
+    }
+
+    logger.info('Dispatch started', {
+      event_id: eventId,
+      event_type: eventType,
+      trace_id: traceId,
+      target_count: targets.length,
+    });
+
+    const resourceId = data?.pool_id || data?.asset || eventType;
+    const redis = cache.getClient();
+    const sequence = await redis.incr(`seq:${resourceId}`);
+
+    const occurredAt = new Date().toISOString();
+    const payload = {
+      event: eventType,
+      event_id: eventId,
+      occurred_at: occurredAt,
+      sequence,
+      data: data || {},
+    };
+
+    const allResults = [];
+    for (let i = 0; i < targets.length; i += DISPATCH_CONCURRENCY) {
+      const batch = targets.slice(i, i + DISPATCH_CONCURRENCY);
+      const batchResults = await processBatch(batch, eventType, eventId, payload, sequence);
+      allResults.push(...batchResults);
+    }
+
+    const successCount = allResults.filter((r) => r.status === 'fulfilled').length;
+    const failureCount = allResults.filter((r) => r.status === 'rejected').length;
+
+    logger.info('Dispatch completed', {
+      event_id: eventId,
+      event_type: eventType,
+      trace_id: traceId,
+      success_count: successCount,
+      failure_count: failureCount,
+    });
+
+    return allResults.map((result, i) => {
+      const webhook_id = targets[i].id;
+      if (result.status === 'fulfilled') {
+        return { webhook_id, delivery: result.value, error: null };
+      }
+      logger.warn('Webhook delivery failed at dispatch', {
+        webhook_id,
+        event_id: eventId,
+        trace_id: traceId,
+        error: result.reason?.message || String(result.reason),
+      });
+      return { webhook_id, delivery: null, error: result.reason?.message || String(result.reason) };
+    });
   });
 }
 

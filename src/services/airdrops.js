@@ -249,15 +249,22 @@ async function addRecipients(airdropId, recipients) {
     addresses.map((addr) => redis.sadd(recipientAddressSetKey(airdropId), addr)),
   );
 
-  const duplicates = addresses.filter((_, i) => addedCounts[i] === 0);
-  if (duplicates.length > 0) {
-    // Roll back the addresses we just added so the set stays consistent.
-    await redis.srem(recipientAddressSetKey(airdropId), ...addresses.filter((_, i) => addedCounts[i] === 1));
-    return duplicates;
+  const newAddresses = [];
+  const duplicates = [];
+
+  for (let i = 0; i < addresses.length; i++) {
+    if (addedCounts[i] === 1) {
+      newAddresses.push(recipients[i]);
+    } else {
+      duplicates.push(addresses[i]);
+    }
   }
 
-  await redis.rpush(recipientsKey(airdropId), ...recipients.map((r) => JSON.stringify(r)));
-  return [];
+  if (newAddresses.length > 0) {
+    await redis.rpush(recipientsKey(airdropId), ...newAddresses.map((r) => JSON.stringify(r)));
+  }
+
+  return duplicates;
 }
 
 // Returns { recipients, total } — see list()'s comment above.

@@ -168,14 +168,37 @@ function withDeliveryTrace(traceId, fn) {
   return requestContext.run({ requestId: traceId }, fn);
 }
 
+/**
+ * #292 — Transient network errors (DNS blip, TCP reset, ECONNRESET) should
+ * not immediately fail a delivery. Retry up to 2 additional times with
+ * short exponential backoff before giving up to the caller, which has its
+ * own retry/backoff layer. This only covers true network errors, not HTTP
+ * error status codes (those are handled by the caller's shouldRetry logic).
+ */
 async function postOnce(url, headers, body, timeoutMs) {
-  return axios.post(url, body, {
-    headers,
-    timeout: timeoutMs ?? config.webhooks.timeoutMs,
-    transformRequest: [(data) => data],
-    validateStatus: () => true,
-    maxRedirects: 0,
-  });
+  const maxAttempts = 3;
+  const baseDelay = 200;
+  let lastError;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await axios.post(url, body, {
+        headers,
+        timeout: timeoutMs ?? config.webhooks.timeoutMs,
+        transformRequest: [(data) => data],
+        validateStatus: () => true,
+        maxRedirects: 0,
+      });
+    } catch (err) {
+      lastError = err;
+      // Only retry on network errors, not HTTP errors (validateStatus catches those)
+      if (attempt < maxAttempts) {
+        const delay = baseDelay * 2 ** (attempt - 1);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+  }
+  throw lastError;
 }
 
 async function attempt(deliveryId, sequence) {
@@ -289,6 +312,31 @@ async function attempt(deliveryId, sequence) {
       attempts,
       error: errorMessage,
     });
+
+    // #289 — Move permanently failed deliveries to a dead letter queue so
+    // they can be inspected, manually retried, or alerting-triggered without
+    // cluttering the active delivery table.
+    try {
+      const redis = cache.getClient();
+      const deadLetterEntry = JSON.stringify({
+        delivery_id: delivery.id,
+        webhook_id: webhook.id,
+        event_type: delivery.event_type,
+        event_id: delivery.event_id,
+        error: errorMessage,
+        response_status: responseStatus,
+        attempts,
+        failed_at: nowIso,
+        trace_id: traceId,
+        request_id: delivery.request_id,
+      });
+      await redis.lpush('webhook:dead_letter', deadLetterEntry);
+      // Cap the dead letter queue at 10,000 entries to prevent unbounded growth
+      await redis.ltrim('webhook:dead_letter', 0, 9999);
+    } catch (dlqErr) {
+      logger.warn('Failed to enqueue dead letter', { delivery_id: delivery.id, error: dlqErr.message });
+    }
+
     return deliveryRepo.update(deliveryId, {
       status: 'failed',
       attempts,

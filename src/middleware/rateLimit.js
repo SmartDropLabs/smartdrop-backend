@@ -10,7 +10,20 @@ const AppError = require('../errors/AppError');
  * Fails open if Redis is unreachable so a cache outage cannot lock out users.
  */
 // Track consecutive Redis failures per keyPrefix to escalate log severity.
-const consecutiveFailures = new Map();
+// Entries are timestamped and cleaned up periodically to prevent unbounded
+// memory growth from keyPrefixes that stop receiving traffic (#284).
+const consecutiveFailures = new Map(); // keyPrefix → { count, lastUpdate }
+const FAILURE_ENTRY_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const CLEANUP_INTERVAL_MS = 60_000; // sweep every 60s
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of consecutiveFailures) {
+    if (now - entry.lastUpdate > FAILURE_ENTRY_TTL_MS) {
+      consecutiveFailures.delete(key);
+    }
+  }
+}, CLEANUP_INTERVAL_MS).unref();
 
 function buildRateLimit({ windowSeconds, max, keyPrefix }) {
   if (!Number.isFinite(windowSeconds) || windowSeconds <= 0) {
@@ -36,6 +49,7 @@ function buildRateLimit({ windowSeconds, max, keyPrefix }) {
       }
       // Reset failure counter on success.
       consecutiveFailures.delete(keyPrefix);
+
       const remaining = Math.max(0, max - count);
       const resetAt = (bucket + 1) * windowSeconds;
       const retryAfterSeconds = Math.max(1, resetAt - Math.floor(Date.now() / 1000));
@@ -53,8 +67,9 @@ function buildRateLimit({ windowSeconds, max, keyPrefix }) {
       }
       return next();
     } catch (err) {
-      const failures = (consecutiveFailures.get(keyPrefix) || 0) + 1;
-      consecutiveFailures.set(keyPrefix, failures);
+      const prev = consecutiveFailures.get(keyPrefix);
+      const failures = (prev?.count || 0) + 1;
+      consecutiveFailures.set(keyPrefix, { count: failures, lastUpdate: Date.now() });
       // First failure is a warning; 3+ consecutive failures escalate to error
       // so operators see persistent Redis issues in alerting.
       if (failures >= 3) {
@@ -159,8 +174,9 @@ function buildApiKeyRateLimit({ keyPrefix = 'apikey' } = {}) {
       }
       return next();
     } catch (err) {
-      const failures = (consecutiveFailures.get(failureKey) || 0) + 1;
-      consecutiveFailures.set(failureKey, failures);
+      const prev = consecutiveFailures.get(failureKey);
+      const failures = (prev?.count || 0) + 1;
+      consecutiveFailures.set(failureKey, { count: failures, lastUpdate: Date.now() });
       if (failures >= 3) {
         logger.error('Per-key rate limit disabled — Redis error persists', {
           keyPrefix: failureKey,

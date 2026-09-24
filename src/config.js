@@ -272,6 +272,11 @@ module.exports = {
       max: parseInt(process.env.WEBHOOK_TEST_RATELIMIT_MAX, 10) || 5,
     },
     orderedDelivery: process.env.WEBHOOK_ORDERED_DELIVERY === 'true',
+    dlq: {
+      // How long a permanently failed delivery stays in the dead letter queue
+      // before Redis evicts it. Replays must happen within this window.
+      ttlSeconds: parseInt(process.env.WEBHOOK_DLQ_TTL_SECONDS, 10) || 7 * 24 * 60 * 60,
+    },
   },
   ws: {
     maxConnections: parseInt(process.env.WS_MAX_CONNECTIONS, 10) || 100,

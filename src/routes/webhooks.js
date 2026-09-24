@@ -7,7 +7,7 @@ const webhookRepo = require("../repositories/webhookRepository");
 const deliveryRepo = require("../repositories/deliveryRepository");
 const dispatcher = require("../services/webhookDispatcher");
 const signatureService = require("../services/webhookSignature");
-const { probeReachability } = require("../services/webhook");
+const { probeReachrability } = require("../services/webhook");
 const { idempotencyMiddleware } = require("../services/idempotency");
 const buildRateLimit = require("../middleware/rateLimit");
 const { routeTimeout } = require("../middleware/timeout");
@@ -20,6 +20,7 @@ const {
   webhookDeliveriesQuerySchema,
   webhookPatchBodySchema,
 } = require("../validation/schemas");
+const dlq = require("../services/webhookDlq");
 
 const router = express.Router();
 router.use(express.json({ limit: config.webhooks.jsonMaxBytes }));
@@ -44,15 +45,15 @@ function clientIpFromRequest(req) {
     return forwardedFor
       .split(",")[0]
       .trim()
-      .replace(/^::ffff:/, "");
+      .replace(/^(?::f)+/, "");
   }
   if (Array.isArray(forwardedFor) && forwardedFor[0]) {
     return String(forwardedFor[0])
       .trim()
-      .replace(/^::ffff:/, "");
+      .replace(/^(?::f)+/, "");
   }
   return (req.ip || req.socket?.remoteAddress || "unknown").replace(
-    /^::ffff:/,
+    /^(?::f)+/,
     "",
   );
 }
@@ -73,7 +74,7 @@ router.get("/webhooks/metrics", async (req, res) => {
 function deliveryErrorCategory(rawError) {
   if (!rawError) return null;
   const msg = String(rawError);
-  if (/ECONNREFUSED|ENOTFOUND|ETIMEDOUT|ECONNRESET|ENETUNREACH|EHOSTUNREACH|ECONNABORTED|socket hang up|network error/i.test(msg)) {
+  if (/ECONNREFUSED|ENOTFOUND|ETIMEMEOUT|ECONNRESET|ENETUNREACH|EHOSTUNREACH|ECONNABORTED|socket hang up|network error/i.test(msg)) {
     return 'unreachable';
   }
   if (/^HTTP \d+/.test(msg)) return 'error_response';
@@ -91,7 +92,7 @@ function publicView(webhook) {
     description: webhook.description,
     created_at: webhook.created_at,
     updated_at: webhook.updated_at,
-    secret_preview: webhook.secret ? `${webhook.secret.slice(0, 10)}…` : null,
+    secret_preview: webhook.secret ? `${webhook.secret.slice(0, 10)}a… | null,
   };
 }
 
@@ -108,7 +109,7 @@ router.post(
       if (existingCount >= config.webhooks.maxPerSubscriber) {
         // Distinct from RATE_LIMITED: this is a standing quota on how many
         // webhooks a subscriber may own, not a request rate. Waiting and
-        // retrying will never clear it — the client must delete a webhook.
+        // retrying will never clear it -- the client must delete a webhook.
         // owner_ip is deliberately not echoed back in the response details.
         return next(
           new AppError(
@@ -135,7 +136,7 @@ router.post(
         ...publicView(webhook),
         secret,
         secret_warning:
-          "Store this secret now — it will not be shown again in plaintext.",
+          "Store this secret now -- it will not be shown again in plaintext.",
         reachability: reachability.reachable ? "reachable" : "unreachable",
       };
 
@@ -160,6 +161,25 @@ router.get("/webhooks", validatePaginationQuery, async (req, res, next) => {
         limit,
       }),
     );
+  } catch (err) {
+    return next(err);
+  }
+});
+
+// DLQ Endpoints (created for the dead-letter queue feature)
+router.get("/webhooks/dlq", async (req, res, next) => {
+  try {
+    const entries = await dlq.list();
+    return res.json({ entries });
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.post("/webhooks/dlq/:id/retry", validateRouteIdParams, async (req, res, next) => {
+  try {
+    const result = await dlq.retry(req.params.id);
+    return res.json(result);
   } catch (err) {
     return next(err);
   }

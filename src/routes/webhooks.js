@@ -20,6 +20,7 @@ const {
   webhookDeliveriesQuerySchema,
   webhookPatchBodySchema,
 } = require("../validation/schemas");
+const dlq = require("../repositories/dlqRepository");
 
 const router = express.Router();
 router.use(express.json({ limit: config.webhooks.jsonMaxBytes }));
@@ -269,5 +270,60 @@ router.get(
     }
   },
 );
+
+// ── Dead Letter Queue endpoints (#257) ──────────────────────────────────
+
+router.get("/webhooks/dlq", validatePaginationQuery, async (req, res, next) => {
+  try {
+    const { page, limit } = req.validated.query;
+    const offset = (page - 1) * limit;
+    const { entries, total } = await dlq.list({ limit, offset });
+    return res.json(
+      paginateResponse(entries, total, { page, limit }),
+    );
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.get("/webhooks/dlq/:id", async (req, res, next) => {
+  try {
+    const entry = await dlq.getById(req.params.id);
+    if (!entry) {
+      return next(new AppError("DLQ_ENTRY_NOT_FOUND", "DLQ entry not found", 404));
+    }
+    return res.json(entry);
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.post("/webhooks/dlq/:id/retry", async (req, res, next) => {
+  try {
+    const entry = await dlq.getById(req.params.id);
+    if (!entry) {
+      return next(new AppError("DLQ_ENTRY_NOT_FOUND", "DLQ entry not found", 404));
+    }
+
+    const webhook = await webhookRepo.findById(entry.webhook_id);
+    if (!webhook) {
+      return next(new AppError("WEBHOOK_NOT_FOUND", "Webhook no longer exists", 404));
+    }
+
+    // Re-dispatch the event
+    await dispatcher.dispatch({
+      event_type: entry.event_type,
+      event_id: `${entry.event_id}_retry_${Date.now()}`,
+      data: entry.payload?.data || {},
+    });
+
+    // Remove from DLQ after successful retry dispatch
+    await dlq.remove(req.params.id);
+
+    return res.json({ success: true, message: "Event re-dispatched" });
+  } catch (err) {
+    return next(err);
+  }
+});
 
 module.exports = router;

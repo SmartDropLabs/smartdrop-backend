@@ -30,6 +30,28 @@ function nanoid(size = 21) {
   return id;
 }
 
+function getRequestId() {
+  const requestId = requestContext.getStore()?.requestId;
+  return requestId && requestId !== 'system' ? requestId : null;
+}
+
+function getRequestIdHeaders() {
+  const requestId = getRequestId();
+  return requestId ? { 'X-Request-ID': requestId } : {};
+}
+
+function addRequestIdHeaderInterceptor(httpClient) {
+  if (!httpClient?.interceptors?.request?.use) return httpClient;
+  httpClient.interceptors.request.use((requestConfig) => {
+    const requestIdHeaders = getRequestIdHeaders();
+    if (Object.keys(requestIdHeaders).length > 0) {
+      requestConfig.headers = { ...requestConfig.headers, ...requestIdHeaders };
+    }
+    return requestConfig;
+  });
+  return httpClient;
+}
+
 function requestIdMiddleware(req, res, next) {
   const clientId = req.get('x-request-id');
   req.id = isValidRequestId(clientId) ? clientId : `req_${nanoid()}`;
@@ -55,6 +77,9 @@ function requestIdMiddleware(req, res, next) {
 module.exports = {
   requestIdMiddleware,
   requestContext,
+  getRequestId,
+  getRequestIdHeaders,
+  addRequestIdHeaderInterceptor,
   nanoid,
   isValidRequestId,
 };

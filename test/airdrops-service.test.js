@@ -125,21 +125,35 @@ jest.mock('../src/logger', () => ({
 
 const mockLedger = { sequence: 12345 };
 const mockHorizonCall = jest.fn(async () => ({ records: [mockLedger] }));
-jest.mock('@stellar/stellar-sdk', () => ({
-  Horizon: {
-    Server: jest.fn(() => ({
-      ledgers: jest.fn(() => ({
-        order: jest.fn(() => ({
-          limit: jest.fn(() => ({
-            call: mockHorizonCall,
-          })),
-        })),
+const mockHorizonServer = {
+  ledgers: jest.fn(() => ({
+    order: jest.fn(() => ({
+      limit: jest.fn(() => ({
+        call: mockHorizonCall,
       })),
     })),
+  })),
+};
+const mockAddRequestIdHeaderInterceptor = jest.fn((httpClient) => httpClient);
+jest.mock('@stellar/stellar-sdk', () => ({
+  Horizon: {
+    Server: jest.fn(() => mockHorizonServer),
   },
   StrKey: {
     isValidEd25519PublicKey: jest.fn((address) => address.startsWith('G') && address.length === 56),
   },
+}));
+
+jest.mock('../src/config', () => ({
+  airdrops: { ledgerCacheTtlMs: 5000 },
+  stellar: {
+    horizonUrl: 'https://horizon-testnet.stellar.org',
+    usdcIssuer: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN',
+  },
+}));
+
+jest.mock('../src/middleware/requestId', () => ({
+  addRequestIdHeaderInterceptor: mockAddRequestIdHeaderInterceptor,
 }));
 
 const airdropsService = require('../src/services/airdrops');
@@ -152,6 +166,10 @@ beforeEach(() => {
 });
 
 describe('airdrops service', () => {
+  test('registers the Horizon client with the request ID interceptor', () => {
+    expect(mockAddRequestIdHeaderInterceptor).toHaveBeenCalledWith(mockHorizonServer);
+  });
+
   test('create and get airdrop', async () => {
     const airdrop = await airdropsService.create({
       name: 'Test',
@@ -237,6 +255,20 @@ describe('airdrops service', () => {
         seen.push(...batch);
       }
       expect(seen).toHaveLength(0);
+    });
+
+    test('skips an empty ZSCAN page between non-empty pages', async () => {
+      mockRedis.zscan
+        .mockReset()
+        .mockResolvedValueOnce(['1', []])
+        .mockResolvedValueOnce(['0', ['drop_1', '1']]);
+
+      const batches = [];
+      for await (const batch of airdropsService.scanIds(2)) {
+        batches.push(batch);
+      }
+
+      expect(batches).toEqual([['drop_1']]);
     });
   });
 

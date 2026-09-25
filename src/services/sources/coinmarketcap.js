@@ -2,6 +2,7 @@ const axios = require('axios');
 const config = require('../../config');
 const logger = require('../../logger');
 const { createCircuitBreaker } = require('./circuitBreaker');
+const { getRequestIdHeaders } = require('../../middleware/requestId');
 
 const circuit = createCircuitBreaker({
   sourceName: 'coinmarketcap',
@@ -83,6 +84,7 @@ async function fetchPrice(assetCode, issuer = null) {
     const client = getClient();
     const lookupKey = market.id ? String(market.id) : market.symbol;
     const response = await client.get('/cryptocurrency/quotes/latest', {
+      headers: getRequestIdHeaders(),
       params: {
         ...(market.id ? { id: market.id } : { symbol: market.symbol }),
         convert: 'USD',

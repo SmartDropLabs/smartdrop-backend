@@ -1,7 +1,16 @@
 'use strict';
 
 const mockOrderbook = jest.fn();
-const mockServer = { orderbook: mockOrderbook };
+const mockRequestUse = jest.fn();
+const mockAddRequestIdHeaderInterceptor = jest.fn((httpClient) => httpClient);
+const mockServer = {
+  orderbook: mockOrderbook,
+  httpClient: {
+    interceptors: {
+      request: { use: mockRequestUse },
+    },
+  },
+};
 const mockServerConstructor = jest.fn(() => mockServer);
 const mockNativeAsset = { native: true };
 const mockAsset = jest.fn(function Asset(code, issuer) {
@@ -16,11 +25,23 @@ jest.mock('@stellar/stellar-sdk', () => ({
   Asset: mockAsset,
 }));
 
+jest.mock('../src/middleware/requestId', () => ({
+  ...jest.requireActual('../src/middleware/requestId'),
+  addRequestIdHeaderInterceptor: mockAddRequestIdHeaderInterceptor,
+}));
+
 jest.mock('../src/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
   error: jest.fn(),
   debug: jest.fn(),
+}));
+
+jest.mock('../src/config', () => ({
+  stellar: {
+    horizonUrl: 'https://horizon-testnet.stellar.org',
+    usdcIssuer: 'G'.padEnd(56, 'A'),
+  },
 }));
 
 const config = require('../src/config');
@@ -172,6 +193,16 @@ describe('Stellar DEX source', () => {
       mockNativeAsset,
       { code: 'USDC', issuer: config.stellar.usdcIssuer }
     );
+  });
+
+  test('registers the Horizon client with the request ID interceptor', async () => {
+    queueOrderBook({
+      bids: [{ price: '1' }],
+      asks: [{ price: '1' }],
+    });
+    await stellarDex.fetchPrice('XLM');
+
+    expect(mockAddRequestIdHeaderInterceptor).toHaveBeenCalledWith(mockServer);
   });
 
   describe('isSupported', () => {

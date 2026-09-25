@@ -3,6 +3,7 @@ const cache = require('./cache');
 const logger = require('../logger');
 const { Horizon } = require('@stellar/stellar-sdk');
 const config = require('../config');
+const { addRequestIdHeaderInterceptor } = require('../middleware/requestId');
 
 const IDS_KEY = 'airdrops:ids';
 
@@ -24,7 +25,9 @@ function generateId() {
   return `drop_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
 }
 
-const horizon = new Horizon.Server(config.stellar.horizonUrl);
+const horizon = addRequestIdHeaderInterceptor(
+  new Horizon.Server(config.stellar.horizonUrl)
+);
 
 // getCurrentLedger() is a live Horizon call. Callers that need to check many
 // airdrops in quick succession (the expiry reconciliation job, in

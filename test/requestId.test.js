@@ -2,7 +2,25 @@
 
 const express = require('express');
 const request = require('supertest');
-const { requestIdMiddleware, requestContext } = require('../src/middleware/requestId');
+
+jest.mock('../src/services/cache', () => ({
+  isConnected: () => true,
+  disconnect: jest.fn(),
+  getConcurrencyStats: () => ({ active: 0, waiting: 0, available: 50, max: 50 }),
+  getCommandQueueLength: () => 0,
+  getClient: () => ({
+    incr: async () => 1,
+    expire: async () => 1,
+  }),
+}));
+
+const {
+  requestIdMiddleware,
+  requestContext,
+  getRequestId,
+  getRequestIdHeaders,
+  addRequestIdHeaderInterceptor,
+} = require('../src/middleware/requestId');
 
 function buildTestApp(onRequest) {
   const app = express();
@@ -46,6 +64,45 @@ describe('requestId middleware', () => {
     const res = await request(app).get('/test');
 
     expect(storeRequestId).toBe(res.headers['x-request-id']);
+  });
+});
+
+describe('downstream requestId headers', () => {
+  test('returns no header outside a request context', () => {
+    expect(getRequestId()).toBeNull();
+    expect(getRequestIdHeaders()).toEqual({});
+  });
+
+  test('returns the active request ID for downstream requests', async () => {
+    await requestContext.run({ requestId: 'req_downstream_123' }, async () => {
+      expect(getRequestId()).toBe('req_downstream_123');
+      expect(getRequestIdHeaders()).toEqual({ 'X-Request-ID': 'req_downstream_123' });
+    });
+  });
+
+  test('adds the active request ID through an HTTP client interceptor', async () => {
+    let interceptor;
+    const httpClient = {
+      interceptors: {
+        request: {
+          use: jest.fn((handler) => {
+            interceptor = handler;
+          }),
+        },
+      },
+    };
+
+    expect(addRequestIdHeaderInterceptor(httpClient)).toBe(httpClient);
+
+    const requestConfig = await requestContext.run(
+      { requestId: 'req_intercepted_123' },
+      () => interceptor({ headers: { Accept: 'application/json' } })
+    );
+
+    expect(requestConfig.headers).toEqual({
+      Accept: 'application/json',
+      'X-Request-ID': 'req_intercepted_123',
+    });
   });
 });
 

@@ -84,8 +84,11 @@ async function fetchPrice(assetCode) {
       // permanent misconfiguration, not something that self-heals on
       // retry. Distinct from 403 (CDN/firewall block) and 429 (rate
       // limit), neither of which indicate a bad key.
+      // #370 — use a 10x longer cooldown for auth failures vs transient
+      // errors: a bad API key won't self-heal, so hammering the endpoint
+      // wastes quota and triggers rate limits.
       err.nonRetryable = true;
-      circuit.open({ assetCode });
+      circuit.open({ assetCode, cooldownMs: config.priceSources.circuitCooldownMs * 10 });
       logger.warn('CoinGecko authentication failed', { assetCode });
       throw err;
     }

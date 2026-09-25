@@ -258,8 +258,8 @@ async function getRecipientClaims(address) {
 }
 
 async function getEventCount() {
-  const ids = await cache.getClient().smembers(EVENT_IDS_KEY);
-  return ids.length;
+  // #368 — scard returns the set size without loading all members into memory.
+  return Number(await cache.getClient().scard(EVENT_IDS_KEY)) || 0;
 }
 
 async function getStats() {

@@ -38,9 +38,11 @@ function errorHandler(err, req, res, _next) {
     code = 'INTERNAL_ERROR';
   }
 
-  if ((!isAppError && !isPayloadTooLarge) || status >= 500) {
-    logger.error('Unhandled error', { error: err.message, stack: err.stack, request_id: req.id });
+  if (status >= 500) {
+    logger.error('Server error', { error: err.message, stack: err.stack, request_id: req.id });
     errorTracker.captureException(err, { request_id: req.id, path: req.originalUrl, method: req.method, status });
+  } else if (status >= 400 && (!isAppError && !isPayloadTooLarge)) {
+    logger.warn('Client error', { error: err.message, status, request_id: req.id });
   }
 
   const error = { code, message, request_id: req.id };

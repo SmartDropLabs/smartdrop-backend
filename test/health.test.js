@@ -44,6 +44,17 @@ jest.mock('../src/ws/priceWebSocket', () => ({
   attach: jest.fn(),
 }));
 
+// The database probe opens a real connection (issue #376), so the endpoint
+// tests inject its outcome rather than pointing them at a database.
+jest.mock('../src/services/dbHealth', () => ({
+  checkDatabase: jest.fn(async () => ({
+    configured: true,
+    checked: true,
+    status: 'ok',
+    latency_ms: 1,
+  })),
+}));
+
 // ---------------------------------------------------------------------------
 // Helpers – reset modules between tests so mocks are applied cleanly
 // ---------------------------------------------------------------------------
@@ -109,7 +120,7 @@ describe('GET /health – response shape', () => {
     expect(res.body).toHaveProperty('price_source_circuits');
   });
 
-  test('database field reflects configured-but-unused state', async () => {
+  test('database field carries the probe result and its latency', async () => {
     jest.resetModules();
     const app = loadApp();
 
@@ -117,9 +128,29 @@ describe('GET /health – response shape', () => {
 
     expect(res.body.database).toEqual({
       configured: true,
-      checked: false,
-      status: 'unused',
+      checked: true,
+      status: 'ok',
+      latency_ms: expect.any(Number),
     });
+  });
+
+  test('a failed probe reports the reason and makes the overall status unhealthy', async () => {
+    jest.resetModules();
+    const { checkDatabase } = require('../src/services/dbHealth');
+    checkDatabase.mockResolvedValueOnce({
+      configured: true,
+      checked: true,
+      status: 'error',
+      latency_ms: 2001,
+      error: 'database ping timed out after 2000ms',
+    });
+
+    const app = loadApp();
+    const res = await request(app).get('/health');
+
+    expect(res.body.database.status).toBe('error');
+    expect(res.body.database.error).toBe('database ping timed out after 2000ms');
+    expect(res.body.status).toBe('unhealthy');
   });
 
   test('jobs field contains price_refresh and webhook_retry_worker entries', async () => {
@@ -165,6 +196,14 @@ describe('GET /health – status computation', () => {
       getHealth: () => ({ healthy: true, lastSuccessAt: Date.now(), lastError: null, stalled: false }),
     }));
     jest.mock('../src/jobs/webhookRetryWorker', () => ({
+      start: jest.fn(),
+      stop: jest.fn(),
+      tick: jest.fn(),
+      getHealth: () => ({ healthy: true, lastSuccessAt: Date.now(), lastError: null, stalled: false }),
+    }));
+    // Without this mock the airdrop job reports healthy=false (it never ran in
+    // the test process), which the endpoint turns into "degraded".
+    jest.mock('../src/jobs/airdropExpiry', () => ({
       start: jest.fn(),
       stop: jest.fn(),
       tick: jest.fn(),

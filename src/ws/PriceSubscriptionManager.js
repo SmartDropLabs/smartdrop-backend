@@ -39,6 +39,7 @@ class PriceSubscriptionManager {
     this._clientIpBySocket = new Map(); // ws → string
     this._connectionsByIp = new Map(); // ip → number
     this._previousPrices = new Map(); // assetKey → number
+    this._assetSubscribers = new Map(); // assetKey → Set<ws>
     this._pingTimer = null;
     this._draining = false;
     this._drainStats = { warned: 0, closed: 0, forceClosed: 0 };
@@ -87,9 +88,32 @@ class PriceSubscriptionManager {
     return true;
   }
 
+  _removeFromAssetIndex(ws, assets) {
+    for (const asset of assets) {
+      const subs = this._assetSubscribers.get(asset);
+      if (subs) {
+        subs.delete(ws);
+        if (subs.size === 0) this._assetSubscribers.delete(asset);
+      }
+    }
+  }
+
+  _addToAssetIndex(ws, assets) {
+    for (const asset of assets) {
+      let subs = this._assetSubscribers.get(asset);
+      if (!subs) {
+        subs = new Set();
+        this._assetSubscribers.set(asset, subs);
+      }
+      subs.add(ws);
+    }
+  }
+
   _remove(ws) {
     if (!this._clients.has(ws)) return;
     const clientIp = this._clientIpBySocket.get(ws) || 'unknown';
+    const client = this._clients.get(ws);
+    this._removeFromAssetIndex(ws, client.assets);
     this._clients.delete(ws);
     this._clientIpBySocket.delete(ws);
     const nextCount = (this._connectionsByIp.get(clientIp) || 1) - 1;
@@ -126,6 +150,8 @@ class PriceSubscriptionManager {
           added.push(key);
         }
       }
+      // Update reverse index for newly added assets.
+      if (added.length > 0) this._addToAssetIndex(ws, added);
       if (added.length === 0 && client.assets.size >= MAX_ASSETS_PER_CLIENT && requested.length > 0) {
         this._send(ws, { type: 'error', message: `Subscription cap reached (${MAX_ASSETS_PER_CLIENT} max)` });
       } else {
@@ -134,6 +160,8 @@ class PriceSubscriptionManager {
 
     } else if (msg.action === 'unsubscribe') {
       const toRemove = Array.isArray(msg.assets) ? msg.assets : [];
+      // Update reverse index before removing from client's asset set.
+      this._removeFromAssetIndex(ws, toRemove.map(String));
       for (const a of toRemove) client.assets.delete(String(a));
       this._send(ws, { type: 'unsubscribed', assets: [...client.assets] });
 
@@ -183,10 +211,10 @@ class PriceSubscriptionManager {
   }
 
   _broadcast(assetKey, payload) {
-    for (const [ws, client] of this._clients) {
-      if (client.assets.has(assetKey)) {
-        this._send(ws, payload);
-      }
+    const subscribers = this._assetSubscribers.get(assetKey);
+    if (!subscribers) return;
+    for (const ws of subscribers) {
+      this._send(ws, payload);
     }
   }
 

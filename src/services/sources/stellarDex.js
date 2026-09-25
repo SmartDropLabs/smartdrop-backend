@@ -3,6 +3,8 @@ const config = require('../../config');
 const logger = require('../../logger');
 const { addRequestIdHeaderInterceptor } = require('../../middleware/requestId');
 
+const HORIZON_TIMEOUT_MS = config.priceSources?.horizonTimeoutMs || 10000;
+
 let server = null;
 let serverHorizonUrl = null;
 
@@ -14,7 +16,7 @@ function getServer() {
   // what's cached, rather than only ever building once.
   if (!server || serverHorizonUrl !== config.stellar.horizonUrl) {
     server = addRequestIdHeaderInterceptor(
-      new Horizon.Server(config.stellar.horizonUrl)
+      new Horizon.Server(config.stellar.horizonUrl, { timeout: HORIZON_TIMEOUT_MS })
     );
     serverHorizonUrl = config.stellar.horizonUrl;
   }

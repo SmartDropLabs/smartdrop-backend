@@ -193,15 +193,22 @@ class PriceSubscriptionManager {
   startHeartbeat() {
     if (this._pingTimer) return;
     this._pingTimer = setInterval(() => {
+      // #363 — Collect timed-out clients first, then disconnect after
+      // iteration. Modifying a Map during for-of iteration is undefined
+      // behavior in JS; snapshotting the keys avoids the mutation.
+      const timedOut = [];
       for (const [ws, client] of this._clients) {
         if (client.missedPings >= MAX_MISSED_PINGS) {
-          logger.info('WS client timed out, disconnecting');
-          ws.terminate();
-          this._remove(ws);
+          timedOut.push(ws);
           continue;
         }
         client.missedPings += 1;
         this._send(ws, { type: 'ping' });
+      }
+      for (const ws of timedOut) {
+        logger.info('WS client timed out, disconnecting');
+        ws.terminate();
+        this._remove(ws);
       }
     }, PING_INTERVAL_MS);
   }

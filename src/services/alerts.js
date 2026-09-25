@@ -165,9 +165,26 @@ async function evaluateForAssetInner(asset, priceUsd) {
   }
 }
 
+const EVALUATE_ALL_PAGE_SIZE = 100;
+
 async function evaluateAll() {
-  const allAlerts = await list();
-  const assets = [...new Set(allAlerts.map((a) => a.asset))];
+  const assets = new Set();
+  let offset = 0;
+
+  // Page through via listPaginated instead of list()'s unbounded
+  // ZREVRANGE 0 -1 (#319) — evaluateForAsset only needs the distinct
+  // asset set, not every alert loaded into memory at once.
+  for (;;) {
+    const { alerts: page, total } = await listPaginated({
+      offset,
+      limit: EVALUATE_ALL_PAGE_SIZE,
+    });
+    for (const alert of page) {
+      assets.add(alert.asset);
+    }
+    offset += EVALUATE_ALL_PAGE_SIZE;
+    if (offset >= total || page.length === 0) break;
+  }
 
   for (const asset of assets) {
     const cached = await cache.get(`price:${asset}`);

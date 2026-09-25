@@ -9,6 +9,7 @@ const dispatcher = require("../services/webhookDispatcher");
 const signatureService = require("../services/webhookSignature");
 const { probeReachability } = require("../services/webhook");
 const { idempotencyMiddleware } = require("../services/idempotency");
+const { requireCsrfHeader } = require("../middleware/csrf");
 const buildRateLimit = require("../middleware/rateLimit");
 const { routeTimeout } = require("../middleware/timeout");
 const AppError = require("../errors/AppError");
@@ -97,6 +98,7 @@ function publicView(webhook) {
 
 router.post(
   "/webhooks",
+  requireCsrfHeader,
   routeTimeout(),
   idempotencyMiddleware("webhook"),
   validate(webhookCreateBodySchema),
@@ -178,6 +180,7 @@ router.get("/webhooks/:id", validateRouteIdParams, async (req, res, next) => {
 
 router.patch(
   "/webhooks/:id",
+  requireCsrfHeader,
   validateRouteIdParams,
   validate(webhookPatchBodySchema),
   async (req, res, next) => {
@@ -197,6 +200,7 @@ router.patch(
 
 router.delete(
   "/webhooks/:id",
+  requireCsrfHeader,
   validateRouteIdParams,
   async (req, res, next) => {
     try {
@@ -224,6 +228,7 @@ function categorizePublicError(delivery) {
 
 router.post(
   "/webhooks/:id/test",
+  requireCsrfHeader,
   routeTimeout(),
   validateRouteIdParams,
   testLimit,

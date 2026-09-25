@@ -373,7 +373,19 @@ async function refreshAllCachedPrices() {
 
   try {
     do {
-      const result = await redis.scan(cursor, 'MATCH', `${CACHE_PREFIX}*`, 'COUNT', 100);
+      // Exclude the history namespace (price:history:*) at the Redis level
+      // via bracket-class negation on the first char after the prefix — the
+      // history sub-key always starts with 'h', a live asset code never
+      // does (buildCacheKey never inserts a literal 'history' segment).
+      // Filtering client-side after a broad `price:*` MATCH still pulls
+      // every history key's bytes over the wire on every refresh cycle.
+      const result = await redis.scan(
+        cursor,
+        'MATCH',
+        `${CACHE_PREFIX}[^h]*`,
+        'COUNT',
+        100
+      );
       cursor = result[0];
       keys.push(...result[1]);
     } while (cursor !== '0');
@@ -385,7 +397,6 @@ async function refreshAllCachedPrices() {
   const freshPrices = {};
 
   const refreshPromises = keys
-    .filter((key) => !key.includes(':history:'))
     .map(async (key) => {
       const suffix = key.replace(CACHE_PREFIX, '');
       const parts = suffix.split(':');

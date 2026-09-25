@@ -78,8 +78,15 @@ class EventPoller {
    */
   computeBackoffMs() {
     if (this.consecutiveFailures === 0) return this.basePollIntervalMs;
-    const scaled = this.basePollIntervalMs
-      * this.backoffFactor ** this.consecutiveFailures;
+
+    // Cap the exponent itself before raising backoffFactor to it — with a
+    // high enough consecutiveFailures and factor, `factor ** failures` can
+    // overflow to Infinity (or, combined with a zero base, produce NaN via
+    // `0 * Infinity`), which would then bypass the Math.min clamp below.
+    // 64 failures already dwarfs any realistic maxPollIntervalMs for any
+    // factor > 1, so clamping the exponent there is always safe.
+    const exponent = Math.min(this.consecutiveFailures, 64);
+    const scaled = this.basePollIntervalMs * this.backoffFactor ** exponent;
     return Math.min(scaled, this.maxPollIntervalMs);
   }
 

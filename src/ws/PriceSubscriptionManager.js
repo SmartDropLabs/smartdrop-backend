@@ -221,14 +221,26 @@ class PriceSubscriptionManager {
   drain(drainTimeoutMs = 5000) {
     this.stopHeartbeat();
     this._draining = true;
-    const clientCount = this._clients.size;
+
+    // Issue #364: freeze the exact set of sockets being drained right here,
+    // in the same synchronous tick as the flag flip above — add() checks
+    // this._draining as its very first statement, so nothing can be
+    // inserted into this._clients after this line runs. Every later phase
+    // below (which resumes asynchronously via setTimeout, real yield
+    // points where a lot can happen in the live map) iterates this frozen
+    // list rather than the live this._clients, so a client connecting
+    // (and being rejected) mid-drain, or one that legitimately disconnects
+    // and is removed via _remove() between phases, can never change what
+    // this specific drain run touches.
+    const drainedSockets = [...this._clients.keys()];
+    const clientCount = drainedSockets.length;
     if (clientCount === 0) return Promise.resolve();
 
     this._drainStats = { warned: clientCount, closed: 0, forceClosed: 0 };
     logger.info('Draining WebSocket connections', { count: clientCount, drain_timeout_ms: drainTimeoutMs });
 
     // Phase 1: Broadcast shutdown warning so clients can prepare
-    for (const [ws] of this._clients) {
+    for (const ws of drainedSockets) {
       try {
         this._send(ws, { type: 'server_shutdown', message: 'Server is shutting down', drain_timeout_ms: drainTimeoutMs });
       } catch {
@@ -241,7 +253,8 @@ class PriceSubscriptionManager {
     const closeDelayMs = Math.min(1000, drainTimeoutMs / 2);
     return new Promise((resolve) => {
       const closeTimer = setTimeout(() => {
-        for (const [ws] of this._clients) {
+        for (const ws of drainedSockets) {
+          if (!this._clients.has(ws)) continue; // already disconnected on its own
           try {
             ws.close(1001, 'Server shutting down');
             this._drainStats.closed++;
@@ -254,15 +267,14 @@ class PriceSubscriptionManager {
       closeTimer.unref();
 
       const deadline = setTimeout(() => {
-        const remaining = this._clients.size;
-        for (const [ws] of this._clients) {
+        let remaining = 0;
+        for (const ws of drainedSockets) {
+          if (!this._clients.has(ws)) continue; // already disconnected on its own
+          remaining++;
           try { ws.terminate(); } catch { /* ignore */ }
+          this._remove(ws);
           this._drainStats.forceClosed++;
         }
-        this._clients.clear();
-        this._clientIpBySocket.clear();
-        this._connectionsByIp.clear();
-        updateGauge(-clientCount);
         logger.info('WebSocket drain complete', {
           total: clientCount,
           gracefully_closed: this._drainStats.closed,

@@ -55,6 +55,22 @@ function _checkQueueBackpressure(caller) {
 }
 
 function getClient() {
+  // Issue #366: 'end' is ioredis's terminal state — reached after .quit()/
+  // .disconnect(true), or after retryStrategy() returns null (MAX_RETRIES
+  // exceeded, see below). A client in 'end' will never reconnect on its
+  // own and rejects every command immediately with "Connection is closed."
+  // Transient states ('connecting', 'reconnecting', 'close') are left
+  // alone — enableOfflineQueue: true already buffers commands through
+  // those and flushes them once the client reaches 'ready' again, so
+  // discarding the client there would just churn connections for no
+  // benefit.
+  if (client && client.status === 'end') {
+    logger.warn('Redis client reached terminal "end" state, discarding and reconnecting', {
+      reconnectAttempts,
+    });
+    client = null;
+  }
+
   if (!client) {
     client = new Redis(config.redis.url, {
       lazyConnect: true,

@@ -201,6 +201,13 @@ function reload() {
       usdcIssuer: reloadedUsdcIssuer,
     },
     auth: { adminApiKey: reloaded.ADMIN_API_KEY },
+    // Issue #373: reload() already re-validated COINMARKETCAP_API_KEY above
+    // (it's in the env schema passed to validateEnv) but never applied it —
+    // config.coinmarketcap was silently left out of this Object.assign
+    // entirely, so even a caller that re-read config.coinmarketcap.apiKey
+    // fresh on every call (see coinmarketcap.js's own fix for #373) would
+    // still never see a reloaded key change without this.
+    coinmarketcap: { ...config.coinmarketcap, apiKey: reloaded.COINMARKETCAP_API_KEY },
     sentryDsn: reloaded.SENTRY_DSN,
     slowRequestThresholdMs: reloaded.SLOW_REQUEST_THRESHOLD_MS,
     routeTimeoutMs: reloaded.ROUTE_TIMEOUT_MS,

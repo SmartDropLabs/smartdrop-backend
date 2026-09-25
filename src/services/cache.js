@@ -18,25 +18,27 @@ let reconnectAttempts = 0;
 const MAX_CONCURRENT_OPS = parseInt(process.env.REDIS_MAX_CONCURRENT_OPS, 10) || 50;
 const operationSemaphore = new Semaphore(MAX_CONCURRENT_OPS);
 
-let consecutiveQueueWarnings = 0;
+const consecutiveQueueWarningsByCaller = new Map();
 
 function _checkQueueBackpressure(caller) {
   const queueLen = getCommandQueueLength();
+  const previousWarnings = consecutiveQueueWarningsByCaller.get(caller) || 0;
+  const consecutiveWarnings = previousWarnings + 1;
   if (queueLen > COMMAND_QUEUE_BACKPRESSURE_THRESHOLD) {
-    consecutiveQueueWarnings++;
-    if (consecutiveQueueWarnings % 10 === 1) {
+    consecutiveQueueWarningsByCaller.set(caller, consecutiveWarnings);
+    if (consecutiveWarnings % 10 === 1) {
       logger.error('Redis command queue critically deep — backpressure active', {
         queue_length: queueLen,
         threshold: COMMAND_QUEUE_BACKPRESSURE_THRESHOLD,
         caller,
-        consecutive_warnings: consecutiveQueueWarnings,
+        consecutive_warnings: consecutiveWarnings,
       });
     }
     return true;
   }
   if (queueLen > COMMAND_QUEUE_WARN_THRESHOLD) {
-    consecutiveQueueWarnings++;
-    if (consecutiveQueueWarnings % 5 === 1) {
+    consecutiveQueueWarningsByCaller.set(caller, consecutiveWarnings);
+    if (consecutiveWarnings % 5 === 1) {
       logger.warn('Redis command queue depth high', {
         queue_length: queueLen,
         threshold: COMMAND_QUEUE_WARN_THRESHOLD,
@@ -45,9 +47,9 @@ function _checkQueueBackpressure(caller) {
     }
     return false;
   }
-  if (consecutiveQueueWarnings > 0) {
+  if (previousWarnings > 0) {
     logger.info('Redis command queue depth recovered', { queue_length: queueLen, caller });
-    consecutiveQueueWarnings = 0;
+    consecutiveQueueWarningsByCaller.delete(caller);
   }
   return false;
 }

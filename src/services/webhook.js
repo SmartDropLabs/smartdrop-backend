@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const axios = require('axios');
 const logger = require('../logger');
+const { getRequestIdHeaders } = require('../middleware/requestId');
 
 const DEFAULT_TIMEOUT_MS = 10000;
 
@@ -38,7 +39,10 @@ function verifySignature(secret, payload, signatureHeader, timestamp) {
 
 async function sendSignedRequest(webhookUrl, secret, payload, options = {}) {
   const timestamp = options.timestamp || Date.now();
-  const headers = buildSignatureHeaders(secret, payload, timestamp);
+  const headers = {
+    ...buildSignatureHeaders(secret, payload, timestamp),
+    ...getRequestIdHeaders(),
+  };
   const startedAt = Date.now();
 
   try {
@@ -66,6 +70,7 @@ async function probeReachability(webhookUrl, options = {}) {
   for (const method of ['head', 'get']) {
     try {
       const response = await axios[method](webhookUrl, {
+        headers: getRequestIdHeaders(),
         timeout: timeoutMs,
         validateStatus: () => true,
       });

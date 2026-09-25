@@ -2,6 +2,7 @@ const axios = require('axios');
 const config = require('../../config');
 const logger = require('../../logger');
 const { createCircuitBreaker } = require('./circuitBreaker');
+const { getRequestIdHeaders } = require('../../middleware/requestId');
 
 const STELLAR_COINGECKO_MAP = {
   XLM: 'stellar',
@@ -60,6 +61,7 @@ async function fetchPrice(assetCode) {
   try {
     const client = getClient();
     const response = await client.get('/simple/price', {
+      headers: getRequestIdHeaders(),
       params: {
         ids: coinId,
         vs_currencies: 'usd',

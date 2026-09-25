@@ -8,6 +8,7 @@ const {
   signPayload,
   verifySignature,
 } = require('../src/services/webhook');
+const { requestContext } = require('../src/middleware/requestId');
 
 describe('webhook signature', () => {
   const secret = 'whsec_test_supersecret_value';
@@ -107,13 +108,17 @@ describe('webhook signatures', () => {
 
     try {
       const payload = { event: 'ping', timestamp: '2026-06-25T00:00:00.000Z' };
-      const result = await sendSignedRequest(
-        `http://127.0.0.1:${port}/hook`,
-        'whsec_testsecret',
-        payload
+      const result = await requestContext.run(
+        { requestId: 'req_webhook_123' },
+        () => sendSignedRequest(
+          `http://127.0.0.1:${port}/hook`,
+          'whsec_testsecret',
+          payload
+        )
       );
 
       expect(result).toMatchObject({ ok: true, status: 204 });
+      expect(captured.headers['x-request-id']).toBe('req_webhook_123');
       expect(captured.headers['x-smartdrop-signature']).toMatch(/^sha256=[a-f0-9]{64}$/);
       expect(captured.headers['x-smartdrop-timestamp']).toBeDefined();
       expect(verifySignature(

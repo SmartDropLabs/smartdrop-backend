@@ -112,7 +112,13 @@ async function readWebhookRetryQueueStats() {
   }
 }
 
-app.get("/health", async (req, res) => {
+const healthRateLimit = buildRateLimit({
+  windowSeconds: Math.floor(config.rateLimit.windowMs / 1000),
+  max: config.rateLimit.max,
+  keyPrefix: "health",
+});
+
+app.get("/health", healthRateLimit, async (req, res) => {
   const redisConnected = cache.isConnected();
   const redisQueueDepth = cache.getCommandQueueLength();
   const redisConcurrency = cache.getConcurrencyStats();

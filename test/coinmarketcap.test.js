@@ -78,6 +78,26 @@ describe('CoinMarketCap source', () => {
       timeout: 10000,
     });
     expect(mockGet).toHaveBeenCalledWith('/cryptocurrency/quotes/latest', {
+      headers: {},
+      params: {
+        symbol: 'XLM',
+        convert: 'USD',
+      },
+    });
+  });
+
+  test('propagates the active request ID', async () => {
+    const coinmarketcap = loadSource();
+    const { requestContext } = require('../src/middleware/requestId');
+    mockGet.mockResolvedValueOnce(quoteResponse('XLM', 0.1234));
+
+    await requestContext.run(
+      { requestId: 'req_coinmarketcap_123' },
+      () => coinmarketcap.fetchPrice('XLM')
+    );
+
+    expect(mockGet).toHaveBeenCalledWith('/cryptocurrency/quotes/latest', {
+      headers: { 'X-Request-ID': 'req_coinmarketcap_123' },
       params: {
         symbol: 'XLM',
         convert: 'USD',
@@ -106,6 +126,7 @@ describe('CoinMarketCap source', () => {
 
     expect(price).toBe(1.0003);
     expect(mockGet).toHaveBeenCalledWith('/cryptocurrency/quotes/latest', {
+      headers: {},
       params: {
         id: 3408,
         convert: 'USD',

@@ -1,8 +1,8 @@
-const cache = require('../services/cache');
+const cache = require("../services/cache");
 
-const EVENT_IDS_KEY = 'indexer:contract_events:ids';
-const LAST_LEDGER_KEY = 'indexer:last_ledger';
-const AIRDROP_IDS_KEY = 'indexer:airdrops:ids';
+const EVENT_IDS_KEY = "indexer:contract_events:ids";
+const LAST_LEDGER_KEY = "indexer:last_ledger";
+const AIRDROP_IDS_KEY = "indexer:airdrops:ids";
 
 function eventKey(id) {
   return `indexer:contract_event:${id}`;
@@ -38,7 +38,8 @@ function getRecipient(event) {
 
 async function getLastLedger(defaultLedger = 0) {
   const saved = await cache.get(LAST_LEDGER_KEY);
-  if (saved === null || saved === undefined || saved === '') return defaultLedger;
+  if (saved === null || saved === undefined || saved === "")
+    return defaultLedger;
   const parsed = Number(saved);
   return Number.isFinite(parsed) ? parsed : defaultLedger;
 }
@@ -51,16 +52,18 @@ async function upsertAirdrop(event) {
   const airdropId = getAirdropId(event);
   if (!airdropId) return;
 
-  const existing = (await cache.get(airdropKey(airdropId))) || { airdrop_id: airdropId };
+  const existing = (await cache.get(airdropKey(airdropId))) || {
+    airdrop_id: airdropId,
+  };
   const next = {
     ...existing,
     updated_ledger: event.ledger,
     updated_at: event.ledger_closed_at,
   };
 
-  if (event.event_name === 'airdrop_created') {
+  if (event.event_name === "airdrop_created") {
     Object.assign(next, {
-      status: 'created',
+      status: "created",
       creator: event.data.creator ?? existing.creator ?? null,
       token: event.data.token ?? existing.token ?? null,
       total_amount: event.data.total_amount ?? existing.total_amount ?? null,
@@ -70,13 +73,13 @@ async function upsertAirdrop(event) {
     });
   }
 
-  if (event.event_name === 'token_claimed') {
-    next.status = existing.status === 'expired' ? 'expired' : 'active';
+  if (event.event_name === "token_claimed") {
+    next.status = existing.status === "expired" ? "expired" : "active";
   }
 
-  if (event.event_name === 'airdrop_expired') {
+  if (event.event_name === "airdrop_expired") {
     Object.assign(next, {
-      status: 'expired',
+      status: "expired",
       unclaimed_amount: event.data.unclaimed_amount ?? null,
       expired_ledger: event.ledger,
       expired_at: event.ledger_closed_at,
@@ -87,7 +90,9 @@ async function upsertAirdrop(event) {
   // round trips — a crash between them used to leave an airdrop record
   // with no entry in AIRDROP_IDS_KEY (invisible to anything that scans the
   // id set) or vice versa (an id with no backing record).
-  await cache.getClient().multi()
+  await cache
+    .getClient()
+    .multi()
     .set(airdropKey(airdropId), JSON.stringify(next))
     .sadd(AIRDROP_IDS_KEY, airdropId)
     .exec();
@@ -107,7 +112,7 @@ async function upsertAirdrop(event) {
 async function migrateRecipientsListToHashIfNeeded(key) {
   const redis = cache.getClient();
   const type = await redis.type(key);
-  if (type !== 'string') return;
+  if (type !== "string") return;
 
   const list = await getJsonList(key);
   await redis.del(key);
@@ -141,13 +146,13 @@ async function upsertRecipient(event) {
     updated_at: event.ledger_closed_at,
   };
 
-  if (event.event_name === 'recipient_added') {
-    next.status = existing.status || 'pending';
+  if (event.event_name === "recipient_added") {
+    next.status = existing.status || "pending";
     next.added_ledger = event.ledger;
   }
 
-  if (event.event_name === 'token_claimed') {
-    next.status = 'claimed';
+  if (event.event_name === "token_claimed") {
+    next.status = "claimed";
     next.claimed_ledger = event.data.ledger ?? event.ledger;
     next.claimed_at = event.ledger_closed_at;
   }
@@ -158,7 +163,7 @@ async function upsertRecipient(event) {
 async function appendClaim(event) {
   const recipient = getRecipient(event);
   const airdropId = getAirdropId(event);
-  if (event.event_name !== 'token_claimed' || !recipient || !airdropId) return;
+  if (event.event_name !== "token_claimed" || !recipient || !airdropId) return;
 
   const key = claimsKey(recipient);
   const claims = await getJsonList(key);
@@ -184,13 +189,15 @@ async function saveEvent(event) {
   // separate keys (their prior values determine what gets written), so
   // they can't join this same transaction — see #354 and #353 for their
   // own atomicity/scalability fixes.
-  await cache.getClient().multi()
+  await cache
+    .getClient()
+    .multi()
     .set(eventKey(event.id), JSON.stringify(event))
     .sadd(EVENT_IDS_KEY, event.id)
     .exec();
   await upsertAirdrop(event);
   await upsertRecipient(event);
-  await appendClaim(event);
+  if (event.event_name === "token_claimed") await appendClaim(event);
 }
 
 /**
@@ -215,7 +222,7 @@ async function saveEvents(events) {
   for (const event of events) {
     await upsertAirdrop(event);
     await upsertRecipient(event);
-    await appendClaim(event);
+    if (event.event_name === "token_claimed") await appendClaim(event);
   }
 }
 
@@ -224,7 +231,9 @@ async function getAirdropStatus(airdropId) {
   if (!status) return null;
 
   const recipients = await getAirdropRecipients(airdropId);
-  const claimed_count = recipients.filter((recipient) => recipient.status === 'claimed').length;
+  const claimed_count = recipients.filter(
+    (recipient) => recipient.status === "claimed",
+  ).length;
 
   return {
     ...status,

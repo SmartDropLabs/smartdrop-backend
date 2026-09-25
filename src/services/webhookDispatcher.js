@@ -1,30 +1,42 @@
-'use strict';
+"use strict";
 
-const crypto = require('crypto');
-const axios = require('axios');
-const config = require('../config');
-const logger = require('../logger');
-const cache = require('./cache');
-const signature = require('./webhookSignature');
-const events = require('./webhookEvents');
-const webhookRepo = require('../repositories/webhookRepository');
-const deliveryRepo = require('../repositories/deliveryRepository');
-const { requestContext } = require('../middleware/requestId');
-const { assertPublicTarget } = require('./ssrfGuard');
+const crypto = require("crypto");
+const axios = require("axios");
+const config = require("../config");
+const logger = require("../logger");
+const cache = require("./cache");
+const signature = require("./webhookSignature");
+const events = require("./webhookEvents");
+const webhookRepo = require("../repositories/webhookRepository");
+const deliveryRepo = require("../repositories/deliveryRepository");
+const { requestContext } = require("../middleware/requestId");
+const { assertPublicTarget } = require("./ssrfGuard");
 
-const USER_AGENT = 'SmartDrop-Webhooks/1.0';
+const USER_AGENT = "SmartDrop-Webhooks/1.0";
+const WEBHOOK_CACHE_TTL_MS = 60_000;
+const webhookCache = new Map();
 
 // ── Delivery metrics (in-memory, reset on process restart) ──────────────
 const metrics = {
   _deliveries: new Map(), // webhook_id → { total, success, failed, totalAttempts, totalLatencyMs }
-  _inFlight: new Set(),   // delivery IDs currently being attempted
-  _aggregate: { total: 0, success: 0, failed: 0, totalAttempts: 0, totalLatencyMs: 0 },
+  _inFlight: new Set(), // delivery IDs currently being attempted
+  _aggregate: {
+    total: 0,
+    success: 0,
+    failed: 0,
+    totalAttempts: 0,
+    totalLatencyMs: 0,
+  },
 };
 
 function _ensureWebhookMetrics(webhookId) {
   if (!metrics._deliveries.has(webhookId)) {
     metrics._deliveries.set(webhookId, {
-      total: 0, success: 0, failed: 0, totalAttempts: 0, totalLatencyMs: 0,
+      total: 0,
+      success: 0,
+      failed: 0,
+      totalAttempts: 0,
+      totalLatencyMs: 0,
     });
   }
   return metrics._deliveries.get(webhookId);
@@ -35,7 +47,11 @@ function recordDeliveryStart(deliveryId, webhookId) {
   _ensureWebhookMetrics(webhookId);
 }
 
-function recordDeliveryEnd(deliveryId, webhookId, { success, attempts, latencyMs }) {
+function recordDeliveryEnd(
+  deliveryId,
+  webhookId,
+  { success, attempts, latencyMs },
+) {
   metrics._inFlight.delete(deliveryId);
   const wm = _ensureWebhookMetrics(webhookId);
   const ag = metrics._aggregate;
@@ -63,9 +79,16 @@ function getMetrics() {
       total: m.total,
       success: m.success,
       failed: m.failed,
-      success_rate: m.total > 0 ? parseFloat((m.success / m.total).toFixed(4)) : null,
-      retry_rate: m.total > 0 ? parseFloat(((m.totalAttempts - m.total) / m.total).toFixed(4)) : null,
-      avg_latency_ms: m.total > 0 ? parseFloat((m.totalLatencyMs / m.total).toFixed(1)) : null,
+      success_rate:
+        m.total > 0 ? parseFloat((m.success / m.total).toFixed(4)) : null,
+      retry_rate:
+        m.total > 0
+          ? parseFloat(((m.totalAttempts - m.total) / m.total).toFixed(4))
+          : null,
+      avg_latency_ms:
+        m.total > 0
+          ? parseFloat((m.totalLatencyMs / m.total).toFixed(1))
+          : null,
     };
   }
   const ag = metrics._aggregate;
@@ -75,9 +98,16 @@ function getMetrics() {
       total: ag.total,
       success: ag.success,
       failed: ag.failed,
-      success_rate: ag.total > 0 ? parseFloat((ag.success / ag.total).toFixed(4)) : null,
-      retry_rate: ag.total > 0 ? parseFloat(((ag.totalAttempts - ag.total) / ag.total).toFixed(4)) : null,
-      avg_latency_ms: ag.total > 0 ? parseFloat((ag.totalLatencyMs / ag.total).toFixed(1)) : null,
+      success_rate:
+        ag.total > 0 ? parseFloat((ag.success / ag.total).toFixed(4)) : null,
+      retry_rate:
+        ag.total > 0
+          ? parseFloat(((ag.totalAttempts - ag.total) / ag.total).toFixed(4))
+          : null,
+      avg_latency_ms:
+        ag.total > 0
+          ? parseFloat((ag.totalLatencyMs / ag.total).toFixed(1))
+          : null,
     },
     per_webhook: perWebhook,
   };
@@ -85,6 +115,40 @@ function getMetrics() {
 
 function getInFlightCount() {
   return metrics._inFlight.size;
+}
+
+function cacheWebhook(webhook) {
+  if (!webhook) return;
+  webhookCache.set(webhook.id, {
+    value: Promise.resolve(webhook),
+    expiresAt: Date.now() + WEBHOOK_CACHE_TTL_MS,
+  });
+}
+
+async function getWebhookForAttempt(webhookId) {
+  const now = Date.now();
+  const cached = webhookCache.get(webhookId);
+  if (cached && cached.expiresAt > now) return cached.value;
+  if (cached) webhookCache.delete(webhookId);
+
+  const entry = {
+    value: webhookRepo.findById(webhookId),
+    expiresAt: now + WEBHOOK_CACHE_TTL_MS,
+  };
+  webhookCache.set(webhookId, entry);
+  try {
+    const webhook = await entry.value;
+    if (webhook) {
+      entry.value = Promise.resolve(webhook);
+      entry.expiresAt = Date.now() + WEBHOOK_CACHE_TTL_MS;
+    } else {
+      webhookCache.delete(webhookId);
+    }
+    return webhook;
+  } catch (err) {
+    webhookCache.delete(webhookId);
+    throw err;
+  }
 }
 
 /**
@@ -125,31 +189,39 @@ function shouldRetry(responseStatus, networkError) {
   return false;
 }
 
-function buildHeaders(secret, body, eventType, deliveryId, requestId, sequence) {
+function buildHeaders(
+  secret,
+  body,
+  eventType,
+  deliveryId,
+  requestId,
+  sequence,
+) {
   const headers = {
-    'Content-Type': 'application/json',
-    'User-Agent': USER_AGENT,
-    'X-SmartDrop-Event': eventType,
-    'X-SmartDrop-Delivery': deliveryId,
-    'X-SmartDrop-Signature': signature.sign(secret, body),
+    "Content-Type": "application/json",
+    "User-Agent": USER_AGENT,
+    "X-SmartDrop-Event": eventType,
+    "X-SmartDrop-Delivery": deliveryId,
+    "X-SmartDrop-Signature": signature.sign(secret, body),
   };
-  if (sequence != null) headers['X-SmartDrop-Sequence'] = String(sequence);
+  if (sequence != null) headers["X-SmartDrop-Sequence"] = String(sequence);
   // Lets receivers correlate a delivery with the API request that caused
   // it when reporting problems back to us (issue #250).
-  if (requestId) headers['X-Request-Id'] = requestId;
+  if (requestId) headers["X-Request-Id"] = requestId;
   return headers;
 }
 
 function generateDeliveryTraceId() {
-  return `trace_${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`;
+  return `trace_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
 }
 
 function matchesWebhookFilters(filters, data) {
   if (!filters) return true;
-  if (!data || typeof data !== 'object') return false;
+  if (!data || typeof data !== "object") return false;
 
   if (filters.asset !== undefined) {
-    const asset = typeof data.asset === 'string' ? data.asset.toUpperCase() : null;
+    const asset =
+      typeof data.asset === "string" ? data.asset.toUpperCase() : null;
     if (asset !== filters.asset) return false;
   }
 
@@ -162,7 +234,7 @@ function matchesWebhookFilters(filters, data) {
 
 function withDeliveryTrace(traceId, fn) {
   const currentRequestId = requestContext.getStore()?.requestId;
-  if (currentRequestId && currentRequestId !== 'system') {
+  if (currentRequestId && currentRequestId !== "system") {
     return fn();
   }
   return requestContext.run({ requestId: traceId }, fn);
@@ -204,10 +276,12 @@ async function postOnce(url, headers, body, timeoutMs) {
 async function attempt(deliveryId, sequence) {
   const delivery = await deliveryRepo.findById(deliveryId);
   if (!delivery) {
-    logger.warn('Delivery missing, dropping retry', { delivery_id: deliveryId });
+    logger.warn("Delivery missing, dropping retry", {
+      delivery_id: deliveryId,
+    });
     return null;
   }
-  if (delivery.status === 'success') return delivery;
+  if (delivery.status === "success") return delivery;
 
   const traceId = delivery.trace_id || generateDeliveryTraceId();
   if (!delivery.trace_id) {
@@ -215,11 +289,11 @@ async function attempt(deliveryId, sequence) {
   }
 
   return withDeliveryTrace(traceId, async () => {
-    const webhook = await webhookRepo.findById(delivery.webhook_id);
+    const webhook = await getWebhookForAttempt(delivery.webhook_id);
     if (!webhook || !webhook.active) {
       return deliveryRepo.update(deliveryId, {
-        status: 'failed',
-        last_error: 'webhook missing or inactive',
+        status: "failed",
+        last_error: "webhook missing or inactive",
         last_attempt_at: new Date().toISOString(),
         next_retry_at: null,
       });
@@ -233,7 +307,14 @@ async function attempt(deliveryId, sequence) {
     };
     const body = JSON.stringify(payload);
     const seq = sequence ?? delivery.sequence;
-    const headers = buildHeaders(webhook.secret, body, delivery.event_type, delivery.id, delivery.request_id, seq);
+    const headers = buildHeaders(
+      webhook.secret,
+      body,
+      delivery.event_type,
+      delivery.id,
+      delivery.request_id,
+      seq,
+    );
 
     const attempts = delivery.attempts + 1;
     let responseStatus = null;
@@ -247,18 +328,23 @@ async function attempt(deliveryId, sequence) {
       const res = await postOnce(webhook.url, headers, body, webhook.timeoutMs);
       responseStatus = res.status;
     } catch (err) {
-      networkError = err.message || 'network error';
+      networkError = err.message || "network error";
     }
 
-    const succeeded = responseStatus != null && responseStatus >= 200 && responseStatus < 300;
+    const succeeded =
+      responseStatus != null && responseStatus >= 200 && responseStatus < 300;
     const nowIso = new Date().toISOString();
     const latencyMs = Date.now() - deliveryStartTime;
 
     // Metrics will be finalized after we determine final status below
 
     if (succeeded) {
-      recordDeliveryEnd(deliveryId, webhook.id, { success: true, attempts, latencyMs });
-      logger.info('Webhook delivered', {
+      recordDeliveryEnd(deliveryId, webhook.id, {
+        success: true,
+        attempts,
+        latencyMs,
+      });
+      logger.info("Webhook delivered", {
         delivery_id: delivery.id,
         trace_id: traceId,
         request_id: delivery.request_id,
@@ -267,7 +353,7 @@ async function attempt(deliveryId, sequence) {
         status: responseStatus,
       });
       return deliveryRepo.update(deliveryId, {
-        status: 'success',
+        status: "success",
         attempts,
         last_attempt_at: nowIso,
         next_retry_at: null,
@@ -281,11 +367,15 @@ async function attempt(deliveryId, sequence) {
     const hasAttemptsLeft = attempts < config.webhooks.maxAttempts;
 
     if (retryable && hasAttemptsLeft) {
-      recordDeliveryEnd(deliveryId, webhook.id, { success: false, attempts, latencyMs });
+      recordDeliveryEnd(deliveryId, webhook.id, {
+        success: false,
+        attempts,
+        latencyMs,
+      });
       const delayMs = backoffMs(attempts);
       const nextRetryAt = new Date(Date.now() + delayMs).toISOString();
       await deliveryRepo.scheduleRetry(delivery.id, Date.now() + delayMs);
-      logger.warn('Webhook delivery failed, retry scheduled', {
+      logger.warn("Webhook delivery failed, retry scheduled", {
         delivery_id: delivery.id,
         trace_id: traceId,
         request_id: delivery.request_id,
@@ -295,7 +385,7 @@ async function attempt(deliveryId, sequence) {
         next_retry_at: nextRetryAt,
       });
       return deliveryRepo.update(deliveryId, {
-        status: 'pending',
+        status: "pending",
         attempts,
         last_attempt_at: nowIso,
         next_retry_at: nextRetryAt,
@@ -304,8 +394,12 @@ async function attempt(deliveryId, sequence) {
       });
     }
 
-    recordDeliveryEnd(deliveryId, webhook.id, { success: false, attempts, latencyMs });
-    logger.error('Webhook delivery failed permanently', {
+    recordDeliveryEnd(deliveryId, webhook.id, {
+      success: false,
+      attempts,
+      latencyMs,
+    });
+    logger.error("Webhook delivery failed permanently", {
       delivery_id: delivery.id,
       trace_id: traceId,
       request_id: delivery.request_id,
@@ -331,15 +425,18 @@ async function attempt(deliveryId, sequence) {
         trace_id: traceId,
         request_id: delivery.request_id,
       });
-      await redis.lpush('webhook:dead_letter', deadLetterEntry);
+      await redis.lpush("webhook:dead_letter", deadLetterEntry);
       // Cap the dead letter queue at 10,000 entries to prevent unbounded growth
-      await redis.ltrim('webhook:dead_letter', 0, 9999);
+      await redis.ltrim("webhook:dead_letter", 0, 9999);
     } catch (dlqErr) {
-      logger.warn('Failed to enqueue dead letter', { delivery_id: delivery.id, error: dlqErr.message });
+      logger.warn("Failed to enqueue dead letter", {
+        delivery_id: delivery.id,
+        error: dlqErr.message,
+      });
     }
 
     return deliveryRepo.update(deliveryId, {
-      status: 'failed',
+      status: "failed",
       attempts,
       last_attempt_at: nowIso,
       next_retry_at: null,
@@ -349,7 +446,14 @@ async function attempt(deliveryId, sequence) {
   });
 }
 
-async function deliverToWebhook(webhook, eventType, eventId, payload, sequence) {
+async function deliverToWebhook(
+  webhook,
+  eventType,
+  eventId,
+  payload,
+  sequence,
+) {
+  cacheWebhook(webhook);
   // Propagate the originating request's id onto the delivery record so a
   // webhook that fires hours later on a retry is still traceable back to
   // the API call that caused it (issue #250).
@@ -358,14 +462,15 @@ async function deliverToWebhook(webhook, eventType, eventId, payload, sequence) 
     webhook_id: webhook.id,
     event_id: eventId,
     event_type: eventType,
-    request_id: requestId && requestId !== 'system' ? requestId : null,
+    request_id: requestId && requestId !== "system" ? requestId : null,
   });
   await deliveryRepo.update(delivery.id, { payload, sequence });
   return attempt(delivery.id, sequence);
 }
 
-const DISPATCH_CONCURRENCY = parseInt(process.env.WEBHOOK_DISPATCH_CONCURRENCY, 10) || 10;
-const ORDERED_DELIVERY = process.env.WEBHOOK_ORDERED_DELIVERY === 'true';
+const DISPATCH_CONCURRENCY =
+  parseInt(process.env.WEBHOOK_DISPATCH_CONCURRENCY, 10) || 10;
+const ORDERED_DELIVERY = process.env.WEBHOOK_ORDERED_DELIVERY === "true";
 const MAX_IN_FLIGHT = parseInt(process.env.WEBHOOK_MAX_IN_FLIGHT, 10) || 100;
 
 class Semaphore {
@@ -395,10 +500,22 @@ class Semaphore {
 
 const deliverySemaphore = new Semaphore(MAX_IN_FLIGHT);
 
-async function deliverWithLimit(webhook, eventType, eventId, payload, sequence) {
+async function deliverWithLimit(
+  webhook,
+  eventType,
+  eventId,
+  payload,
+  sequence,
+) {
   await deliverySemaphore.acquire();
   try {
-    return await deliverToWebhook(webhook, eventType, eventId, payload, sequence);
+    return await deliverToWebhook(
+      webhook,
+      eventType,
+      eventId,
+      payload,
+      sequence,
+    );
   } finally {
     deliverySemaphore.release();
   }
@@ -409,26 +526,36 @@ async function processBatch(batch, eventType, eventId, payload, sequence) {
     const results = [];
     for (const webhook of batch) {
       try {
-        const value = await deliverWithLimit(webhook, eventType, eventId, payload, sequence);
-        results.push({ status: 'fulfilled', value });
+        const value = await deliverWithLimit(
+          webhook,
+          eventType,
+          eventId,
+          payload,
+          sequence,
+        );
+        results.push({ status: "fulfilled", value });
       } catch (reason) {
-        results.push({ status: 'rejected', reason });
+        results.push({ status: "rejected", reason });
       }
     }
     return results;
   }
   return Promise.allSettled(
-    batch.map((webhook) => deliverWithLimit(webhook, eventType, eventId, payload, sequence))
+    batch.map((webhook) =>
+      deliverWithLimit(webhook, eventType, eventId, payload, sequence),
+    ),
   );
 }
 
 async function dispatch({ event_type: eventType, event_id: eventId, data }) {
   if (!events.isKnownEvent(eventType)) {
-    logger.warn('Dispatch skipped, unknown event type', { event_type: eventType });
+    logger.warn("Dispatch skipped, unknown event type", {
+      event_type: eventType,
+    });
     return [];
   }
-  if (!eventId || typeof eventId !== 'string') {
-    throw new Error('event_id is required to dispatch a webhook event');
+  if (!eventId || typeof eventId !== "string") {
+    throw new Error("event_id is required to dispatch a webhook event");
   }
 
   const traceId = generateDeliveryTraceId();
@@ -437,9 +564,11 @@ async function dispatch({ event_type: eventType, event_id: eventId, data }) {
     // Use SET NX (set-if-not-exists) to claim the dedup slot atomically before
     // dispatching. The previous flow checked then set, allowing concurrent calls
     // with the same event_id to both pass the dedup check (#283).
-    const alreadyDispatched = await cache.getClient().set(dedupKey, Date.now(), 'EX', 86400, 'NX');
+    const alreadyDispatched = await cache
+      .getClient()
+      .set(dedupKey, Date.now(), "EX", 86400, "NX");
     if (!alreadyDispatched) {
-      logger.info('Skipping duplicate webhook dispatch', {
+      logger.info("Skipping duplicate webhook dispatch", {
         event_id: eventId,
         event_type: eventType,
         trace_id: traceId,
@@ -447,10 +576,14 @@ async function dispatch({ event_type: eventType, event_id: eventId, data }) {
       return [];
     }
 
-    const targets = (await webhookRepo.listActiveForEvent(eventType, events.matchesSubscription))
-      .filter((webhook) => matchesWebhookFilters(webhook.filters, data));
+    const targets = (
+      await webhookRepo.listActiveForEvent(
+        eventType,
+        events.matchesSubscription,
+      )
+    ).filter((webhook) => matchesWebhookFilters(webhook.filters, data));
     if (targets.length === 0) {
-      logger.info('Dispatch started, no matching webhooks', {
+      logger.info("Dispatch started, no matching webhooks", {
         event_id: eventId,
         event_type: eventType,
         trace_id: traceId,
@@ -458,7 +591,7 @@ async function dispatch({ event_type: eventType, event_id: eventId, data }) {
       return [];
     }
 
-    logger.info('Dispatch started', {
+    logger.info("Dispatch started", {
       event_id: eventId,
       event_type: eventType,
       trace_id: traceId,
@@ -481,14 +614,24 @@ async function dispatch({ event_type: eventType, event_id: eventId, data }) {
     const allResults = [];
     for (let i = 0; i < targets.length; i += DISPATCH_CONCURRENCY) {
       const batch = targets.slice(i, i + DISPATCH_CONCURRENCY);
-      const batchResults = await processBatch(batch, eventType, eventId, payload, sequence);
+      const batchResults = await processBatch(
+        batch,
+        eventType,
+        eventId,
+        payload,
+        sequence,
+      );
       allResults.push(...batchResults);
     }
 
-    const successCount = allResults.filter((r) => r.status === 'fulfilled').length;
-    const failureCount = allResults.filter((r) => r.status === 'rejected').length;
+    const successCount = allResults.filter(
+      (r) => r.status === "fulfilled",
+    ).length;
+    const failureCount = allResults.filter(
+      (r) => r.status === "rejected",
+    ).length;
 
-    logger.info('Dispatch completed', {
+    logger.info("Dispatch completed", {
       event_id: eventId,
       event_type: eventType,
       trace_id: traceId,
@@ -498,16 +641,20 @@ async function dispatch({ event_type: eventType, event_id: eventId, data }) {
 
     return allResults.map((result, i) => {
       const webhook_id = targets[i].id;
-      if (result.status === 'fulfilled') {
+      if (result.status === "fulfilled") {
         return { webhook_id, delivery: result.value, error: null };
       }
-      logger.warn('Webhook delivery failed at dispatch', {
+      logger.warn("Webhook delivery failed at dispatch", {
         webhook_id,
         event_id: eventId,
         trace_id: traceId,
         error: result.reason?.message || String(result.reason),
       });
-      return { webhook_id, delivery: null, error: result.reason?.message || String(result.reason) };
+      return {
+        webhook_id,
+        delivery: null,
+        error: result.reason?.message || String(result.reason),
+      };
     });
   });
 }
@@ -519,14 +666,22 @@ async function sendTest(webhookId) {
   // module doc for why): a hostname can be re-pointed after registration,
   // and a raw private IP could have been seeded directly (#96).
   await assertPublicTarget(webhook.url);
-  const eventType = 'pool.assets_locked';
+  const eventType = "pool.assets_locked";
   const payload = {
     event: eventType,
     event_id: `evt_test_${Date.now()}`,
     occurred_at: new Date().toISOString(),
-    data: { test: true, message: 'This is a test delivery from SmartDrop' },
+    data: { test: true, message: "This is a test delivery from SmartDrop" },
   };
   return deliverToWebhook(webhook, eventType, payload.event_id, payload, null);
 }
 
-module.exports = { dispatch, attempt, sendTest, backoffMs, shouldRetry, getMetrics, getInFlightCount };
+module.exports = {
+  dispatch,
+  attempt,
+  sendTest,
+  backoffMs,
+  shouldRetry,
+  getMetrics,
+  getInFlightCount,
+};

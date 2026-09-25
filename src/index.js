@@ -89,7 +89,7 @@ app.use(buildCorsMiddleware(config.corsAllowedOrigins));
 // Apply a global body size limit to protect all routes from oversized payloads.
 // Individual routes with stricter limits (e.g. airdrops) override this via
 // their own express.json({ limit }) middleware (#287).
-const DEFAULT_BODY_LIMIT = '1mb';
+const DEFAULT_BODY_LIMIT = "1mb";
 app.use(express.json({ limit: DEFAULT_BODY_LIMIT }));
 
 const EMPTY_QUEUE_STATS = {
@@ -343,7 +343,13 @@ function logStartupBanner() {
 }
 
 async function startServer() {
-  await warmCache(config.watchedAssets);
+  try {
+    await warmCache(config.watchedAssets);
+  } catch (err) {
+    logger.warn("Cache warm failed; starting server anyway", {
+      error: err.message,
+    });
+  }
 
   server = app.listen(config.port, () => {
     logStartupBanner();

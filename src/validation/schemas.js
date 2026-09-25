@@ -52,13 +52,20 @@ const PRIVATE_IP_RE = new RegExp(
     "|192\\.168\\." + // RFC-1918 /16
     "|169\\.254\\." + // link-local
     "|0\\.0\\.0\\.0" + // unspecified
+    "|100\\.(6[4-9]|[7-9]\\d|1[0-1]\\d|12[0-7])\\." + // CGNAT RFC-6598 100.64.0.0/10
     "|::1" + // IPv6 loopback
-    "|fc[0-9a-f]{2}:" + // IPv6 ULA
+    "|::" + // IPv6 unspecified
+    "|f[cd][0-9a-f]{2}:" + // IPv6 ULA fc00::/7 (fc00::/8 and fd00::/8)
+    "|fe[89ab][0-9a-f]:" + // IPv6 link-local fe80::/10 (fe80 - febf)
+    "|ff[0-9a-f]{2}:" + // IPv6 multicast ff00::/8
+    "|::ffff:" + // IPv4-mapped IPv6 prefix
     ")",
+  "i",
 );
 
 function isPrivateTarget(hostname) {
-  return PRIVATE_HOSTNAME_RE.test(hostname) || PRIVATE_IP_RE.test(hostname);
+  const normalized = (hostname || "").replace(/^\[/, "").replace(/\]$/, "");
+  return PRIVATE_HOSTNAME_RE.test(normalized) || PRIVATE_IP_RE.test(normalized);
 }
 
 const CONTROL_CHAR_RE = /[\x00-\x08\x0E-\x1F\x7F]/;

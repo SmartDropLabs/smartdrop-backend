@@ -70,3 +70,38 @@ describe('Redis queue warning state', () => {
     expect(mockLogger.info.mock.calls.map(([, metadata]) => metadata.caller)).toEqual(['get', 'set']);
   });
 });
+
+// Issue #366: getClient() returned a cached client with no check that it
+// was still usable, so a client that had reached ioredis's terminal 'end'
+// state (no auto-reconnect, every command rejected immediately) would keep
+// being handed to every caller forever.
+describe('getClient health check (#366)', () => {
+  test('returns the same client instance while it is healthy', () => {
+    const { cache, redis } = loadCache();
+    const again = cache.getClient();
+    expect(again).toBe(redis);
+  });
+
+  test('discards a client in the terminal "end" state and creates a fresh one', () => {
+    const { cache, redis } = loadCache();
+    redis.status = 'end';
+
+    const next = cache.getClient();
+
+    expect(next).not.toBe(redis);
+    expect(next.status).toBe('ready');
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('terminal "end" state'),
+      expect.any(Object),
+    );
+  });
+
+  test('does not discard a client that is merely reconnecting (offline queue covers it)', () => {
+    const { cache, redis } = loadCache();
+    redis.status = 'reconnecting';
+
+    const next = cache.getClient();
+
+    expect(next).toBe(redis);
+  });
+});

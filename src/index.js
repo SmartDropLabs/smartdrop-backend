@@ -282,7 +282,7 @@ function shutdown(signal) {
     }
 
     // Stop non-leader-elected services
-    indexerPoller.stop();
+    await indexerPoller.stop();
 
     // Gracefully drain WebSocket connections: broadcast close frame,
     // then force-close any still open after the drain timeout (issue #248).

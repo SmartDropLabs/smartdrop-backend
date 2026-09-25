@@ -149,6 +149,32 @@ async function saveEvent(event) {
   await appendClaim(event);
 }
 
+/**
+ * Batch-writes a poll cycle's events instead of one store round trip per
+ * event (issue #314). The raw event records go through a single Redis
+ * pipeline; the derived airdrop/recipient/claim projections still need
+ * their own read-modify-write per event (multiple events in one batch can
+ * target the same airdrop), so those stay sequential to preserve
+ * chronological ordering.
+ */
+async function saveEvents(events) {
+  if (!events || events.length === 0) return;
+
+  const redis = cache.getClient();
+  const pipeline = redis.pipeline();
+  for (const event of events) {
+    pipeline.set(eventKey(event.id), JSON.stringify(event));
+    pipeline.sadd(EVENT_IDS_KEY, event.id);
+  }
+  await pipeline.exec();
+
+  for (const event of events) {
+    await upsertAirdrop(event);
+    await upsertRecipient(event);
+    await appendClaim(event);
+  }
+}
+
 async function getAirdropStatus(airdropId) {
   const status = await cache.get(airdropKey(airdropId));
   if (!status) return null;
@@ -196,5 +222,6 @@ module.exports = {
   getRecipientClaims,
   getStats,
   saveEvent,
+  saveEvents,
   setLastLedger,
 };

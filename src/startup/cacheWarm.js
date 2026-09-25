@@ -15,12 +15,15 @@ function isWarmSuccess(result) {
   );
 }
 
-async function runWarmCache(assets, oracle) {
+async function runWarmCache(assets, oracle, abortSignal) {
   const startedAt = Date.now();
   const results = await Promise.allSettled(
-    assets.map(({ code, issuer }) => (
-      Promise.resolve().then(() => oracle.fetchFreshPrice(code, issuer || null))
-    ))
+    assets.map(({ code, issuer }) => {
+      if (abortSignal && abortSignal.aborted) {
+        return Promise.reject(new Error('Warming cancelled'));
+      }
+      return Promise.resolve().then(() => oracle.fetchFreshPrice(code, issuer || null));
+    })
   );
   const succeeded = results.filter(isWarmSuccess).length;
 
@@ -61,10 +64,11 @@ async function warmCache(
     return { total: 0, succeeded: 0, failed: 0, timedOut: false, durationMs: 0 };
   }
 
+  const abortController = new AbortController();
   let timedOut = false;
   let timeoutId;
 
-  const warming = runWarmCache(allAssets, oracle).then((summary) => {
+  const warming = runWarmCache(allAssets, oracle, abortController.signal).then((summary) => {
     if (!timedOut) {
       log.info('Cache warm complete', summary);
     }
@@ -74,6 +78,8 @@ async function warmCache(
   const timeout = new Promise((resolve) => {
     timeoutId = setTimeout(() => {
       timedOut = true;
+      // Signal abort to cancel in-flight fetches (#402)
+      abortController.abort();
       const summary = {
         total: allAssets.length,
         succeeded: 0,

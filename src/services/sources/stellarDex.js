@@ -4,12 +4,19 @@ const logger = require('../../logger');
 const { addRequestIdHeaderInterceptor } = require('../../middleware/requestId');
 
 let server = null;
+let serverHorizonUrl = null;
 
 function getServer() {
-  if (!server) {
+  // Issue #372: config.stellar is replaced wholesale by config.reload()
+  // (SIGHUP hot-reload in production) — a cached server built from the
+  // horizonUrl that was current at first use would otherwise keep talking
+  // to the old Horizon endpoint forever. Rebuild whenever it differs from
+  // what's cached, rather than only ever building once.
+  if (!server || serverHorizonUrl !== config.stellar.horizonUrl) {
     server = addRequestIdHeaderInterceptor(
       new Horizon.Server(config.stellar.horizonUrl)
     );
+    serverHorizonUrl = config.stellar.horizonUrl;
   }
   return server;
 }

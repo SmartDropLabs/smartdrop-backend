@@ -231,7 +231,8 @@ if (process.env.NODE_ENV === 'production') {
   });
 }
 
-module.exports.reload = reload;
+module.exports = {
+  reload,
   nodeEnv: env.NODE_ENV,
   port: env.PORT,
   databaseUrl: env.DATABASE_URL,

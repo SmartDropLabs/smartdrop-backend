@@ -142,7 +142,7 @@ router.post(
       };
 
       if (!reachability.reachable) {
-        response.warning = `Webhook target is unreachable during registration: ${reachability.error || "request failed"}`;
+        response.warning = "Webhook target is unreachable during registration: check the URL and try again";
       }
 
       return res.status(201).json(response);

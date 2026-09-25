@@ -85,15 +85,25 @@ async function create({ url, events, secret, description, filters, owner_ip }) {
     updated_at: now,
   };
   const redis = cache.getClient();
-  await cache.set(key(id), record);
-  // A sorted set scored by creation time, not a plain set — mirrors
-  // airdropsService/alerts.js's own IDS_KEY pattern, so paginating (added
-  // below) walks a deterministic, newest-first order rather than
-  // whatever arbitrary order SMEMBERS happened to return (#131).
-  await redis.zadd(IDS_KEY, Date.parse(now), id);
+  // Issue #355: one MULTI/EXEC transaction instead of two or three separate
+  // round trips — every value here is freshly computed above (no read of
+  // prior state feeds into any of these writes), so unlike the read-modify-
+  // write helpers in eventStore.js, this can go directly into one atomic
+  // batch. A crash mid-way used to leave a webhook record with no entry in
+  // IDS_KEY (invisible to list()/listAll(), so it would never fire), or an
+  // id in IDS_KEY with no backing record (a 404 from findById() that list()
+  // still returned as a phantom entry).
+  const multi = redis.multi()
+    .set(key(id), JSON.stringify(record))
+    // A sorted set scored by creation time, not a plain set — mirrors
+    // airdropsService/alerts.js's own IDS_KEY pattern, so paginating (added
+    // below) walks a deterministic, newest-first order rather than
+    // whatever arbitrary order SMEMBERS happened to return (#131).
+    .zadd(IDS_KEY, Date.parse(now), id);
   if (owner_ip) {
-    await redis.zadd(`webhooks:owner:${owner_ip}`, Date.parse(now), id);
+    multi.zadd(`webhooks:owner:${owner_ip}`, Date.parse(now), id);
   }
+  await multi.exec();
   return normalize(record);
 }
 

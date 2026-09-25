@@ -128,9 +128,11 @@ async function upsertRecipient(event) {
   if (!airdropId || !recipient) return;
 
   const key = recipientsKey(airdropId);
-  const recipients = await getJsonList(key);
-  const existingIndex = recipients.findIndex((entry) => entry.recipient === recipient);
-  const existing = existingIndex >= 0 ? recipients[existingIndex] : { recipient };
+  await migrateRecipientsListToHashIfNeeded(key);
+
+  const redis = cache.getClient();
+  const existingRaw = await redis.hget(key, recipient);
+  const existing = existingRaw ? JSON.parse(existingRaw) : { recipient };
   const next = {
     ...existing,
     airdrop_id: airdropId,
@@ -150,10 +152,7 @@ async function upsertRecipient(event) {
     next.claimed_at = event.ledger_closed_at;
   }
 
-  if (existingIndex >= 0) recipients[existingIndex] = next;
-  else recipients.push(next);
-
-  await setJsonList(key, recipients);
+  await redis.hset(key, recipient, JSON.stringify(next));
 }
 
 async function appendClaim(event) {
@@ -236,7 +235,22 @@ async function getAirdropStatus(airdropId) {
 }
 
 async function getAirdropRecipients(airdropId) {
-  return getJsonList(recipientsKey(airdropId));
+  const key = recipientsKey(airdropId);
+  await migrateRecipientsListToHashIfNeeded(key);
+
+  const redis = cache.getClient();
+  const raw = await redis.hgetall(key);
+  const recipients = Object.values(raw).map((v) => JSON.parse(v));
+  // A hash has no guaranteed iteration order across calls; sort by
+  // added_ledger (falling back to recipient address) so pagination here
+  // stays stable, matching the old JSON-list's insertion order.
+  recipients.sort((a, b) => {
+    const la = a.added_ledger ?? 0;
+    const lb = b.added_ledger ?? 0;
+    if (la !== lb) return la - lb;
+    return String(a.recipient).localeCompare(String(b.recipient));
+  });
+  return recipients;
 }
 
 async function getRecipientClaims(address) {

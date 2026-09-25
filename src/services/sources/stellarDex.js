@@ -80,14 +80,14 @@ async function fetchPrice(assetCode, issuer) {
       return await fetchOrderBookMidpoint(horizon, xlmAsset(), usdcAsset());
     }
 
-    const assetInXlm = await fetchOrderBookMidpoint(
+    const assetInXlmPromise = fetchOrderBookMidpoint(
       horizon,
       issuedAsset(normalizedCode, issuer),
       xlmAsset()
     );
+    const xlmUsdPromise = getXlmUsdPrice(horizon);
+    const [assetInXlm, xlmUsd] = await Promise.all([assetInXlmPromise, xlmUsdPromise]);
     if (assetInXlm === null) return null;
-
-    const xlmUsd = await getXlmUsdPrice(horizon);
     if (xlmUsd === null) return null;
     return assetInXlm * xlmUsd;
   } catch (err) {

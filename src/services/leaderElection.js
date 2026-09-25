@@ -103,7 +103,14 @@ function createLeaderElection(jobName, opts = {}) {
     const result = await redis.set(lockKey, instanceId, 'NX', 'PX', leaseTtlMs);
     if (result === 'OK') {
       if (!leader) {
-        logger.info('Acquired leader lease', { job: jobName, instanceId, lockKey, leaseTtlMs });
+        logger.info('Acquired leader lease', {
+          event: 'leader_election',
+          transition: 'acquired',
+          job: jobName,
+          instanceId,
+          lockKey,
+          leaseTtlMs,
+        });
       }
       leader = true;
       acquiredAt = Date.now();
@@ -116,6 +123,8 @@ function createLeaderElection(jobName, opts = {}) {
       // This shouldn't normally happen with proper renewal, but handles edge
       // cases like a long GC pause causing lease expiry.
       logger.warn('Lost leader lease — another instance has acquired it', {
+        event: 'leader_election',
+        transition: 'lost',
         job: jobName,
         instanceId,
         lockKey,
@@ -147,6 +156,8 @@ function createLeaderElection(jobName, opts = {}) {
 
       // Lease expired and someone else took it, or it was manually deleted.
       logger.warn('Failed to renew leader lease — lost leadership', {
+        event: 'leader_election',
+        transition: 'lost',
         job: jobName,
         instanceId,
         lockKey,
@@ -179,7 +190,13 @@ function createLeaderElection(jobName, opts = {}) {
 
     try {
       await redis.releaseLease(lockKey, instanceId);
-      logger.info('Released leader lease', { job: jobName, instanceId, lockKey });
+      logger.info('Released leader lease', {
+        event: 'leader_election',
+        transition: 'released',
+        job: jobName,
+        instanceId,
+        lockKey,
+      });
     } catch (err) {
       logger.error('Error releasing leader lease', {
         job: jobName,
@@ -244,6 +261,8 @@ function createLeaderElection(jobName, opts = {}) {
     }
 
     logger.info('Leader election renewal loop started', {
+      event: 'leader_election',
+      transition: 'renew_loop_started',
       job: jobName,
       instanceId,
       lockKey,
@@ -261,7 +280,12 @@ function createLeaderElection(jobName, opts = {}) {
       renewTimer = null;
     }
     await release();
-    logger.info('Leader election renewal loop stopped', { job: jobName, instanceId });
+    logger.info('Leader election renewal loop stopped', {
+      event: 'leader_election',
+      transition: 'renew_loop_stopped',
+      job: jobName,
+      instanceId,
+    });
   }
 
   /**

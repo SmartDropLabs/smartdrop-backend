@@ -125,9 +125,7 @@ async function detectAnomaly(currentPrice, assetCode, issuer) {
 }
 
 async function fetchFromAllSources(assetCode, issuer) {
-  const results = [];
-
-  for (const source of SOURCES) {
+  const sourceResults = await Promise.allSettled(SOURCES.map(async (source) => {
     // A source that cannot serve this asset at all (e.g. CoinGecko has no
     // mapping for a non-XLM asset) is a permanent, per-asset condition, not
     // a source failure — skip the breaker-wrapped call entirely so it never
@@ -135,20 +133,28 @@ async function fetchFromAllSources(assetCode, issuer) {
     // source asked about even one asset it doesn't support would eventually
     // trip its circuit open for every asset it *does* support (#130).
     if (typeof source.isSupported === 'function' && !source.isSupported(assetCode, issuer)) {
-      continue;
+      return null;
     }
 
-    try {
-      const price = await source.breaker.call(() => source.fetch(assetCode, issuer));
-      if (price !== null && price > 0) {
-        results.push({ source: source.name, price });
-      }
-    } catch (err) {
-      logger.warn('Source fetch failed', { source: source.name, assetCode, error: err.message });
+    const price = await source.breaker.call(() => source.fetch(assetCode, issuer));
+    if (price !== null && price > 0) {
+      return { source: source.name, price };
     }
-  }
+    return null;
+  }));
 
-  return results;
+  return sourceResults.flatMap((result, index) => {
+    if (result.status === 'rejected') {
+      const source = SOURCES[index];
+      logger.warn('Source fetch failed', {
+        source: source.name,
+        assetCode,
+        error: result.reason.message,
+      });
+      return [];
+    }
+    return result.value ? [result.value] : [];
+  });
 }
 
 function getCircuitStates() {

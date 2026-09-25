@@ -5,6 +5,11 @@ const logger = require('../logger');
 
 const IDS_KEY = 'alerts:ids';
 const COOLDOWN_MS = 5 * 60 * 1000;
+// Ceiling on one asset's alert evaluation pass (issue #315). evaluateForAsset
+// makes several Redis round trips per alert with no timeout of its own, so a
+// slow/hanging Redis instance could otherwise block the evaluation loop
+// (and evaluateAll's iteration over every watched asset) indefinitely.
+const ALERT_EVAL_TIMEOUT_MS = parseInt(process.env.ALERT_EVAL_TIMEOUT_MS, 10) || 10000;
 
 function alertKey(id) {
   return `alert:${id}`;
@@ -105,6 +110,24 @@ function assetCooldownKey(asset) {
 }
 
 async function evaluateForAsset(asset, priceUsd) {
+  let timeoutHandle;
+  const timeout = new Promise((_, reject) => {
+    timeoutHandle = setTimeout(
+      () => reject(new Error(`evaluateForAsset timed out after ${ALERT_EVAL_TIMEOUT_MS}ms`)),
+      ALERT_EVAL_TIMEOUT_MS
+    );
+  });
+
+  try {
+    await Promise.race([evaluateForAssetInner(asset, priceUsd), timeout]);
+  } catch (err) {
+    logger.error('Alert evaluation failed or timed out', { asset, error: err.message });
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+}
+
+async function evaluateForAssetInner(asset, priceUsd) {
   const redis = cache.getClient();
   const ids = await redis.zrevrange(IDS_KEY, 0, -1);
 

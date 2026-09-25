@@ -15,8 +15,10 @@ async function getIdempotencyResponse(key) {
   
   try {
     const cacheKey = `${IDEMPOTENCY_KEY_PREFIX}${key}`;
+    // cache.get() already JSON.parses the stored value, so `cached` here is
+    // a plain object, not a string — re-parsing it throws (issue #316).
     const cached = await cache.get(cacheKey);
-    return cached ? JSON.parse(cached) : null;
+    return cached || null;
   } catch (err) {
     logger.warn('Failed to retrieve idempotency response', { key, error: err.message });
     return null;
@@ -40,7 +42,9 @@ async function storeIdempotencyResponse(key, statusCode, responseBody) {
       body: responseBody,
       timestamp: new Date().toISOString(),
     };
-    await cache.setex(cacheKey, IDEMPOTENCY_TTL_SECONDS, JSON.stringify(data));
+    // cache.set() already JSON.stringifies the value and supports a TTL;
+    // cache.setex() isn't a method this module exports (issue #316).
+    await cache.set(cacheKey, data, IDEMPOTENCY_TTL_SECONDS);
   } catch (err) {
     logger.error('Failed to store idempotency response', { key, error: err.message });
   }

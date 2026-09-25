@@ -12,6 +12,16 @@ const health = {
   startedAt: null,
   lastSuccessAt: null,
   lastError: null,
+  // #360 — Resettable retry metrics. These are zeroed on each restart so
+  // average latency calculations remain meaningful over the process lifetime
+  // rather than accumulating across restarts.
+  totalRetriesProcessed: 0,
+  totalRetryLatencyMs: 0,
+  get averageRetryLatencyMs() {
+    return health.totalRetriesProcessed > 0
+      ? Math.round(health.totalRetryLatencyMs / health.totalRetriesProcessed)
+      : 0;
+  },
 };
 
 async function tick() {
@@ -27,9 +37,14 @@ async function tick() {
     }
     logger.info('Processing webhook retries', { count: ids.length });
     for (const id of ids) {
+      const startMs = Date.now();
       try {
         await dispatcher.attempt(id);
+        health.totalRetriesProcessed++;
+        health.totalRetryLatencyMs += Date.now() - startMs;
       } catch (err) {
+        health.totalRetriesProcessed++;
+        health.totalRetryLatencyMs += Date.now() - startMs;
         logger.error('Retry attempt failed', { delivery_id: id, error: err.message });
       }
     }

@@ -5,8 +5,6 @@ const signature = require('../src/services/webhookSignature');
 const {
   buildSignatureHeaders,
   sendSignedRequest,
-  signPayload,
-  verifySignature,
 } = require('../src/services/webhook');
 const { requestContext } = require('../src/middleware/requestId');
 
@@ -72,20 +70,23 @@ describe('webhook signature', () => {
 });
 
 describe('webhook signatures', () => {
-  test('signs and verifies payloads with timestamped HMAC-SHA256', () => {
+  // Issue #302: webhook.js used to carry its own duplicate HMAC signing
+  // implementation. It now delegates entirely to webhookSignature.js, so
+  // these tests exercise webhook.js's delivery-facing wrappers and confirm
+  // they produce a signature that webhookSignature.verify() itself accepts,
+  // rather than re-testing the signing algorithm a second time.
+  test('signs payloads such that webhookSignature.verify() accepts them', () => {
     const payload = { event: 'airdrop.completed', airdrop_id: 'drop-1' };
-    const timestamp = 1782345600000;
-    const signature = `sha256=${signPayload('whsec_testsecret', payload, timestamp)}`;
+    const headers = buildSignatureHeaders('whsec_testsecret', payload);
 
-    expect(verifySignature('whsec_testsecret', payload, signature, timestamp)).toBe(true);
-    expect(verifySignature('wrong_secret', payload, signature, timestamp)).toBe(false);
+    expect(signature.verify('whsec_testsecret', payload, headers['X-SmartDrop-Signature'])).toBe(true);
+    expect(signature.verify('wrong_secret', payload, headers['X-SmartDrop-Signature'])).toBe(false);
   });
 
-  test('builds SmartDrop signature and timestamp headers', () => {
-    const headers = buildSignatureHeaders('whsec_testsecret', { event: 'ping' }, 1782345600000);
+  test('builds SmartDrop signature headers matching webhookSignature.js\'s format', () => {
+    const headers = buildSignatureHeaders('whsec_testsecret', { event: 'ping' });
 
-    expect(headers['X-SmartDrop-Signature']).toMatch(/^sha256=[a-f0-9]{64}$/);
-    expect(headers['X-SmartDrop-Timestamp']).toBe('1782345600000');
+    expect(headers['X-SmartDrop-Signature']).toMatch(/^sha256=[0-9a-f]{64}; t=\d+; n=[0-9a-f]+$/);
   });
 
   test('mock HTTP server receives signed request', async () => {
@@ -119,14 +120,12 @@ describe('webhook signatures', () => {
 
       expect(result).toMatchObject({ ok: true, status: 204 });
       expect(captured.headers['x-request-id']).toBe('req_webhook_123');
-      expect(captured.headers['x-smartdrop-signature']).toMatch(/^sha256=[a-f0-9]{64}$/);
-      expect(captured.headers['x-smartdrop-timestamp']).toBeDefined();
-      expect(verifySignature(
-        'whsec_testsecret',
-        captured.body,
-        captured.headers['x-smartdrop-signature'],
-        captured.headers['x-smartdrop-timestamp']
-      )).toBe(true);
+      expect(captured.headers['x-smartdrop-signature']).toMatch(
+        /^sha256=[0-9a-f]{64}; t=\d+; n=[0-9a-f]+$/,
+      );
+      expect(
+        signature.verify('whsec_testsecret', captured.body, captured.headers['x-smartdrop-signature']),
+      ).toBe(true);
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }

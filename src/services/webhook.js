@@ -1,46 +1,30 @@
-const crypto = require('crypto');
 const axios = require('axios');
 const logger = require('../logger');
 const { getRequestIdHeaders } = require('../middleware/requestId');
+const signature = require('./webhookSignature');
 
 const DEFAULT_TIMEOUT_MS = 10000;
 
-function payloadBody(payload) {
-  return typeof payload === 'string' ? payload : JSON.stringify(payload);
-}
-
-function signPayload(secret, payload, timestamp = Date.now()) {
-  const body = payloadBody(payload);
-  return crypto
-    .createHmac('sha256', secret)
-    .update(`${timestamp}.${body}`)
-    .digest('hex');
-}
-
-function buildSignatureHeaders(secret, payload, timestamp = Date.now()) {
-  const signature = signPayload(secret, payload, timestamp);
+// Issue #302: this module used to carry its own HMAC signing implementation
+// (a plain `sha256(timestamp.body)` digest, no replay protection), separate
+// from and inconsistent with `webhookSignature.js`'s nonce + replay-window
+// scheme already used by webhookDispatcher.js for outbound event deliveries.
+// Two different signature formats meant a webhook receiver had to handle
+// two incompatible `X-SmartDrop-Signature` shapes depending on which code
+// path sent the request, and the older one here had no replay protection.
+// This module now delegates all signing to `webhookSignature.js` and keeps
+// only the HTTP delivery mechanics (retries aren't handled here — see
+// webhookDispatcher.js for the retrying delivery path).
+function buildSignatureHeaders(secret, payload) {
   return {
     'Content-Type': 'application/json',
-    'X-SmartDrop-Signature': `sha256=${signature}`,
-    'X-SmartDrop-Timestamp': String(timestamp),
+    'X-SmartDrop-Signature': signature.sign(secret, payload),
   };
 }
 
-function verifySignature(secret, payload, signatureHeader, timestamp) {
-  if (!signatureHeader || !timestamp || !signatureHeader.startsWith('sha256=')) {
-    return false;
-  }
-
-  const expected = Buffer.from(signPayload(secret, payload, timestamp), 'hex');
-  const actual = Buffer.from(signatureHeader.slice('sha256='.length), 'hex');
-
-  return expected.length === actual.length && crypto.timingSafeEqual(expected, actual);
-}
-
 async function sendSignedRequest(webhookUrl, secret, payload, options = {}) {
-  const timestamp = options.timestamp || Date.now();
   const headers = {
-    ...buildSignatureHeaders(secret, payload, timestamp),
+    ...buildSignatureHeaders(secret, payload),
     ...getRequestIdHeaders(),
   };
   const startedAt = Date.now();
@@ -116,6 +100,4 @@ module.exports = {
   deliver,
   probeReachability,
   sendSignedRequest,
-  signPayload,
-  verifySignature,
 };

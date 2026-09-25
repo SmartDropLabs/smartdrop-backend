@@ -99,7 +99,37 @@ const mockRedis = {
   eval: jest.fn(async (_script, _numKeys, key, currentLedger, nowIso) =>
     mockMarkExpiredEval(mockStore, key, currentLedger, nowIso)
   ),
+  del: jest.fn(async (key) => {
+    mockStore.delete(key);
+    mockSets.delete(key);
+    mockLists.delete(key);
+  }),
 };
+
+// Queues commands issued through redis.multi() and replays them, in order,
+// against the mockRedis methods above on .exec() — so remove()'s MULTI/EXEC
+// (issue #305) goes through the same mock logic as calling each command
+// directly.
+mockRedis.multi = jest.fn(() => {
+  const queue = [];
+  const chain = new Proxy(
+    {},
+    {
+      get(_target, prop) {
+        if (prop === 'exec') {
+          return async () => {
+            for (const [cmd, args] of queue) await mockRedis[cmd](...args);
+          };
+        }
+        return (...args) => {
+          queue.push([prop, args]);
+          return chain;
+        };
+      },
+    },
+  );
+  return chain;
+});
 
 jest.mock('../src/services/cache', () => ({
   getClient: () => mockRedis,

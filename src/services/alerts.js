@@ -55,8 +55,15 @@ async function create(data) {
   };
 
   const redis = cache.getClient();
-  await cache.set(alertKey(id), alert);
-  await redis.zadd(IDS_KEY, Date.now(), id);
+  // One MULTI/EXEC transaction instead of two separate round trips (issue
+  // #303) — both writes are freshly computed above, so a crash between them
+  // used to leave either an alert record with no entry in IDS_KEY (invisible
+  // to list()/evaluateAll(), so it would never fire), or an id in IDS_KEY
+  // with no backing record (a phantom entry list() would still return).
+  await redis.multi()
+    .set(alertKey(id), JSON.stringify(alert))
+    .zadd(IDS_KEY, Date.now(), id)
+    .exec();
 
   return alert;
 }
@@ -85,8 +92,15 @@ async function remove(id) {
   const redis = cache.getClient();
   const existing = await cache.get(alertKey(id));
   if (!existing) return null;
-  await cache.del(alertKey(id));
-  await redis.zrem(IDS_KEY, id);
+  // One MULTI/EXEC transaction instead of two separate round trips (issue
+  // #304) — a crash between them used to leave either a dangling id in
+  // IDS_KEY with no backing record (a phantom entry list() would still
+  // return), or a deleted-but-still-indexed alert that evaluateAll() would
+  // try to re-read as null.
+  await redis.multi()
+    .del(alertKey(id))
+    .zrem(IDS_KEY, id)
+    .exec();
   return existing;
 }
 

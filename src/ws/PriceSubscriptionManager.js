@@ -60,9 +60,38 @@ class PriceSubscriptionManager {
 
   _remove(ws) {
     if (!this._clients.has(ws)) return;
+    const client = this._clients.get(ws);
     this._clients.delete(ws);
     updateGauge(-1);
     logger.info('WS client disconnected', { total: this._clients.size });
+
+    // #362 — After removing a client, check if any of its previously
+    // watched assets are still watched by other clients. If not, clean
+    // up the stale entry in _previousPrices to prevent unbounded memory
+    // growth from assets nobody is subscribed to anymore.
+    if (client && client.assets.size > 0) {
+      this._cleanupOrphanedPrices(client.assets);
+    }
+  }
+
+  /**
+   * Remove _previousPrices entries for assets that no active client watches.
+   */
+  _cleanupOrphanedPrices(changedAssets) {
+    // Collect all assets currently watched by active clients
+    const watchedAssets = new Set();
+    for (const [, c] of this._clients) {
+      for (const asset of c.assets) {
+        watchedAssets.add(asset);
+      }
+    }
+
+    // Remove previous prices for assets that are no longer watched
+    for (const asset of changedAssets) {
+      if (!watchedAssets.has(asset)) {
+        this._previousPrices.delete(asset);
+      }
+    }
   }
 
   _handleMessage(ws, raw) {
@@ -145,15 +174,22 @@ class PriceSubscriptionManager {
   startHeartbeat() {
     if (this._pingTimer) return;
     this._pingTimer = setInterval(() => {
+      // #363 — Collect timed-out clients first, then disconnect after
+      // iteration. Modifying a Map during for-of iteration is undefined
+      // behavior in JS; snapshotting the keys avoids the mutation.
+      const timedOut = [];
       for (const [ws, client] of this._clients) {
         if (client.missedPings >= MAX_MISSED_PINGS) {
-          logger.info('WS client timed out, disconnecting');
-          ws.terminate();
-          this._remove(ws);
+          timedOut.push(ws);
           continue;
         }
         client.missedPings += 1;
         this._send(ws, { type: 'ping' });
+      }
+      for (const ws of timedOut) {
+        logger.info('WS client timed out, disconnecting');
+        ws.terminate();
+        this._remove(ws);
       }
     }, PING_INTERVAL_MS);
   }

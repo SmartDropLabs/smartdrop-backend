@@ -1,5 +1,8 @@
 'use strict';
 
+const mockLogger = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };
+jest.mock('../src/logger', () => mockLogger);
+
 const { nativeToScVal, xdr } = require('@stellar/stellar-sdk');
 const { EVENT_NAMES, parseContractEvent } = require('../src/indexer/eventParser');
 
@@ -89,5 +92,26 @@ describe('Soroban contract event parser', () => {
 
   test('ignores unsupported contract events', () => {
     expect(parseContractEvent(event(['unrelated_event'], ['drop-1']))).toBeNull();
+  });
+
+  // Issue #367: previously dropped with zero logging anywhere in the
+  // pipeline, so a contract upgrade adding a new event type would silently
+  // stop being indexed with nothing to explain why.
+  test('logs a warning naming the raw topics when dropping an unrecognized event', () => {
+    mockLogger.warn.mockClear();
+    const result = parseContractEvent(event(['some_future_event'], ['drop-1'], { ledger: 999 }));
+
+    expect(result).toBeNull();
+    expect(mockLogger.warn).toHaveBeenCalledTimes(1);
+    const [message, meta] = mockLogger.warn.mock.calls[0];
+    expect(message).toContain('unrecognized name');
+    expect(meta.ledger).toBe(999);
+    expect(meta.topics).toContain('some_future_event');
+  });
+
+  test('does not log a warning for a recognized event', () => {
+    mockLogger.warn.mockClear();
+    parseContractEvent(event(['airdrop_expired', 'drop-1'], [875n]));
+    expect(mockLogger.warn).not.toHaveBeenCalled();
   });
 });

@@ -1,8 +1,9 @@
 const crypto = require('crypto');
 const cache = require('./cache');
 const logger = require('../logger');
-const { Horizon } = require('stellar-sdk');
+const { Horizon } = require('@stellar/stellar-sdk');
 const config = require('../config');
+const { addRequestIdHeaderInterceptor } = require('../middleware/requestId');
 
 const IDS_KEY = 'airdrops:ids';
 
@@ -24,7 +25,9 @@ function generateId() {
   return `drop_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
 }
 
-const horizon = new Horizon.Server(config.stellar.horizonUrl);
+const horizon = addRequestIdHeaderInterceptor(
+  new Horizon.Server(config.stellar.horizonUrl)
+);
 
 // getCurrentLedger() is a live Horizon call. Callers that need to check many
 // airdrops in quick succession (the expiry reconciliation job, in
@@ -48,7 +51,21 @@ async function getCurrentLedger() {
 }
 
 async function create(data) {
-  const { name, description, asset, asset_issuer, total_amount, expiry_ledger, recipients = [] } = data;
+  const { name, description, asset, asset_issuer, total_amount, expiry_ledger, contract_airdrop_id, recipients = [] } = data;
+
+  // #290 — Validate that total_amount matches the sum of recipient amounts.
+  // Without this check, an airdrop could be created with a total_amount that
+  // doesn't cover all recipients, leading to insufficient on-chain funds.
+  if (recipients.length > 0 && total_amount != null) {
+    const recipientSum = recipients.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+    const total = Number(total_amount);
+    if (Math.abs(total - recipientSum) > 1e-7) {
+      throw new Error(
+        `total_amount (${total_amount}) does not match the sum of recipient amounts (${recipientSum})`,
+      );
+    }
+  }
+
   const id = generateId();
 
   const airdrop = {
@@ -59,6 +76,10 @@ async function create(data) {
     asset_issuer,
     total_amount,
     expiry_ledger,
+    // Linking field: once the on-chain airdrop ID is known (e.g. after the
+    // Soroban contract is invoked externally), populate this so the REST
+    // record can be correlated with indexer-observed on-chain state (#122).
+    contract_airdrop_id: contract_airdrop_id || null,
     status: 'draft',
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
@@ -163,12 +184,20 @@ async function update(id, data) {
   const airdrop = await get(id);
   if (!airdrop) return null;
 
-  const { name, description, expiry_ledger } = data;
+  // Terminal statuses cannot be updated — once completed, failed, expired,
+  // or cancelled, the airdrop's lifecycle is over (#281).
+  const terminalStatuses = ['completed', 'failed', 'expired', 'cancelled'];
+  if (terminalStatuses.includes(airdrop.status)) {
+    return airdrop;
+  }
+
+  const { name, description, expiry_ledger, contract_airdrop_id } = data;
   const updated = {
     ...airdrop,
     name: name !== undefined ? name : airdrop.name,
     description: description !== undefined ? description : airdrop.description,
     expiry_ledger: expiry_ledger !== undefined ? expiry_ledger : airdrop.expiry_ledger,
+    contract_airdrop_id: contract_airdrop_id !== undefined ? contract_airdrop_id : airdrop.contract_airdrop_id,
     updated_at: new Date().toISOString(),
   };
 
@@ -192,7 +221,10 @@ async function cancel(id) {
   const airdrop = await get(id);
   if (!airdrop) return null;
 
-  if (airdrop.status === 'cancelled') {
+  // Terminal statuses cannot be cancelled — once completed, failed, or
+  // expired, the airdrop's lifecycle is over (#280).
+  const terminalStatuses = ['completed', 'failed', 'expired', 'cancelled'];
+  if (terminalStatuses.includes(airdrop.status)) {
     return airdrop;
   }
 
@@ -220,15 +252,22 @@ async function addRecipients(airdropId, recipients) {
     addresses.map((addr) => redis.sadd(recipientAddressSetKey(airdropId), addr)),
   );
 
-  const duplicates = addresses.filter((_, i) => addedCounts[i] === 0);
-  if (duplicates.length > 0) {
-    // Roll back the addresses we just added so the set stays consistent.
-    await redis.srem(recipientAddressSetKey(airdropId), ...addresses.filter((_, i) => addedCounts[i] === 1));
-    return duplicates;
+  const newAddresses = [];
+  const duplicates = [];
+
+  for (let i = 0; i < addresses.length; i++) {
+    if (addedCounts[i] === 1) {
+      newAddresses.push(recipients[i]);
+    } else {
+      duplicates.push(addresses[i]);
+    }
   }
 
-  await redis.rpush(recipientsKey(airdropId), ...recipients.map((r) => JSON.stringify(r)));
-  return [];
+  if (newAddresses.length > 0) {
+    await redis.rpush(recipientsKey(airdropId), ...newAddresses.map((r) => JSON.stringify(r)));
+  }
+
+  return duplicates;
 }
 
 // Returns { recipients, total } — see list()'s comment above.

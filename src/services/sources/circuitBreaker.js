@@ -1,6 +1,6 @@
-'use strict';
+"use strict";
 
-const logger = require('../../logger');
+const logger = require("../../logger");
 
 /**
  * A per-source circuit breaker for permanent (nonRetryable) failures like an
@@ -18,6 +18,7 @@ const logger = require('../../logger');
 function createCircuitBreaker({ sourceName, cooldownMs, reminderIntervalMs }) {
   let openUntil = 0;
   let lastReminderLoggedAt = 0;
+  let lastSuccessAt = null;
 
   function isOpen() {
     return Date.now() < openUntil;
@@ -27,7 +28,7 @@ function createCircuitBreaker({ sourceName, cooldownMs, reminderIntervalMs }) {
   function noteSkipped(context = {}) {
     const now = Date.now();
     if (now - lastReminderLoggedAt >= reminderIntervalMs) {
-      logger.warn('Price source circuit open, skipping fetch', {
+      logger.warn("Price source circuit open, skipping fetch", {
         source: sourceName,
         openUntil: new Date(openUntil).toISOString(),
         ...context,
@@ -41,7 +42,7 @@ function createCircuitBreaker({ sourceName, cooldownMs, reminderIntervalMs }) {
     const wasOpen = isOpen();
     openUntil = Date.now() + cooldownMs;
     if (!wasOpen) {
-      logger.error('Price source permanently misconfigured', {
+      logger.error("Price source permanently misconfigured", {
         source: sourceName,
         cooldownMs,
         ...context,
@@ -54,6 +55,7 @@ function createCircuitBreaker({ sourceName, cooldownMs, reminderIntervalMs }) {
   function close() {
     openUntil = 0;
     lastReminderLoggedAt = 0;
+    lastSuccessAt = Date.now();
   }
 
   function getState() {
@@ -61,6 +63,9 @@ function createCircuitBreaker({ sourceName, cooldownMs, reminderIntervalMs }) {
       source: sourceName,
       open: isOpen(),
       openUntil: openUntil ? new Date(openUntil).toISOString() : null,
+      last_success_at: lastSuccessAt
+        ? new Date(lastSuccessAt).toISOString()
+        : null,
     };
   }
 

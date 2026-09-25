@@ -1,5 +1,6 @@
 const crypto = require('crypto');
-const { scValToNative } = require('stellar-sdk');
+const { scValToNative } = require('@stellar/stellar-sdk');
+const logger = require('../logger');
 
 const EVENT_FIELDS = {
   airdrop_created: ['airdrop_id', 'creator', 'token', 'total_amount', 'expiry_ledger'],
@@ -80,7 +81,19 @@ function parseContractEvent(event) {
   const nativeTopics = (event.topic || []).map(decodeScVal);
   const eventName = nativeTopics.map(normalizeEventName).find(Boolean);
 
-  if (!eventName) return null;
+  if (!eventName) {
+    // Issue #367: previously dropped with no trace. A contract upgrade that
+    // adds a new event type (not yet in EVENT_FIELDS) would silently stop
+    // being indexed with nothing in the logs to explain why — logging the
+    // raw topics is what lets an operator notice and add the new name.
+    logger.warn('eventParser: dropping event with unrecognized name', {
+      topics: nativeTopics,
+      ledger: event.ledger,
+      contract_id: contractIdToString(event.contractId),
+      paging_token: event.pagingToken || null,
+    });
+    return null;
+  }
 
   const decodedValue = decodeScVal(event.value);
   const eventNameIndex = nativeTopics.findIndex((topic) => topic === eventName);

@@ -38,7 +38,25 @@ async function warmCache(
   oracle = priceOracle,
   { timeoutMs = DEFAULT_TIMEOUT_MS, log = logger } = {}
 ) {
-  if (!assets || assets.length === 0) {
+  let allAssets = Array.isArray(assets) ? [...assets] : [];
+
+  if (oracle && typeof oracle.getQueriedAssets === 'function') {
+    try {
+      const queried = await oracle.getQueriedAssets();
+      const seen = new Set(allAssets.map((a) => (a.issuer ? `${a.code}:${a.issuer}` : a.code)));
+      for (const item of queried) {
+        const key = item.issuer ? `${item.code}:${item.issuer}` : item.code;
+        if (!seen.has(key)) {
+          seen.add(key);
+          allAssets.push(item);
+        }
+      }
+    } catch (err) {
+      log.warn('Failed to fetch queried assets during cache warming', { error: err.message });
+    }
+  }
+
+  if (!allAssets || allAssets.length === 0) {
     log.info('Cache warm skipped: no watched assets configured');
     return { total: 0, succeeded: 0, failed: 0, timedOut: false, durationMs: 0 };
   }
@@ -46,7 +64,7 @@ async function warmCache(
   let timedOut = false;
   let timeoutId;
 
-  const warming = runWarmCache(assets, oracle).then((summary) => {
+  const warming = runWarmCache(allAssets, oracle).then((summary) => {
     if (!timedOut) {
       log.info('Cache warm complete', summary);
     }
@@ -57,9 +75,9 @@ async function warmCache(
     timeoutId = setTimeout(() => {
       timedOut = true;
       const summary = {
-        total: assets.length,
+        total: allAssets.length,
         succeeded: 0,
-        failed: assets.length,
+        failed: allAssets.length,
         timedOut: true,
         durationMs: timeoutMs,
       };

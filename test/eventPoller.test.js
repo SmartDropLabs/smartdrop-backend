@@ -1,6 +1,6 @@
 'use strict';
 
-const { nativeToScVal } = require('stellar-sdk');
+const { nativeToScVal } = require('@stellar/stellar-sdk');
 const { EventPoller } = require('../src/indexer/eventPoller');
 
 function contractEvent(overrides = {}) {
@@ -54,6 +54,7 @@ describe('EventPoller', () => {
     const store = {
       getLastLedger: jest.fn(async () => null),
       saveEvent: jest.fn(async () => {}),
+        saveEvents: jest.fn(async () => {}),
       setLastLedger: jest.fn(async () => {}),
     };
     const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };
@@ -75,10 +76,10 @@ describe('EventPoller', () => {
       filters: [{ type: 'contract', contractIds: ['CCONTRACT'] }],
       limit: 5,
     });
-    expect(store.saveEvent).toHaveBeenCalledWith(expect.objectContaining({
+    expect(store.saveEvents).toHaveBeenCalledWith([expect.objectContaining({
       event_name: 'airdrop_created',
       data: expect.objectContaining({ airdrop_id: 'drop-1', total_amount: '1000' }),
-    }));
+    })]);
     expect(store.setLastLedger).toHaveBeenCalledWith(25);
     expect(result).toMatchObject({ indexed_events: 1, latest_ledger: 25 });
     expect(poller.getStatus()).toMatchObject({ latest_ledger: 25, last_error: null });
@@ -91,6 +92,7 @@ describe('EventPoller', () => {
     const store = {
       getLastLedger: jest.fn(async () => 19),
       saveEvent: jest.fn(async () => {}),
+        saveEvents: jest.fn(async () => {}),
       setLastLedger: jest.fn(async () => {}),
     };
 
@@ -129,6 +131,7 @@ describe('EventPoller', () => {
       const store = {
         getLastLedger: jest.fn(async () => null),
         saveEvent: jest.fn(async () => {}),
+        saveEvents: jest.fn(async () => {}),
         setLastLedger: jest.fn(async () => {}),
       };
       const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };
@@ -175,6 +178,7 @@ describe('EventPoller', () => {
       const store = {
         getLastLedger: jest.fn(async () => lastLedger),
         saveEvent: jest.fn(async () => {}),
+        saveEvents: jest.fn(async () => {}),
         setLastLedger: jest.fn(async (ledger) => {
           lastLedger = ledger;
         }),
@@ -201,7 +205,7 @@ describe('EventPoller', () => {
       // 25-499 (including skippableRangeEvents) forever.
       expect(server.getEvents.mock.calls[1][0].startLedger).toBe(25);
       expect(second.indexed_events).toBe(2);
-      expect(store.saveEvent).toHaveBeenCalledTimes(pollLimit + 2);
+      expect(store.saveEvents).toHaveBeenCalledTimes(2);
     });
 
     test('a batch smaller than pollLimit still advances to the chain tip and logs no warning', async () => {
@@ -213,6 +217,7 @@ describe('EventPoller', () => {
       const store = {
         getLastLedger: jest.fn(async () => null),
         saveEvent: jest.fn(async () => {}),
+        saveEvents: jest.fn(async () => {}),
         setLastLedger: jest.fn(async () => {}),
       };
       const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };

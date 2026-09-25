@@ -9,6 +9,7 @@ jest.mock('../src/logger', () => ({
 
 jest.mock('../src/services/priceOracle', () => ({
   fetchFreshPrice: jest.fn(),
+  getQueriedAssets: jest.fn(async () => []),
 }));
 
 const logger = require('../src/logger');
@@ -23,6 +24,7 @@ describe('startup cache warming', () => {
   beforeEach(() => {
     jest.useRealTimers();
     jest.clearAllMocks();
+    priceOracle.getQueriedAssets.mockResolvedValue([]);
   });
 
   test('skips warming when no assets are configured', async () => {
@@ -70,6 +72,22 @@ describe('startup cache warming', () => {
     }));
   });
 
+  test('includes user-queried assets in startup cache warming', async () => {
+    priceOracle.getQueriedAssets.mockResolvedValueOnce([asset('BTC'), asset('ETH')]);
+    priceOracle.fetchFreshPrice
+      .mockResolvedValueOnce({ price_usd: 0.12, redis_unavailable: false })
+      .mockResolvedValueOnce({ price_usd: 60000, redis_unavailable: false })
+      .mockResolvedValueOnce({ price_usd: 3000, redis_unavailable: false });
+
+    const summary = await warmCache([asset('XLM')], priceOracle, { log: logger });
+
+    expect(priceOracle.fetchFreshPrice).toHaveBeenCalledTimes(3);
+    expect(priceOracle.fetchFreshPrice).toHaveBeenNthCalledWith(1, 'XLM', null);
+    expect(priceOracle.fetchFreshPrice).toHaveBeenNthCalledWith(2, 'BTC', null);
+    expect(priceOracle.fetchFreshPrice).toHaveBeenNthCalledWith(3, 'ETH', null);
+    expect(summary).toMatchObject({ total: 3, succeeded: 3, failed: 0, timedOut: false });
+  });
+
   test('starts all asset fetches before awaiting settlement', async () => {
     let resolveXlm;
     let resolveUsdc;
@@ -81,7 +99,7 @@ describe('startup cache warming', () => {
       .mockReturnValueOnce(usdcPromise);
 
     const warming = warmCache([asset('XLM'), asset('USDC')], priceOracle, { log: logger });
-    await Promise.resolve();
+    await new Promise((r) => setImmediate(r));
 
     expect(priceOracle.fetchFreshPrice).toHaveBeenCalledTimes(2);
 
@@ -92,6 +110,7 @@ describe('startup cache warming', () => {
 
   test('returns a timeout summary when warming takes too long', async () => {
     jest.useFakeTimers();
+    priceOracle.getQueriedAssets.mockResolvedValue([]);
     priceOracle.fetchFreshPrice.mockReturnValue(new Promise(() => {}));
 
     const warming = warmCache([asset('XLM')], priceOracle, {
@@ -99,6 +118,7 @@ describe('startup cache warming', () => {
       log: logger,
     });
 
+    await Promise.resolve();
     jest.advanceTimersByTime(25);
     await expect(warming).resolves.toEqual({
       total: 1,

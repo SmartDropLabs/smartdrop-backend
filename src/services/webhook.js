@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const axios = require('axios');
 const logger = require('../logger');
+const { getRequestIdHeaders } = require('../middleware/requestId');
 
 const DEFAULT_TIMEOUT_MS = 10000;
 
@@ -38,7 +39,10 @@ function verifySignature(secret, payload, signatureHeader, timestamp) {
 
 async function sendSignedRequest(webhookUrl, secret, payload, options = {}) {
   const timestamp = options.timestamp || Date.now();
-  const headers = buildSignatureHeaders(secret, payload, timestamp);
+  const headers = {
+    ...buildSignatureHeaders(secret, payload, timestamp),
+    ...getRequestIdHeaders(),
+  };
   const startedAt = Date.now();
 
   try {
@@ -57,6 +61,32 @@ async function sendSignedRequest(webhookUrl, secret, payload, options = {}) {
     err.duration_ms = Date.now() - startedAt;
     throw err;
   }
+}
+
+async function probeReachability(webhookUrl, options = {}) {
+  const timeoutMs = options.timeoutMs || 3000;
+  const lastError = { message: 'No response received' };
+
+  for (const method of ['head', 'get']) {
+    try {
+      const response = await axios[method](webhookUrl, {
+        headers: getRequestIdHeaders(),
+        timeout: timeoutMs,
+        validateStatus: () => true,
+      });
+
+      if (response && response.status >= 200 && response.status < 400) {
+        return { reachable: true, status: response.status, method };
+      }
+      if (response && response.status) {
+        return { reachable: false, status: response.status, method, error: `Target responded with HTTP ${response.status}` };
+      }
+    } catch (err) {
+      lastError.message = err?.message || 'Request failed';
+    }
+  }
+
+  return { reachable: false, method: 'head', error: lastError.message };
 }
 
 async function deliver(webhookUrl, secret, payload) {
@@ -84,6 +114,7 @@ async function deliver(webhookUrl, secret, payload) {
 module.exports = {
   buildSignatureHeaders,
   deliver,
+  probeReachability,
   sendSignedRequest,
   signPayload,
   verifySignature,

@@ -1,10 +1,17 @@
 'use strict';
 
 const request = require('supertest');
+const { createCacheMock } = require('./helpers/cacheMock');
 
 jest.mock('../src/services/cache', () => ({
   isConnected: jest.fn(() => false),
   disconnect: jest.fn(),
+  getConcurrencyStats: jest.fn(() => ({ active: 0, waiting: 0, available: 50, max: 50 })),
+  getCommandQueueLength: jest.fn(() => 0),
+  getClient: () => ({
+    incr: async () => 1,
+    expire: async () => 1,
+  }),
 }));
 
 jest.mock('../src/services/priceOracle', () => ({
@@ -145,6 +152,12 @@ describe('GET /health – status computation', () => {
     jest.mock('../src/services/cache', () => ({
       isConnected: () => true,
       disconnect: jest.fn(),
+      getConcurrencyStats: () => ({ active: 0, waiting: 0, available: 50, max: 50 }),
+      getCommandQueueLength: () => 0,
+      getClient: () => ({
+        incr: async () => 1,
+        expire: async () => 1,
+      }),
     }));
     jest.mock('../src/jobs/priceRefresh', () => ({
       start: jest.fn(),
@@ -170,6 +183,12 @@ describe('GET /health – status computation', () => {
     jest.mock('../src/services/cache', () => ({
       isConnected: () => false,
       disconnect: jest.fn(),
+      getConcurrencyStats: () => ({ active: 0, waiting: 0, available: 50, max: 50 }),
+      getCommandQueueLength: () => 0,
+      getClient: () => ({
+        incr: async () => 1,
+        expire: async () => 1,
+      }),
     }));
     jest.mock('../src/jobs/priceRefresh', () => ({
       start: jest.fn(),
@@ -196,6 +215,12 @@ describe('GET /health – status computation', () => {
     jest.mock('../src/services/cache', () => ({
       isConnected: () => true,
       disconnect: jest.fn(),
+      getConcurrencyStats: () => ({ active: 0, waiting: 0, available: 50, max: 50 }),
+      getCommandQueueLength: () => 0,
+      getClient: () => ({
+        incr: async () => 1,
+        expire: async () => 1,
+      }),
     }));
     jest.mock('../src/jobs/priceRefresh', () => ({
       start: jest.fn(),
@@ -223,6 +248,12 @@ describe('GET /health – status computation', () => {
     jest.mock('../src/services/cache', () => ({
       isConnected: () => true,
       disconnect: jest.fn(),
+      getConcurrencyStats: () => ({ active: 0, waiting: 0, available: 50, max: 50 }),
+      getCommandQueueLength: () => 0,
+      getClient: () => ({
+        incr: async () => 1,
+        expire: async () => 1,
+      }),
     }));
     jest.mock('../src/jobs/priceRefresh', () => ({
       start: jest.fn(),
@@ -249,6 +280,12 @@ describe('GET /health – status computation', () => {
     jest.mock('../src/services/cache', () => ({
       isConnected: () => false,
       disconnect: jest.fn(),
+      getConcurrencyStats: () => ({ active: 0, waiting: 0, available: 50, max: 50 }),
+      getCommandQueueLength: () => 0,
+      getClient: () => ({
+        incr: async () => 1,
+        expire: async () => 1,
+      }),
     }));
     jest.mock('../src/jobs/priceRefresh', () => ({
       start: jest.fn(),
@@ -303,5 +340,121 @@ describe('webhookRetryWorker.getHealth() – grace period', () => {
     const h = freshWorker.getHealth();
     expect(h.healthy).toBe(false);
     expect(h.stalled).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /health – webhook retry queue depth (issue #235)
+// ---------------------------------------------------------------------------
+
+describe('GET /health – webhook_retry_worker queue depth', () => {
+  function mockWorkerWithQueueStats(mockQueueStats) {
+    jest.mock('../src/jobs/webhookRetryWorker', () => ({
+      start: jest.fn(),
+      stop: jest.fn(),
+      tick: jest.fn(),
+      getHealth: () => ({ healthy: true, lastSuccessAt: Date.now(), lastError: null, stalled: false }),
+      getQueueStats: mockQueueStats,
+    }));
+  }
+
+  test('reports pending retries, last batch size, and average delivery latency', async () => {
+    jest.resetModules();
+    mockWorkerWithQueueStats(async () => ({
+      pendingRetries: 4,
+      lastBatchSize: 2,
+      avgDeliveryLatencyMs: 12.5,
+      totalRetriesProcessed: 9,
+    }));
+
+    const app = loadApp();
+    const res = await request(app).get('/health');
+
+    expect(res.status).toBe(200);
+    expect(res.body.jobs.webhook_retry_worker).toEqual(expect.objectContaining({
+      pending_retries: 4,
+      last_batch_size: 2,
+      avg_delivery_latency_ms: 12.5,
+      total_retries_processed: 9,
+    }));
+  });
+
+  test('keeps the existing liveness fields alongside the queue depth fields', async () => {
+    jest.resetModules();
+    mockWorkerWithQueueStats(async () => ({
+      pendingRetries: 0,
+      lastBatchSize: 0,
+      avgDeliveryLatencyMs: null,
+      totalRetriesProcessed: 0,
+    }));
+
+    const app = loadApp();
+    const res = await request(app).get('/health');
+
+    expect(res.body.jobs.webhook_retry_worker).toEqual(expect.objectContaining({
+      healthy: true,
+      stalled: false,
+      pending_retries: 0,
+    }));
+  });
+
+  test('reports null pending retries rather than zero when the queue cannot be read', async () => {
+    jest.resetModules();
+    mockWorkerWithQueueStats(async () => ({
+      pendingRetries: null,
+      lastBatchSize: null,
+      avgDeliveryLatencyMs: null,
+      totalRetriesProcessed: null,
+    }));
+
+    const app = loadApp();
+    const res = await request(app).get('/health');
+
+    expect(res.status).toBe(200);
+    expect(res.body.jobs.webhook_retry_worker.pending_retries).toBeNull();
+  });
+
+  test('still answers when reading the queue stats throws', async () => {
+    jest.resetModules();
+    mockWorkerWithQueueStats(async () => {
+      throw new Error('redis unreachable');
+    });
+
+    const app = loadApp();
+    const res = await request(app).get('/health');
+
+    expect(res.status).toBe(200);
+    expect(res.body.jobs.webhook_retry_worker.pending_retries).toBeNull();
+  });
+});
+
+describe('GET /health – rate limiting', () => {
+  test('returns 429 after the configured per-IP health limit', async () => {
+    const mockHealthCache = createCacheMock();
+    const previousMax = process.env.RATE_LIMIT_MAX;
+    process.env.RATE_LIMIT_MAX = '2';
+    mockHealthCache.reset();
+    jest.resetModules();
+    jest.doMock('../src/services/cache', () => mockHealthCache.cacheMock);
+
+    try {
+      const app = loadApp();
+      const first = await request(app).get('/health');
+      const second = await request(app).get('/health');
+      const blocked = await request(app).get('/health');
+
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      expect(blocked.status).toBe(429);
+      expect(blocked.body.error.code).toBe('RATE_LIMITED');
+      expect(blocked.headers['retry-after']).toBeDefined();
+      expect(mockHealthCache.redis.incr.mock.calls[0][0]).toContain('ratelimit:health:');
+    } finally {
+      if (previousMax === undefined) {
+        delete process.env.RATE_LIMIT_MAX;
+      } else {
+        process.env.RATE_LIMIT_MAX = previousMax;
+      }
+    }
   });
 });

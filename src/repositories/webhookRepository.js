@@ -21,6 +21,7 @@
 const crypto = require('crypto');
 const cache = require('../services/cache');
 const logger = require('../logger');
+const { encryptSecret, decryptSecret, isEncrypted } = require('../services/webhookEncryption');
 
 const IDS_KEY = 'webhooks:ids';
 
@@ -32,40 +33,77 @@ function generateId() {
   return `wh_${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`;
 }
 
+/**
+ * Decrypts `record.secret` for callers (webhookDispatcher needs the
+ * plaintext to sign deliveries; routes/webhooks.js needs it for
+ * secret_preview). Records written before encryption was introduced store
+ * the secret in plaintext (`isEncrypted` returns false for those) and are
+ * passed through unchanged, so existing webhooks keep working — they're
+ * transparently encrypted the next time they're written via `update()`.
+ */
+function decryptRecordSecret(secret) {
+  if (!isEncrypted(secret)) return secret;
+  try {
+    return decryptSecret(secret);
+  } catch (err) {
+    logger.error('webhookRepository: failed to decrypt webhook secret', { error: err.message });
+    return null;
+  }
+}
+
 function normalize(record) {
   if (!record) return null;
   return {
     id: record.id,
     url: record.url,
     events: Array.isArray(record.events) ? [...record.events] : [],
-    secret: record.secret,
+    secret: decryptRecordSecret(record.secret),
     active: record.active !== false,
     description: record.description || null,
+    filters: record.filters ? { ...record.filters } : null,
     created_at: record.created_at,
     updated_at: record.updated_at,
   };
 }
 
-async function create({ url, events, secret, description }) {
+async function create({ url, events, secret, description, filters, owner_ip }) {
   const id = generateId();
   const now = new Date().toISOString();
   const record = {
     id,
     url,
     events,
-    secret,
+    secret: encryptSecret(secret),
     active: true,
     description: description || null,
+    filters: filters || null,
+    // Persisted so remove() can clean up the per-owner index, and so the
+    // per-subscriber cap enforced in routes/webhooks.js actually has an
+    // index to count.
+    owner_ip: owner_ip || null,
     created_at: now,
     updated_at: now,
   };
   const redis = cache.getClient();
-  await cache.set(key(id), record);
-  // A sorted set scored by creation time, not a plain set — mirrors
-  // airdropsService/alerts.js's own IDS_KEY pattern, so paginating (added
-  // below) walks a deterministic, newest-first order rather than
-  // whatever arbitrary order SMEMBERS happened to return (#131).
-  await redis.zadd(IDS_KEY, Date.parse(now), id);
+  // Issue #355: one MULTI/EXEC transaction instead of two or three separate
+  // round trips — every value here is freshly computed above (no read of
+  // prior state feeds into any of these writes), so unlike the read-modify-
+  // write helpers in eventStore.js, this can go directly into one atomic
+  // batch. A crash mid-way used to leave a webhook record with no entry in
+  // IDS_KEY (invisible to list()/listAll(), so it would never fire), or an
+  // id in IDS_KEY with no backing record (a 404 from findById() that list()
+  // still returned as a phantom entry).
+  const multi = redis.multi()
+    .set(key(id), JSON.stringify(record))
+    // A sorted set scored by creation time, not a plain set — mirrors
+    // airdropsService/alerts.js's own IDS_KEY pattern, so paginating (added
+    // below) walks a deterministic, newest-first order rather than
+    // whatever arbitrary order SMEMBERS happened to return (#131).
+    .zadd(IDS_KEY, Date.parse(now), id);
+  if (owner_ip) {
+    multi.zadd(`webhooks:owner:${owner_ip}`, Date.parse(now), id);
+  }
+  await multi.exec();
   return normalize(record);
 }
 
@@ -91,6 +129,17 @@ async function listAll() {
   } catch (err) {
     logger.error('webhookRepository.listAll Redis error', { error: err.message });
     return [];
+  }
+}
+
+async function countByOwner(ownerIp) {
+  if (!ownerIp) return 0;
+  try {
+    const redis = cache.getClient();
+    return Number(await redis.zcard(`webhooks:owner:${ownerIp}`) || 0);
+  } catch (err) {
+    logger.error('webhookRepository.countByOwner Redis error', { ownerIp, error: err.message });
+    return 0;
   }
 }
 
@@ -122,6 +171,10 @@ async function update(id, patch) {
   const next = {
     ...existing,
     ...patch,
+    // A patched secret arrives as plaintext (validated by webhookPatchBodySchema);
+    // re-encrypt it the same way create() does. Omit patch.secret entirely and
+    // this correctly falls through to the existing (already-encrypted) value.
+    ...(patch.secret ? { secret: encryptSecret(patch.secret) } : {}),
     id: existing.id,
     created_at: existing.created_at,
     updated_at: new Date().toISOString(),
@@ -136,10 +189,14 @@ async function remove(id) {
   if (!existing) return null;
   await cache.del(key(id));
   await redis.zrem(IDS_KEY, id);
+  if (existing.owner_ip) {
+    await redis.zrem(`webhooks:owner:${existing.owner_ip}`, id);
+  }
   return normalize(existing);
 }
 
 module.exports = {
+  countByOwner,
   create,
   findById,
   list,

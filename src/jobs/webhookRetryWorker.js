@@ -12,16 +12,11 @@ const health = {
   startedAt: null,
   lastSuccessAt: null,
   lastError: null,
-  // #360 — Resettable retry metrics. These are zeroed on each restart so
-  // average latency calculations remain meaningful over the process lifetime
-  // rather than accumulating across restarts.
+  // Queue-depth telemetry (issue #235): operators need to see retries
+  // backing up, not just that the worker is alive.
+  lastBatchSize: null,
   totalRetriesProcessed: 0,
   totalRetryLatencyMs: 0,
-  get averageRetryLatencyMs() {
-    return health.totalRetriesProcessed > 0
-      ? Math.round(health.totalRetryLatencyMs / health.totalRetriesProcessed)
-      : 0;
-  },
 };
 
 async function tick() {
@@ -29,6 +24,7 @@ async function tick() {
   running = true;
   try {
     const ids = await deliveryRepo.popDueRetries(Date.now(), config.webhooks.retryBatchSize);
+    health.lastBatchSize = ids.length;
     if (ids.length === 0) {
       // An empty poll is still a successful tick
       health.lastSuccessAt = Date.now();
@@ -37,7 +33,7 @@ async function tick() {
     }
     logger.info('Processing webhook retries', { count: ids.length });
     for (const id of ids) {
-      const startMs = Date.now();
+      const attemptStartedAt = Date.now();
       try {
         await dispatcher.attempt(id);
         health.totalRetriesProcessed++;
@@ -47,6 +43,10 @@ async function tick() {
         health.totalRetryLatencyMs += Date.now() - startMs;
         logger.error('Retry attempt failed', { delivery_id: id, error: err.message });
       }
+      // Latency is recorded for failed attempts too — a retry that times
+      // out is exactly the case where the average matters most.
+      health.totalRetriesProcessed += 1;
+      health.totalRetryLatencyMs += Date.now() - attemptStartedAt;
     }
     health.lastSuccessAt = Date.now();
     health.lastError = null;
@@ -81,11 +81,18 @@ function stop() {
  *
  * Grace period: allow 2× the poll interval before flagging as stalled.
  *
- * @returns {{ healthy: boolean, lastSuccessAt: number|null, lastError: string|null, stalled: boolean }}
+ * @returns {{ healthy: boolean, lastSuccessAt: number|null, lastError: string|null, stalled: boolean, lastBatchSize: number|null, avgDeliveryLatencyMs: number|null }}
  */
 function getHealth() {
+  const throughput = {
+    lastBatchSize: health.lastBatchSize,
+    avgDeliveryLatencyMs: health.totalRetriesProcessed > 0
+      ? Math.round((health.totalRetryLatencyMs / health.totalRetriesProcessed) * 10) / 10
+      : null,
+  };
+
   if (!health.startedAt) {
-    return { healthy: false, lastSuccessAt: null, lastError: null, stalled: false };
+    return { healthy: false, lastSuccessAt: null, lastError: null, stalled: false, ...throughput };
   }
 
   const intervalMs = (config.webhooks.retryPollMs || 5000);
@@ -94,7 +101,7 @@ function getHealth() {
   const inGrace = age < gracePeriodMs;
 
   if (health.lastSuccessAt === null) {
-    return { healthy: inGrace, lastSuccessAt: null, lastError: health.lastError, stalled: !inGrace };
+    return { healthy: inGrace, lastSuccessAt: null, lastError: health.lastError, stalled: !inGrace, ...throughput };
   }
 
   const timeSinceSuccess = Date.now() - health.lastSuccessAt;
@@ -104,7 +111,27 @@ function getHealth() {
     lastSuccessAt: health.lastSuccessAt,
     lastError: health.lastError,
     stalled,
+    ...throughput,
   };
 }
 
-module.exports = { start, stop, tick, getHealth };
+/**
+ * Queue-depth snapshot for the /health endpoint (issue #235).
+ *
+ * Separate from `getHealth()` because it needs a Redis round trip, and
+ * `getHealth()` is called synchronously from the leader-aware wrapper.
+ * Returns `pendingRetries: null` when Redis is unreachable so the health
+ * endpoint can distinguish "no retries queued" from "cannot tell".
+ */
+async function getQueueStats() {
+  return {
+    pendingRetries: await deliveryRepo.countPendingRetries(),
+    lastBatchSize: health.lastBatchSize,
+    avgDeliveryLatencyMs: health.totalRetriesProcessed > 0
+      ? Math.round((health.totalRetryLatencyMs / health.totalRetriesProcessed) * 10) / 10
+      : null,
+    totalRetriesProcessed: health.totalRetriesProcessed,
+  };
+}
+
+module.exports = { start, stop, tick, getHealth, getQueueStats };

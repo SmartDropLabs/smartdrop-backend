@@ -171,6 +171,33 @@ describe('requireApiKey middleware', () => {
     const stored = await apiKeys.getKey(created.key.id);
     expect(stored.last_used_at).toEqual(expect.any(String));
   });
+
+  test('rejects API key with 403 when required scope is missing', async () => {
+    const created = await apiKeys.createKey({ label: 'alerts worker', scopes: ['alerts'] });
+    const app = buildProtectedApp({ scopes: ['webhooks'] });
+
+    const res = await request(app)
+      .get('/protected')
+      .set('Authorization', `Bearer ${created.api_key}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatchObject({
+      code: 'FORBIDDEN',
+      message: 'Insufficient API key scope',
+    });
+  });
+
+  test('allows API key when required scope matches', async () => {
+    const created = await apiKeys.createKey({ label: 'webhooks worker', scopes: ['webhooks'] });
+    const app = buildProtectedApp({ scopes: ['webhooks'] });
+
+    const res = await request(app)
+      .get('/protected')
+      .set('Authorization', `Bearer ${created.api_key}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+  });
 });
 
 describe('API key management routes', () => {

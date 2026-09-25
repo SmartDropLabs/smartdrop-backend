@@ -272,6 +272,19 @@ describe('fetchFromAllSources', () => {
     ]);
   });
 
+  test('fetchFreshPrice aggregates successful source prices by median', async () => {
+    mockCacheGet.mockResolvedValue(null);
+    mockStellarFetch.mockResolvedValueOnce(100);
+    mockCoingeckoFetch.mockResolvedValueOnce(10);
+    mockCoinmarketcapFetch.mockResolvedValueOnce(11);
+
+    const result = await oracle.fetchFreshPrice('XLM', null);
+
+    expect(result.price_usd).toBe(11);
+    expect(result.quorum_met).toBe(true);
+    expect(result.sources_attempted).toEqual(['stellar_dex', 'coingecko', 'coinmarketcap']);
+  });
+
   test('swallows a throwing source and returns the healthy ones', async () => {
     mockStellarFetch.mockResolvedValueOnce(0.1);
     mockCoingeckoFetch.mockRejectedValueOnce(new Error('timeout'));

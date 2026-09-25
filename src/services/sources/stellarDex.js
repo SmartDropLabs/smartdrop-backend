@@ -1,12 +1,15 @@
-const { Asset, Horizon } = require('stellar-sdk');
+const { Asset, Horizon } = require('@stellar/stellar-sdk');
 const config = require('../../config');
 const logger = require('../../logger');
+const { addRequestIdHeaderInterceptor } = require('../../middleware/requestId');
 
 let server = null;
 
 function getServer() {
   if (!server) {
-    server = new Horizon.Server(config.stellar.horizonUrl);
+    server = addRequestIdHeaderInterceptor(
+      new Horizon.Server(config.stellar.horizonUrl)
+    );
   }
   return server;
 }

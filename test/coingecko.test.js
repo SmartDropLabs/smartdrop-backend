@@ -56,6 +56,23 @@ describe('CoinGecko source', () => {
       timeout: 10000,
     });
     expect(mockGet).toHaveBeenCalledWith('/simple/price', {
+      headers: {},
+      params: { ids: 'stellar', vs_currencies: 'usd' },
+    });
+  });
+
+  test('propagates the active request ID', async () => {
+    const coingecko = loadSource();
+    const { requestContext } = require('../src/middleware/requestId');
+    mockGet.mockResolvedValueOnce(priceResponse('stellar', 0.11));
+
+    await requestContext.run(
+      { requestId: 'req_coingecko_123' },
+      () => coingecko.fetchPrice('XLM')
+    );
+
+    expect(mockGet).toHaveBeenCalledWith('/simple/price', {
+      headers: { 'X-Request-ID': 'req_coingecko_123' },
       params: { ids: 'stellar', vs_currencies: 'usd' },
     });
   });
@@ -158,6 +175,7 @@ describe('CoinGecko source', () => {
         source: 'coingecko',
         open: false,
         openUntil: null,
+        last_success_at: '2026-01-01T00:15:00.001Z',
       });
     });
 

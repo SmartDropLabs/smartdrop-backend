@@ -15,7 +15,7 @@ const breakerOptions = config.price.circuitBreaker;
 // upstream sources (CoinGecko, CoinMarketCap, Stellar DEX) on a cache miss.
 const inFlight = new Map();
 
-const SOURCES = [
+const ALL_SOURCES = [
   {
     name: 'stellar_dex',
     fetch: stellarDex.fetchPrice,
@@ -37,6 +37,18 @@ const SOURCES = [
     getCircuitState: coinmarketcap.getCircuitState,
   },
 ];
+
+function sortByPriority(sources, priority) {
+  if (!priority || priority.length === 0) return sources;
+  const order = new Map(priority.map((name, i) => [name, i]));
+  return [...sources].sort((a, b) => {
+    const ia = order.has(a.name) ? order.get(a.name) : Infinity;
+    const ib = order.has(b.name) ? order.get(b.name) : Infinity;
+    return ia - ib;
+  });
+}
+
+const SOURCES = sortByPriority(ALL_SOURCES, config.price.sourcePriority);
 
 /**
  * Circuit-breaker state for every source that has one (currently coingecko
@@ -152,7 +164,36 @@ function resetCircuitBreakers() {
   }
 }
 
+const QUERIED_ASSETS_KEY = 'queried_assets';
+
+async function recordQueriedAsset(assetCode, issuer = null) {
+  try {
+    if (!cache.isConnected()) return;
+    const redis = cache.getClient();
+    const key = issuer ? `${assetCode}:${issuer}` : assetCode;
+    await redis.sadd(QUERIED_ASSETS_KEY, key);
+  } catch (err) {
+    logger.warn('Failed to record queried asset', { assetCode, issuer, error: err.message });
+  }
+}
+
+async function getQueriedAssets() {
+  try {
+    if (!cache.isConnected()) return [];
+    const redis = cache.getClient();
+    const members = await redis.smembers(QUERIED_ASSETS_KEY);
+    return (members || []).map((entry) => {
+      const [code, issuer] = entry.split(':');
+      return { code, issuer: issuer || null };
+    });
+  } catch (err) {
+    logger.warn('Failed to fetch queried assets', { error: err.message });
+    return [];
+  }
+}
+
 async function getPrice(assetCode, issuer = null) {
+  recordQueriedAsset(assetCode, issuer);
   const cacheKey = buildCacheKey(assetCode, issuer);
   let redisUnavailable = false;
 
@@ -304,8 +345,17 @@ async function fetchFreshPrice(assetCode, issuer = null, redisUnavailable = fals
     return existing;
   }
 
+  // Wrap the promise to handle rejections cleanly: on rejection, remove from
+  // inFlight and re-throw so concurrent callers see the same error (#286).
   const promise = doFetchFreshPrice(assetCode, issuer, redisUnavailable)
-    .finally(() => inFlight.delete(key));
+    .catch((err) => {
+      inFlight.delete(key);
+      throw err;
+    })
+    .then((result) => {
+      inFlight.delete(key);
+      return result;
+    });
 
   inFlight.set(key, promise);
   return promise;
@@ -323,7 +373,19 @@ async function refreshAllCachedPrices() {
 
   try {
     do {
-      const result = await redis.scan(cursor, 'MATCH', `${CACHE_PREFIX}*`, 'COUNT', 100);
+      // Exclude the history namespace (price:history:*) at the Redis level
+      // via bracket-class negation on the first char after the prefix — the
+      // history sub-key always starts with 'h', a live asset code never
+      // does (buildCacheKey never inserts a literal 'history' segment).
+      // Filtering client-side after a broad `price:*` MATCH still pulls
+      // every history key's bytes over the wire on every refresh cycle.
+      const result = await redis.scan(
+        cursor,
+        'MATCH',
+        `${CACHE_PREFIX}[^h]*`,
+        'COUNT',
+        100
+      );
       cursor = result[0];
       keys.push(...result[1]);
     } while (cursor !== '0');
@@ -335,7 +397,6 @@ async function refreshAllCachedPrices() {
   const freshPrices = {};
 
   const refreshPromises = keys
-    .filter((key) => !key.includes(':history:'))
     .map(async (key) => {
       const suffix = key.replace(CACHE_PREFIX, '');
       const parts = suffix.split(':');
@@ -365,6 +426,8 @@ module.exports = {
   getCircuitStates,
   resetCircuitBreakers,
   refreshAllCachedPrices,
+  getQueriedAssets,
+  recordQueriedAsset,
   // Internal helpers exported for unit testing.
   median,
   detectAnomaly,

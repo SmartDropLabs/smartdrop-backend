@@ -114,3 +114,47 @@ describe('cancelRetry / scheduleRetry / listByWebhook (unchanged by the atomic f
     expect(list.map((d) => d.id).sort()).toEqual([a.id, b.id].sort());
   });
 });
+
+describe('countPendingRetries (issue #235)', () => {
+  test('counts the whole retry queue, not only entries already due', async () => {
+    await deliveryRepo.scheduleRetry('dlv_due', Date.now() - 1000);
+    await deliveryRepo.scheduleRetry('dlv_later', Date.now() + 60_000);
+
+    await expect(deliveryRepo.countPendingRetries()).resolves.toBe(2);
+  });
+
+  test('reports zero for an empty queue', async () => {
+    await expect(deliveryRepo.countPendingRetries()).resolves.toBe(0);
+  });
+
+  test('returns null rather than zero when Redis cannot be read', async () => {
+    redis.zcard.mockRejectedValueOnce(new Error('connection refused'));
+
+    await expect(deliveryRepo.countPendingRetries()).resolves.toBeNull();
+  });
+});
+
+describe('request_id propagation onto delivery records (issue #250)', () => {
+  test('persists the originating request id when one is supplied', async () => {
+    const delivery = await deliveryRepo.create({
+      webhook_id: 'wh_1',
+      event_id: 'evt_1',
+      event_type: 'pool.assets_locked',
+      request_id: 'req_abc123',
+    });
+
+    expect(delivery.request_id).toBe('req_abc123');
+    await expect(deliveryRepo.findById(delivery.id))
+      .resolves.toEqual(expect.objectContaining({ request_id: 'req_abc123' }));
+  });
+
+  test('stores null for deliveries originated by background jobs', async () => {
+    const delivery = await deliveryRepo.create({
+      webhook_id: 'wh_1',
+      event_id: 'evt_2',
+      event_type: 'pool.assets_locked',
+    });
+
+    expect(delivery.request_id).toBeNull();
+  });
+});

@@ -16,6 +16,8 @@
  *     last_attempt_at  timestamptz,
  *     next_retry_at    timestamptz,
  *     response_status  int,
+ *     trace_id         text not null,
+ *     request_id       text,                 -- originating HTTP request (issue #250)
  *     created_at       timestamptz not null default now()
  *   )
  *
@@ -72,7 +74,11 @@ function generateId() {
   return `dlv_${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`;
 }
 
-async function create({ webhook_id, event_id, event_type }) {
+function generateTraceId() {
+  return `trace_${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`;
+}
+
+async function create({ webhook_id, event_id, event_type, trace_id, request_id }) {
   const id = generateId();
   const now = new Date().toISOString();
   const record = {
@@ -86,6 +92,11 @@ async function create({ webhook_id, event_id, event_type }) {
     last_attempt_at: null,
     next_retry_at: null,
     response_status: null,
+    trace_id: trace_id || generateTraceId(),
+    // Correlates this delivery back to the HTTP request that triggered it
+    // (issue #250). Null for deliveries originated by background jobs,
+    // which have no inbound request.
+    request_id: request_id || null,
     created_at: now,
   };
 
@@ -114,12 +125,30 @@ async function update(id, patch) {
   return next;
 }
 
-async function listByWebhook(webhookId, limit = 50) {
+function normalizeListOptions(limitOrOptions, statusArg) {
+  if (typeof limitOrOptions === 'number') {
+    return { limit: limitOrOptions, status: statusArg || null };
+  }
+
+  if (limitOrOptions && typeof limitOrOptions === 'object') {
+    return {
+      limit: limitOrOptions.limit ?? 50,
+      status: limitOrOptions.status || null,
+    };
+  }
+
+  return { limit: 50, status: statusArg || null };
+}
+
+async function listByWebhook(webhookId, limitOrOptions = 50, statusArg) {
   try {
+    const { limit, status } = normalizeListOptions(limitOrOptions, statusArg);
     const redis = cache.getClient();
-    const ids = await redis.zrevrange(indexKey(webhookId), 0, Math.max(0, limit - 1));
+    const ids = await redis.zrevrange(indexKey(webhookId), 0, RECENT_DELIVERIES_LIMIT - 1);
     const records = await Promise.all(ids.map((id) => cache.get(key(id))));
-    return records.filter(Boolean);
+    const deliveries = records.filter(Boolean);
+    const filtered = status ? deliveries.filter((delivery) => delivery.status === status) : deliveries;
+    return filtered.slice(0, limit);
   } catch (err) {
     logger.error('deliveryRepository.listByWebhook Redis error', { webhookId, error: err.message });
     return [];
@@ -137,6 +166,22 @@ async function popDueRetries(nowMs, max = 25) {
   return redis.popDueRetriesAtomic(RETRY_QUEUE_KEY, nowMs, max);
 }
 
+/**
+ * Number of deliveries currently sitting in the retry queue (issue #235).
+ *
+ * Counts the whole sorted set, not just entries already due, so operators
+ * see retries backing up before they come due rather than after.
+ */
+async function countPendingRetries() {
+  try {
+    const redis = cache.getClient();
+    return await redis.zcard(RETRY_QUEUE_KEY);
+  } catch (err) {
+    logger.error('deliveryRepository.countPendingRetries Redis error', { error: err.message });
+    return null;
+  }
+}
+
 async function cancelRetry(deliveryId) {
   const redis = cache.getClient();
   await redis.zrem(RETRY_QUEUE_KEY, deliveryId);
@@ -149,5 +194,6 @@ module.exports = {
   listByWebhook,
   scheduleRetry,
   popDueRetries,
+  countPendingRetries,
   cancelRetry,
 };

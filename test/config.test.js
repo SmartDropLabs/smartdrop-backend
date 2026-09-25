@@ -73,6 +73,7 @@ describe('configuration validation', () => {
         anomalyThresholdPercent: 20,
         minSources: 2,
         anomalyAction: 'warn',
+        sourcePriority: [],
         refreshMaxCycleMs: 90000,
         circuitBreaker: {
           failureThreshold: 3,

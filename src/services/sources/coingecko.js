@@ -2,6 +2,7 @@ const axios = require('axios');
 const config = require('../../config');
 const logger = require('../../logger');
 const { createCircuitBreaker } = require('./circuitBreaker');
+const { getRequestIdHeaders } = require('../../middleware/requestId');
 
 const STELLAR_COINGECKO_MAP = {
   XLM: 'stellar',
@@ -14,19 +15,23 @@ const circuit = createCircuitBreaker({
 });
 
 let apiClient = null;
+let lastApiKey = undefined;
 
 function getClient() {
-  if (!apiClient) {
-    const headers = { Accept: 'application/json' };
-    if (config.coingecko.apiKey) {
-      headers['x-cg-demo-api-key'] = config.coingecko.apiKey;
-    }
-    apiClient = axios.create({
-      baseURL: config.coingecko.baseUrl,
-      headers,
-      timeout: 10000,
-    });
+  const currentKey = config.coingecko.apiKey;
+  if (apiClient && currentKey === lastApiKey) {
+    return apiClient;
   }
+  const headers = { Accept: 'application/json' };
+  if (currentKey) {
+    headers['x-cg-demo-api-key'] = currentKey;
+  }
+  apiClient = axios.create({
+    baseURL: config.coingecko.baseUrl,
+    headers,
+    timeout: 10000,
+  });
+  lastApiKey = currentKey;
   return apiClient;
 }
 
@@ -56,6 +61,7 @@ async function fetchPrice(assetCode) {
   try {
     const client = getClient();
     const response = await client.get('/simple/price', {
+      headers: getRequestIdHeaders(),
       params: {
         ids: coinId,
         vs_currencies: 'usd',

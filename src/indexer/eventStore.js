@@ -83,8 +83,43 @@ async function upsertAirdrop(event) {
     });
   }
 
-  await cache.set(airdropKey(airdropId), next);
-  await cache.getClient().sadd(AIRDROP_IDS_KEY, airdropId);
+  // Issue #354: a single MULTI/EXEC transaction instead of two separate
+  // round trips — a crash between them used to leave an airdrop record
+  // with no entry in AIRDROP_IDS_KEY (invisible to anything that scans the
+  // id set) or vice versa (an id with no backing record).
+  await cache.getClient().multi()
+    .set(airdropKey(airdropId), JSON.stringify(next))
+    .sadd(AIRDROP_IDS_KEY, airdropId)
+    .exec();
+}
+
+// Issue #353: recipients used to be stored as one JSON-list string per
+// airdrop, so every single-recipient upsert had to load the ENTIRE list
+// into memory (O(n) per event) just to update one entry. Each recipient is
+// now its own field in a Redis hash keyed by airdrop id, so an upsert is
+// one HGET + one HSET (O(1)), regardless of how many recipients the
+// airdrop has.
+//
+// A key that predates this fix still holds the old JSON-list string, and
+// HGET/HSET on a String-typed key raises WRONGTYPE — this migrates it,
+// once, lazily on first access, rather than requiring a manual operator
+// step before deploying.
+async function migrateRecipientsListToHashIfNeeded(key) {
+  const redis = cache.getClient();
+  const type = await redis.type(key);
+  if (type !== 'string') return;
+
+  const list = await getJsonList(key);
+  await redis.del(key);
+  if (list.length === 0) return;
+
+  const pipeline = redis.pipeline();
+  for (const entry of list) {
+    if (entry && entry.recipient) {
+      pipeline.hset(key, entry.recipient, JSON.stringify(entry));
+    }
+  }
+  await pipeline.exec();
 }
 
 async function upsertRecipient(event) {
@@ -142,8 +177,18 @@ async function appendClaim(event) {
 }
 
 async function saveEvent(event) {
-  await cache.set(eventKey(event.id), event);
-  await cache.getClient().sadd(EVENT_IDS_KEY, event.id);
+  // Issue #352: the raw event record and its id-set membership are written
+  // in one MULTI/EXEC transaction — a crash between them used to leave an
+  // event id in EVENT_IDS_KEY with no backing record, or a record with no
+  // id-set entry (invisible to getEventCount()). upsertAirdrop/
+  // upsertRecipient/appendClaim below each read-then-write their own
+  // separate keys (their prior values determine what gets written), so
+  // they can't join this same transaction — see #354 and #353 for their
+  // own atomicity/scalability fixes.
+  await cache.getClient().multi()
+    .set(eventKey(event.id), JSON.stringify(event))
+    .sadd(EVENT_IDS_KEY, event.id)
+    .exec();
   await upsertAirdrop(event);
   await upsertRecipient(event);
   await appendClaim(event);

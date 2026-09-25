@@ -92,6 +92,26 @@ function normalize(record) {
 }
 
 async function create({ url, events, secret, description, filters, owner_ip }) {
+  // Validate URL before storing (#410) — repository-level guard so callers
+  // that bypass the route layer still get a well-formed, non-internal URL.
+  if (!url || typeof url !== 'string') {
+    throw new Error('webhookRepository.create: url is required');
+  }
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error('webhookRepository.create: url must be a valid URL');
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    throw new Error('webhookRepository.create: url must use http or https protocol');
+  }
+  // Block private/internal network targets to prevent SSRF.
+  const { isPrivateTarget } = require('../validation/schemas');
+  if (isPrivateTarget(parsed.hostname)) {
+    throw new Error('webhookRepository.create: url must not target a private or internal network address');
+  }
+
   const id = generateId();
   const now = new Date().toISOString();
   const record = {

@@ -167,7 +167,12 @@ async function appendClaim(event) {
 
   const key = claimsKey(recipient);
   const claims = await getJsonList(key);
-  if (!claims.some((claim) => claim.event_id === event.id)) {
+  // Issue #407: use a composite key of event_id + airdrop_id for dedup
+  // instead of event_id alone — event IDs are not globally unique across
+  // different airdrops, so two claims from different airdrops could share
+  // the same event_id and one would be silently dropped.
+  const dedupKey = `${event.id}:${airdropId}`;
+  if (!claims.some((claim) => `${claim.event_id}:${claim.airdrop_id}` === dedupKey)) {
     claims.push({
       event_id: event.id,
       airdrop_id: airdropId,

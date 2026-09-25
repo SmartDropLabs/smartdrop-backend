@@ -319,6 +319,7 @@ module.exports = {
   alertCreateBodySchema,
   assetCodeSchema,
   httpUrlSchema,
+  isPrivateTarget,
   keyCreateBodySchema,
   keyRotateBodySchema,
   optionalIssuerSchema,

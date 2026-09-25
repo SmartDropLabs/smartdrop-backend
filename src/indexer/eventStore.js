@@ -52,6 +52,15 @@ async function upsertAirdrop(event) {
   const airdropId = getAirdropId(event);
   if (!airdropId) return;
 
+  // Validate required event data before writing (#406)
+  if (event.event_name === "airdrop_created") {
+    if (!event.data.creator || !event.data.token ||
+        event.data.total_amount === null || event.data.total_amount === undefined ||
+        event.data.expiry_ledger === null || event.data.expiry_ledger === undefined) {
+      return;
+    }
+  }
+
   const existing = (await cache.get(airdropKey(airdropId))) || {
     airdrop_id: airdropId,
   };

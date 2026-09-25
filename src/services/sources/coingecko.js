@@ -14,19 +14,23 @@ const circuit = createCircuitBreaker({
 });
 
 let apiClient = null;
+let lastApiKey = undefined;
 
 function getClient() {
-  if (!apiClient) {
-    const headers = { Accept: 'application/json' };
-    if (config.coingecko.apiKey) {
-      headers['x-cg-demo-api-key'] = config.coingecko.apiKey;
-    }
-    apiClient = axios.create({
-      baseURL: config.coingecko.baseUrl,
-      headers,
-      timeout: 10000,
-    });
+  const currentKey = config.coingecko.apiKey;
+  if (apiClient && currentKey === lastApiKey) {
+    return apiClient;
   }
+  const headers = { Accept: 'application/json' };
+  if (currentKey) {
+    headers['x-cg-demo-api-key'] = currentKey;
+  }
+  apiClient = axios.create({
+    baseURL: config.coingecko.baseUrl,
+    headers,
+    timeout: 10000,
+  });
+  lastApiKey = currentKey;
   return apiClient;
 }
 

@@ -50,10 +50,20 @@ const PRIVATE_IP_RE = new RegExp(
     "|10\\." + // RFC-1918 /8
     "|172\\.(1[6-9]|2\\d|3[01])\\." + // RFC-1918 /12
     "|192\\.168\\." + // RFC-1918 /16
-    "|169\\.254\\." + // link-local
+    "|169\\.254\\." + // link-local (IPv4)
     "|0\\.0\\.0\\.0" + // unspecified
     "|::1" + // IPv6 loopback
-    "|fc[0-9a-f]{2}:" + // IPv6 ULA
+    "|fc[0-9a-f]{2}:" + // IPv6 ULA (fc00::/7)
+    "|fd[0-9a-f]{2}:" + // IPv6 ULA (fd00::/8)
+    "|fe[89ab][0-9a-f]:" + // IPv6 link-local (fe80::/10)
+    "|::ffff:0:" + // IPv4-mapped IPv6
+    "|::ffff:127\\." + // IPv4 loopback as IPv6
+    "|::ffff:10\\." + // RFC-1918 as IPv6
+    "|::ffff:172\\.(1[6-9]|2\\d|3[01])\\." + // RFC-1918 as IPv6
+    "|::ffff:192\\.168\\." + // RFC-1918 as IPv6
+    "|::ffff:169\\.254\\." + // link-local as IPv6
+    "|0:0:0:0:0:ffff:" + // IPv4-mapped (alternate notation)
+    "|0:0:0:0:0:0:0:0" + // unspecified (all zeros)
     ")",
 );
 

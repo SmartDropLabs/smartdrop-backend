@@ -183,8 +183,16 @@ async function countPendingRetries() {
 }
 
 async function cancelRetry(deliveryId) {
+  // #371 — verify the delivery exists before attempting removal so callers
+  // get a clear signal when the ID is invalid or the delivery was never
+  // scheduled for retry.
+  const delivery = await findById(deliveryId);
+  if (!delivery) {
+    return { removed: false, reason: 'delivery not found' };
+  }
   const redis = cache.getClient();
-  await redis.zrem(RETRY_QUEUE_KEY, deliveryId);
+  const removed = await redis.zrem(RETRY_QUEUE_KEY, deliveryId);
+  return { removed: removed === 1, reason: removed === 1 ? 'ok' : 'not in retry queue' };
 }
 
 module.exports = {

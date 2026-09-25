@@ -80,6 +80,17 @@ function createLeaderElection(jobName, opts = {}) {
   let renewTimer = null;
   let acquiredAt = null;
   let lastRenewedAt = null;
+  // Issue #375: guards against a renew/acquire cycle overlapping with
+  // another still in flight — the startup case (startRenewLoop's initial
+  // tryAcquire() isn't awaited before setInterval starts) is one way to
+  // hit this, but a slow Redis round-trip that outlives renewIntervalMs
+  // would too. Concurrent calls to the same instance's own SET NX are
+  // otherwise a real footgun: the second one fails (the key already
+  // exists) and — if it resolves after the first one already set
+  // `leader = true` — reads that as "someone else has the lease" and
+  // incorrectly flips `leader` back to false despite this instance still
+  // holding a perfectly valid lease.
+  let cycleInFlight = false;
 
   /**
    * Attempt to acquire the leader lease.
@@ -184,41 +195,48 @@ function createLeaderElection(jobName, opts = {}) {
   }
 
   /**
+   * Run one acquire-or-renew cycle, skipping it entirely if a previous
+   * cycle is still in flight (issue #375) rather than letting two
+   * overlap.
+   */
+  async function runElectionCycle() {
+    if (cycleInFlight) return;
+    cycleInFlight = true;
+    const action = leader ? 'renew' : 'acquire';
+    try {
+      if (leader) {
+        await renew();
+      } else {
+        await tryAcquire();
+      }
+    } catch (err) {
+      logger.error('Leader election cycle failed', {
+        job: jobName,
+        instanceId,
+        action,
+        error: err.message,
+      });
+    } finally {
+      cycleInFlight = false;
+    }
+  }
+
+  /**
    * Start the periodic renewal loop.
    */
   function startRenewLoop() {
     if (renewTimer) return;
     stopRenewLoop();
 
-    // Try to acquire immediately on start
-    tryAcquire().catch((err) => {
-      logger.error('Leader election initial acquire failed', {
-        job: jobName,
-        instanceId,
-        error: err.message,
-      });
-    });
+    // Try to acquire immediately on start. Deliberately not awaited —
+    // startRenewLoop() itself stays synchronous/fire-and-forget for
+    // callers — but runElectionCycle()'s in-flight guard means the
+    // interval below can't start a second, overlapping cycle before this
+    // one settles.
+    runElectionCycle();
 
     renewTimer = setInterval(() => {
-      if (leader) {
-        // We hold the lease — try to renew it
-        renew().catch((err) => {
-          logger.error('Leader election renewal loop error', {
-            job: jobName,
-            instanceId,
-            error: err.message,
-          });
-        });
-      } else {
-        // We don't hold the lease — try to acquire
-        tryAcquire().catch((err) => {
-          logger.error('Leader election acquire retry failed', {
-            job: jobName,
-            instanceId,
-            error: err.message,
-          });
-        });
-      }
+      runElectionCycle();
     }, renewIntervalMs);
 
     if (typeof renewTimer.unref === 'function') {

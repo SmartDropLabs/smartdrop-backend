@@ -68,22 +68,42 @@ async function warmCache(
   let timedOut = false;
   let timeoutId;
 
-  const warming = runWarmCache(allAssets, oracle, abortController.signal).then((summary) => {
-    if (!timedOut) {
-      log.info('Cache warm complete', summary);
+  // Wrap each fetch to track successes incrementally, so the timeout
+  // handler can snapshot the real count instead of hardcoding 0 (#413).
+  let succeededSoFar = 0;
+  const trackedResults = allAssets.map(({ code, issuer }) => {
+    if (abortController.signal.aborted) {
+      return Promise.reject(new Error('Warming cancelled'));
     }
-    return summary;
+    return Promise.resolve()
+      .then(() => oracle.fetchFreshPrice(code, issuer || null))
+      .then((value) => {
+        if (isWarmSuccess({ status: 'fulfilled', value })) {
+          succeededSoFar++;
+        }
+        return { status: 'fulfilled', value };
+      })
+      .catch((reason) => ({ status: 'rejected', reason }));
   });
+
+  const warming = Promise.all(trackedResults).then((results) => ({
+    total: allAssets.length,
+    succeeded: results.filter(isWarmSuccess).length,
+    failed: allAssets.length - results.filter(isWarmSuccess).length,
+    timedOut: false,
+    durationMs: 0,
+  }));
 
   const timeout = new Promise((resolve) => {
     timeoutId = setTimeout(() => {
       timedOut = true;
       // Signal abort to cancel in-flight fetches (#402)
       abortController.abort();
+      const failed = allAssets.length - succeededSoFar;
       const summary = {
         total: allAssets.length,
-        succeeded: 0,
-        failed: allAssets.length,
+        succeeded: succeededSoFar,
+        failed,
         timedOut: true,
         durationMs: timeoutMs,
       };

@@ -58,4 +58,21 @@ function attach(httpServer) {
   return wss;
 }
 
-module.exports = { attach };
+/**
+ * Gracefully close all WebSocket connections and stop the heartbeat.
+ * Call this during process shutdown to avoid abrupt connection drops.
+ */
+async function shutdown(wss, drainTimeoutMs = 5000) {
+  if (!wss) return;
+
+  await subscriptionManager.drain(drainTimeoutMs);
+
+  await new Promise((resolve) => {
+    wss.close(() => {
+      logger.info('WebSocket server closed');
+      resolve();
+    });
+  });
+}
+
+module.exports = { attach, shutdown };

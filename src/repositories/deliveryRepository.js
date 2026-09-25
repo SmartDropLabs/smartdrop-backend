@@ -38,6 +38,7 @@
 const crypto = require('crypto');
 const cache = require('../services/cache');
 const logger = require('../logger');
+const webhookRepository = require('./webhookRepository');
 
 const RETRY_QUEUE_KEY = 'webhooks:retries';
 const RECENT_DELIVERIES_LIMIT = 100;
@@ -79,6 +80,15 @@ function generateTraceId() {
 }
 
 async function create({ webhook_id, event_id, event_type, trace_id, request_id }) {
+  // Validate webhook exists before creating delivery to prevent orphaned records (#411).
+  if (!webhook_id) {
+    throw new Error('deliveryRepository.create: webhook_id is required');
+  }
+  const webhook = await webhookRepository.findById(webhook_id);
+  if (!webhook) {
+    throw new Error(`deliveryRepository.create: webhook '${webhook_id}' does not exist`);
+  }
+
   const id = generateId();
   const now = new Date().toISOString();
   const record = {

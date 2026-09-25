@@ -210,10 +210,18 @@ async function remove(id) {
   const existing = await get(id);
   if (!existing) return null;
 
-  await cache.del(airdropKey(id));
-  await cache.del(recipientsKey(id));
-  await cache.del(recipientAddressSetKey(id));
-  await redis.zrem(IDS_KEY, id);
+  // One MULTI/EXEC transaction instead of four separate round trips (issue
+  // #305) — a crash partway through used to leave a partially-deleted
+  // airdrop: e.g. the main record and recipients list gone but the id still
+  // in IDS_KEY (a phantom entry list() would still return and try to
+  // re-read as null), or the reverse (a dangling recipients/address-set key
+  // with no reachable parent record to ever clean it up again).
+  await redis.multi()
+    .del(airdropKey(id))
+    .del(recipientsKey(id))
+    .del(recipientAddressSetKey(id))
+    .zrem(IDS_KEY, id)
+    .exec();
   return existing;
 }
 

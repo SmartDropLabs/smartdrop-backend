@@ -100,6 +100,26 @@ describe('WebSocket price stream', () => {
     setTimeout(() => httpServer.close(done), 100);
   }, 10000);
 
+  test('logs the forwarded client IP when a proxy sits in front', async () => {
+    const logger = require('../src/logger');
+    logger.info.mockClear();
+
+    const ws = await new Promise((resolve, reject) => {
+      const client = new WebSocket(`ws://localhost:${port}/ws`, {
+        headers: {
+          Authorization: 'Bearer valid-key',
+          'X-Forwarded-For': '203.0.113.9, 10.0.0.1',
+        },
+      });
+      client.once('open', () => resolve(client));
+      client.once('error', reject);
+    });
+
+    // The bug: the raw socket address is the proxy's, so this used to log ::ffff:127.0.0.1.
+    expect(logger.info).toHaveBeenCalledWith('Incoming WS connection', { ip: '203.0.113.9' });
+    ws.close();
+  });
+
   test('rejects clients without an API key during the handshake', async () => {
     await expect(connectExpectingRejection(port)).resolves.toBe(401);
     expect(subscriptionManager.connectionCount).toBe(0);

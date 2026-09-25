@@ -238,7 +238,7 @@ if (process.env.NODE_ENV === 'production') {
   });
 }
 
-module.exports.reload = reload;
+module.exports = {
   nodeEnv: env.NODE_ENV,
   port: env.PORT,
   databaseUrl: env.DATABASE_URL,
@@ -387,3 +387,6 @@ module.exports.reload = reload;
     maxConnectionsPerIp: parseInt(process.env.WS_MAX_CONNECTIONS_PER_IP, 10) || 5,
   },
 };
+
+// Kept for the SIGHUP hot-reload path (and for tests that call config.reload()).
+module.exports.reload = reload;

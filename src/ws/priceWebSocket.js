@@ -4,6 +4,7 @@ const { WebSocketServer } = require('ws');
 const logger = require('../logger');
 const apiKeys = require('../services/apiKeys');
 const subscriptionManager = require('./PriceSubscriptionManager');
+const { getClientIp } = require('../utils/clientIp');
 
 function extractBearerToken(header) {
   if (!header || typeof header !== 'string') return null;
@@ -44,7 +45,7 @@ function attach(httpServer) {
   });
 
   wss.on('connection', (ws, req) => {
-    logger.info('Incoming WS connection', { ip: req.socket.remoteAddress });
+    logger.info('Incoming WS connection', { ip: getClientIp(req) });
     subscriptionManager.add(ws, req);
   });
 

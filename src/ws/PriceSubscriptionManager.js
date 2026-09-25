@@ -1,5 +1,7 @@
 'use strict';
 
+const { getClientIp } = require('../utils/clientIp');
+
 const config = require('../config');
 const logger = require('../logger');
 const { WebSocket } = require('ws');
@@ -45,15 +47,7 @@ class PriceSubscriptionManager {
   }
 
   _getClientIp(req) {
-    const forwardedFor = req?.headers?.['x-forwarded-for'];
-    if (Array.isArray(forwardedFor) && forwardedFor.length > 0) {
-      return forwardedFor[0].split(',')[0].trim();
-    }
-    if (typeof forwardedFor === 'string') {
-      return forwardedFor.split(',')[0].trim();
-    }
-    const socket = req?.socket;
-    return socket?.remoteAddress || 'unknown';
+    return getClientIp(req);
   }
 
   /** Register a new WebSocket connection. Returns false when at capacity or draining. */

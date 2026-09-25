@@ -2,6 +2,7 @@
 
 const config = require('../config');
 const logger = require('../logger');
+const { WebSocket } = require('ws');
 
 const MAX_ASSETS_PER_CLIENT = 5;
 const MAX_CONNECTIONS = config.ws.maxConnections;
@@ -145,7 +146,7 @@ class PriceSubscriptionManager {
   }
 
   _send(ws, payload) {
-    if (ws.readyState !== ws.constructor.OPEN) return;
+    if (ws.readyState !== WebSocket.OPEN) return;
     try {
       ws.send(JSON.stringify(payload));
     } catch (err) {

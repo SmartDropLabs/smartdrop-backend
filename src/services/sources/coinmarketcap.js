@@ -11,9 +11,15 @@ const circuit = createCircuitBreaker({
 });
 
 let apiClient = null;
+let apiClientKey = null;
 
 function getClient() {
-  if (!apiClient) {
+  // Issue #373: the API key is baked into this axios instance's headers at
+  // creation time. config.reload() (SIGHUP hot-reload in production) can
+  // change config.coinmarketcap.apiKey afterward — a client cached from
+  // before that would keep authenticating with the stale key forever.
+  // Rebuild whenever it differs from what's cached.
+  if (!apiClient || apiClientKey !== config.coinmarketcap.apiKey) {
     apiClient = axios.create({
       baseURL: config.coinmarketcap.baseUrl,
       headers: {
@@ -22,6 +28,7 @@ function getClient() {
       },
       timeout: 10000,
     });
+    apiClientKey = config.coinmarketcap.apiKey;
   }
   return apiClient;
 }

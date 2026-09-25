@@ -447,5 +447,40 @@ describe('Leader Election', () => {
       leaderElection2.stopRenewLoop();
     });
   });
+
+  // Issue #375: startRenewLoop() fired its initial tryAcquire() without
+  // awaiting it, then immediately set the renewal interval running -- a
+  // slow first call left a window where the interval's own tick could
+  // start a second, overlapping acquire/renew cycle for the same instance.
+  describe('startRenewLoop overlap guard (#375)', () => {
+    test('does not start a second acquire cycle while the first is still in flight', async () => {
+      let resolveFirstSet;
+      const originalSet = redis.set.bind(redis);
+      redis.set = jest.fn((...args) => new Promise((resolve) => {
+        resolveFirstSet = () => resolve(originalSet(...args));
+      }));
+
+      leaderElection.startRenewLoop();
+      // startRenewLoop's own initial call is now stuck awaiting the mocked,
+      // not-yet-resolved redis.set().
+      expect(redis.set).toHaveBeenCalledTimes(1);
+
+      // Advance past renewIntervalMs while the first call is still
+      // pending -- without the in-flight guard, this fires a second,
+      // concurrent tryAcquire() -> redis.set() call for the same lock.
+      jest.advanceTimersByTime(200);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(redis.set).toHaveBeenCalledTimes(1);
+      expect(leaderElection.isLeader()).toBe(false); // still pending, not yet acquired
+
+      // Let the first call resolve; leadership should now be reflected,
+      // uncorrupted by any overlapping second call.
+      resolveFirstSet();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(leaderElection.isLeader()).toBe(true);
+    });
+  });
 });
 

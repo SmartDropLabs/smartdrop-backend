@@ -59,6 +59,28 @@ describe("CircuitBreaker", () => {
     );
   });
 
+  // Issue #374: _transitionTo reset failureCount to 0 *before* logging the
+  // transition, so the CLOSED -> OPEN log line could never report how many
+  // failures actually tripped the breaker.
+  test("logs the failure count that tripped the breaker, not the post-reset zero", async () => {
+    const { breaker, logger } = buildBreaker({ failureThreshold: 2 });
+
+    await breaker.call(async () => null); // failureCount: 1, still closed
+    await breaker.call(async () => null); // failureCount: 2 -> trips open
+
+    expect(logger.info).toHaveBeenCalledWith(
+      "Circuit breaker state changed",
+      expect.objectContaining({
+        from: STATES.CLOSED,
+        to: STATES.OPEN,
+        failure_count: 2,
+        success_count: 0,
+      }),
+    );
+    // The reset itself must still happen -- only the log line was wrong.
+    expect(breaker.failureCount).toBe(0);
+  });
+
   test("moves to half-open after cooldown and closes on a successful probe", async () => {
     const { breaker, advance } = buildBreaker();
 

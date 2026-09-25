@@ -564,9 +564,10 @@ async function dispatch({ event_type: eventType, event_id: eventId, data }) {
     // Use SET NX (set-if-not-exists) to claim the dedup slot atomically before
     // dispatching. The previous flow checked then set, allowing concurrent calls
     // with the same event_id to both pass the dedup check (#283).
+    // TTL set to 30 days to prevent re-dispatching events after 24 hours (#405).
     const alreadyDispatched = await cache
       .getClient()
-      .set(dedupKey, Date.now(), "EX", 86400, "NX");
+      .set(dedupKey, Date.now(), "EX", 2592000, "NX");
     if (!alreadyDispatched) {
       logger.info("Skipping duplicate webhook dispatch", {
         event_id: eventId,

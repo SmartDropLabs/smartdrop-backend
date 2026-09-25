@@ -52,6 +52,9 @@ async function upsertAirdrop(event) {
   const airdropId = getAirdropId(event);
   if (!airdropId) return;
 
+  // Validate required fields exist in event data
+  if (!event.data || typeof event.data !== 'object') return;
+
   const existing = (await cache.get(airdropKey(airdropId))) || {
     airdrop_id: airdropId,
   };
@@ -62,6 +65,12 @@ async function upsertAirdrop(event) {
   };
 
   if (event.event_name === "airdrop_created") {
+    // Require critical fields for airdrop_created events
+    const hasRequiredFields = event.data.creator && event.data.token &&
+                            event.data.total_amount !== undefined &&
+                            event.data.expiry_ledger !== undefined;
+    if (!hasRequiredFields) return;
+
     Object.assign(next, {
       status: "created",
       creator: event.data.creator ?? existing.creator ?? null,

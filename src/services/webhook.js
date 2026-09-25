@@ -47,26 +47,60 @@ async function sendSignedRequest(webhookUrl, secret, payload, options = {}) {
   }
 }
 
+const PROBE_RETRY_ATTEMPTS = parseInt(process.env.WEBHOOK_PROBE_RETRY_ATTEMPTS, 10) || 2;
+const PROBE_RETRY_DELAY_MS = parseInt(process.env.WEBHOOK_PROBE_RETRY_DELAY_MS, 10) || 250;
+
+function isTransientProbeError(err) {
+  // A response was received (even a 4xx/5xx) — that's a real answer from
+  // the target, not a transient failure, so it's handled by the caller via
+  // response.status and never reaches this function.
+  const code = err?.code;
+  return [
+    'ECONNRESET', 'ETIMEDOUT', 'ECONNABORTED', 'ECONNREFUSED',
+    'ENETUNREACH', 'EHOSTUNREACH', 'EAI_AGAIN',
+  ].includes(code);
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Issue #311: probeReachability previously gave up on the very first
+// network-level failure of each method (e.g. a connection reset or DNS
+// hiccup), even though such errors are frequently transient and a
+// registration-time probe against a cold/just-deployed receiver is exactly
+// the situation where a brief retry is most likely to flip an unreachable
+// result into a reachable one. HTTP error responses (4xx/5xx) are not
+// retried — they're a real answer, not a transient failure.
 async function probeReachability(webhookUrl, options = {}) {
   const timeoutMs = options.timeoutMs || 3000;
+  const retryAttempts = options.retryAttempts ?? PROBE_RETRY_ATTEMPTS;
+  const retryDelayMs = options.retryDelayMs ?? PROBE_RETRY_DELAY_MS;
   const lastError = { message: 'No response received' };
 
   for (const method of ['head', 'get']) {
-    try {
-      const response = await axios[method](webhookUrl, {
-        headers: getRequestIdHeaders(),
-        timeout: timeoutMs,
-        validateStatus: () => true,
-      });
+    for (let attempt = 0; attempt <= retryAttempts; attempt++) {
+      try {
+        const response = await axios[method](webhookUrl, {
+          headers: getRequestIdHeaders(),
+          timeout: timeoutMs,
+          validateStatus: () => true,
+        });
 
-      if (response && response.status >= 200 && response.status < 400) {
-        return { reachable: true, status: response.status, method };
+        if (response && response.status >= 200 && response.status < 400) {
+          return { reachable: true, status: response.status, method };
+        }
+        if (response && response.status) {
+          return { reachable: false, status: response.status, method, error: `Target responded with HTTP ${response.status}` };
+        }
+      } catch (err) {
+        lastError.message = err?.message || 'Request failed';
+        if (attempt < retryAttempts && isTransientProbeError(err)) {
+          await sleep(retryDelayMs);
+          continue;
+        }
+        break;
       }
-      if (response && response.status) {
-        return { reachable: false, status: response.status, method, error: `Target responded with HTTP ${response.status}` };
-      }
-    } catch (err) {
-      lastError.message = err?.message || 'Request failed';
     }
   }
 

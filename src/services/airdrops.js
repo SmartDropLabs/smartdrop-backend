@@ -261,13 +261,24 @@ async function addRecipients(airdropId, recipients) {
   const redis = cache.getClient();
   const addresses = recipients.map((r) => r.address);
 
-  // SADD returns 1 for each newly added member, 0 for duplicates.
-  // By comparing the added count against the total we identify which
-  // addresses were already stored from the initial POST /airdrops body
-  // or a prior POST /airdrops/:id/recipients call.
-  const addedCounts = await Promise.all(
-    addresses.map((addr) => redis.sadd(recipientAddressSetKey(airdropId), addr)),
-  );
+  // SADD returns 1 for each newly added member, 0 for duplicates. Queued on
+  // a single MULTI/EXEC (issue #312) instead of Promise.all-ing N separate
+  // SADD calls: the separate calls were each an independent round trip that
+  // could interleave with another concurrent request's SADDs on the same
+  // key, so two overlapping addRecipients() calls for the same address
+  // could each observe "newly added" (both read 1) and double-append it to
+  // the recipients list below. MULTI/EXEC runs the whole batch as one
+  // atomic, uninterleaved unit, and as a bonus is a single round trip
+  // instead of N.
+  const multi = redis.multi();
+  for (const addr of addresses) {
+    multi.sadd(recipientAddressSetKey(airdropId), addr);
+  }
+  const results = await multi.exec();
+  const addedCounts = results.map(([err, count]) => {
+    if (err) throw err;
+    return count;
+  });
 
   const newAddresses = [];
   const duplicates = [];

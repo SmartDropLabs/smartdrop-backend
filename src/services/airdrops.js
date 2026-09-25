@@ -86,13 +86,22 @@ async function create(data) {
   };
 
   const redis = cache.getClient();
-  await cache.set(airdropKey(id), airdrop);
-  await redis.zadd(IDS_KEY, Date.now(), id);
+  // One MULTI/EXEC transaction instead of separate round trips (issue
+  // #390) — a crash between cache.set and zadd used to leave an airdrop
+  // record with no entry in IDS_KEY (invisible to list/scanIds, so it
+  // would never be found again), or an id in IDS_KEY with no backing
+  // record (a phantom entry list() would still return and try to re-read
+  // as null).
+  const multi = redis.multi();
+  multi.set(airdropKey(id), JSON.stringify(airdrop));
+  multi.zadd(IDS_KEY, Date.now(), id);
 
   if (recipients.length > 0) {
-    await redis.rpush(recipientsKey(id), ...recipients.map((r) => JSON.stringify(r)));
-    await redis.sadd(recipientAddressSetKey(id), ...recipients.map((r) => r.address));
+    multi.rpush(recipientsKey(id), ...recipients.map((r) => JSON.stringify(r)));
+    multi.sadd(recipientAddressSetKey(id), ...recipients.map((r) => r.address));
   }
+
+  await multi.exec();
 
   return airdrop;
 }

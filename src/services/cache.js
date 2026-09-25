@@ -156,7 +156,16 @@ async function set(key, value, ttlSeconds) {
   try {
     _checkQueueBackpressure('set');
     const redis = getClient();
-    const serialized = JSON.stringify(value);
+    let serialized;
+    try {
+      serialized = JSON.stringify(value);
+    } catch (err) {
+      logger.error('cache.set: value is not JSON-serializable', {
+        key,
+        error: err.message,
+      });
+      return;
+    }
     if (ttlSeconds) {
       await redis.setex(key, ttlSeconds, serialized);
     } else {

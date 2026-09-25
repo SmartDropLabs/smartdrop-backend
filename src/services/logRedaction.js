@@ -85,40 +85,56 @@ function redactSensitiveValue(value, key, seen) {
   return '[REDACTED]';
 }
 
+// Builds a redacted copy instead of mutating `node` in place (#328) — the
+// same info object can be logged again or read elsewhere after this format
+// runs, and mutating it would silently corrupt that later use. `seen` is a
+// Map from original node -> its redacted clone, so a circular reference
+// resolves to the already-built clone instead of looping forever or (as a
+// mutate-in-place approach would) returning the original, still-unredacted
+// node.
 function redact(node, seen) {
   if (!node || typeof node !== 'object') return node;
-  if (seen.has(node)) return node;
-  seen.add(node);
+  if (seen.has(node)) return seen.get(node);
 
   if (Array.isArray(node)) {
-    for (let i = 0; i < node.length; i += 1) {
-      const el = node[i];
+    const result = [];
+    seen.set(node, result);
+    for (const el of node) {
       if (typeof el === 'string') {
-        node[i] = scanString(el);
+        result.push(scanString(el));
       } else if (el && typeof el === 'object') {
-        redact(el, seen);
+        result.push(redact(el, seen));
+      } else {
+        result.push(el);
       }
     }
-    return node;
+    return result;
   }
+
+  // Spread first so properties `Object.keys` won't enumerate — notably
+  // Winston's `Symbol.for('level')`/`Symbol.for('message')` on the
+  // top-level `info` object — still survive into the redacted copy.
+  const result = { ...node };
+  seen.set(node, result);
 
   for (const key of Object.keys(node)) {
     const val = node[key];
 
     if (isSensitiveKey(key)) {
-      node[key] = redactSensitiveValue(val, key, seen);
+      result[key] = redactSensitiveValue(val, key, seen);
     } else if (typeof val === 'string') {
-      node[key] = scanString(val);
+      result[key] = scanString(val);
     } else if (val && typeof val === 'object') {
-      redact(val, seen);
+      result[key] = redact(val, seen);
     }
   }
-  return node;
+  return result;
 }
 
 function redactInfo(info) {
-  // Track visited objects to avoid infinite recursion on circular structures.
-  return redact(info, new Set());
+  // Track visited objects (original -> clone) to avoid infinite recursion
+  // on circular structures.
+  return redact(info, new Map());
 }
 
 const redactFormat = winston.format(redactInfo);

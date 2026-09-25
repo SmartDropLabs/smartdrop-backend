@@ -118,8 +118,15 @@ async function get(key) {
     if (!data) return null;
     try {
       return JSON.parse(data);
-    } catch {
-      return data;
+    } catch (err) {
+      // Every write path (set()) serializes via JSON.stringify, so a value
+      // that fails to parse here is corrupt, not a legitimate raw string —
+      // returning it as-is would hand callers an unexpected type (#325).
+      logger.warn('Cached value failed JSON.parse, treating as cache miss', {
+        key,
+        error: err.message,
+      });
+      return null;
     }
   } finally {
     release();

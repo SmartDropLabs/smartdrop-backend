@@ -38,7 +38,8 @@ function errorHandler(err, req, res, _next) {
     code = 'INTERNAL_ERROR';
   }
 
-  if ((!isAppError && !isPayloadTooLarge) || status >= 500) {
+  // 4xx is the client's request. Log and report only unhandled 5xx.
+  if (status >= 500) {
     logger.error('Unhandled error', { error: err.message, stack: err.stack, request_id: req.id });
     errorTracker.captureException(err, { request_id: req.id, path: req.originalUrl, method: req.method, status });
   }

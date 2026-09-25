@@ -231,7 +231,11 @@ if (process.env.NODE_ENV === 'production') {
   });
 }
 
-module.exports.reload = reload;
+// The exported object is what `config` (above) points at, and `reload()`
+// mutates it in place so every consumer that captured `require('../config')`
+// sees the new values. Assign onto it rather than replacing it, otherwise
+// `reload()` would update an object nobody holds a reference to.
+Object.assign(module.exports, {
   nodeEnv: env.NODE_ENV,
   port: env.PORT,
   databaseUrl: env.DATABASE_URL,
@@ -379,4 +383,6 @@ module.exports.reload = reload;
     maxConnections: parseInt(process.env.WS_MAX_CONNECTIONS, 10) || 100,
     maxConnectionsPerIp: parseInt(process.env.WS_MAX_CONNECTIONS_PER_IP, 10) || 5,
   },
-};
+});
+
+module.exports.reload = reload;

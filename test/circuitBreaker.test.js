@@ -7,6 +7,14 @@ const mockLogger = {
   debug: jest.fn(),
 };
 
+async function expectFailure(breaker) {
+  await expect(
+    breaker.call(async () => {
+      throw new Error("source unavailable");
+    }),
+  ).rejects.toThrow("source unavailable");
+}
+
 jest.mock("../src/logger", () => mockLogger);
 
 const { CircuitBreaker, STATES } = require("../src/utils/circuitBreaker");
@@ -39,8 +47,8 @@ describe("CircuitBreaker", () => {
   test("opens after repeated failures and skips calls while cooling down", async () => {
     const { breaker, logger } = buildBreaker();
 
-    await expect(breaker.call(async () => null)).resolves.toBeNull();
-    await expect(breaker.call(async () => null)).resolves.toBeNull();
+    await expectFailure(breaker);
+    await expectFailure(breaker);
 
     expect(breaker.getState()).toBe(STATES.OPEN);
 
@@ -65,8 +73,8 @@ describe("CircuitBreaker", () => {
   test("logs the failure count that tripped the breaker, not the post-reset zero", async () => {
     const { breaker, logger } = buildBreaker({ failureThreshold: 2 });
 
-    await breaker.call(async () => null); // failureCount: 1, still closed
-    await breaker.call(async () => null); // failureCount: 2 -> trips open
+    await expectFailure(breaker); // failureCount: 1, still closed
+    await expectFailure(breaker); // failureCount: 2 -> trips open
 
     expect(logger.info).toHaveBeenCalledWith(
       "Circuit breaker state changed",
@@ -84,8 +92,8 @@ describe("CircuitBreaker", () => {
   test("moves to half-open after cooldown and closes on a successful probe", async () => {
     const { breaker, advance } = buildBreaker();
 
-    await breaker.call(async () => null);
-    await breaker.call(async () => null);
+    await expectFailure(breaker);
+    await expectFailure(breaker);
 
     advance(100);
     expect(breaker.getState()).toBe(STATES.HALF_OPEN);
@@ -98,11 +106,11 @@ describe("CircuitBreaker", () => {
   test("reopens when the half-open probe fails", async () => {
     const { breaker, advance } = buildBreaker();
 
-    await breaker.call(async () => null);
-    await breaker.call(async () => null);
+    await expectFailure(breaker);
+    await expectFailure(breaker);
 
     advance(100);
-    await expect(breaker.call(async () => null)).resolves.toBeNull();
+    await expectFailure(breaker);
 
     expect(breaker.getState()).toBe(STATES.OPEN);
   });
@@ -120,17 +128,19 @@ describe("CircuitBreaker", () => {
     expect(breaker.getState()).toBe(STATES.CLOSED);
   });
 
-  test("treats undefined return as a failure", async () => {
+  test("treats null and undefined returns as successes", async () => {
     const { breaker } = buildBreaker();
 
-    await breaker.call(async () => undefined);
-    expect(breaker.failureCount).toBe(1);
+    await expect(breaker.call(async () => null)).resolves.toBeNull();
+    await expect(breaker.call(async () => undefined)).resolves.toBeNull();
+    expect(breaker.failureCount).toBe(0);
+    expect(breaker.getState()).toBe(STATES.CLOSED);
   });
 
   test("resets failure count on success in CLOSED state", async () => {
     const { breaker } = buildBreaker();
 
-    await breaker.call(async () => null);
+    await expectFailure(breaker);
     expect(breaker.failureCount).toBe(1);
 
     await breaker.call(async () => "ok");
@@ -140,8 +150,8 @@ describe("CircuitBreaker", () => {
   test("reset() returns breaker to CLOSED immediately", async () => {
     const { breaker } = buildBreaker();
 
-    await breaker.call(async () => null);
-    await breaker.call(async () => null);
+    await expectFailure(breaker);
+    await expectFailure(breaker);
     expect(breaker.getState()).toBe(STATES.OPEN);
 
     breaker.reset();
@@ -153,8 +163,8 @@ describe("CircuitBreaker", () => {
   test("skips calls when half-open probe is already in flight", async () => {
     const { breaker, advance } = buildBreaker();
 
-    await breaker.call(async () => null);
-    await breaker.call(async () => null);
+    await expectFailure(breaker);
+    await expectFailure(breaker);
     advance(100);
 
     expect(breaker.getState()).toBe(STATES.HALF_OPEN);
@@ -202,16 +212,16 @@ describe("CircuitBreaker", () => {
 
   test("isOpen returns true when open", async () => {
     const { breaker } = buildBreaker();
-    await breaker.call(async () => null);
-    await breaker.call(async () => null);
+    await expectFailure(breaker);
+    await expectFailure(breaker);
     expect(breaker.isOpen()).toBe(true);
   });
 
   test("multiple successes in half-open are needed when successThreshold > 1", async () => {
     const { breaker, advance } = buildBreaker({ successThreshold: 2 });
 
-    await breaker.call(async () => null);
-    await breaker.call(async () => null);
+    await expectFailure(breaker);
+    await expectFailure(breaker);
     advance(100);
 
     expect(breaker.getState()).toBe(STATES.HALF_OPEN);
@@ -227,11 +237,11 @@ describe("CircuitBreaker", () => {
     const { breaker } = buildBreaker({ failureThreshold: 5 });
 
     for (let i = 0; i < 4; i++) {
-      await breaker.call(async () => null);
+      await expectFailure(breaker);
     }
     expect(breaker.getState()).toBe(STATES.CLOSED);
 
-    await breaker.call(async () => null);
+    await expectFailure(breaker);
     expect(breaker.getState()).toBe(STATES.OPEN);
   });
 });

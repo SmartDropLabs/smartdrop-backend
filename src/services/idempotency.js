@@ -63,20 +63,17 @@ async function storeIdempotencyResponse(key, statusCode, responseBody) {
 function idempotencyMiddleware(resourceType = 'resource') {
   return async (req, res, next) => {
     const idempotencyKey = req.get('Idempotency-Key');
-    
-    // Store the original json() method
-    const originalJson = res.json.bind(res);
-    
-    // Override json() to capture and cache the response
-    res.json = function(data) {
-      if (idempotencyKey && res.statusCode >= 200 && res.statusCode < 300) {
-        // Only cache successful responses
-        storeIdempotencyResponse(idempotencyKey, res.statusCode, data);
-      }
-      return originalJson(data);
-    };
-    
-    // Check if this idempotency key was already processed
+
+    // Validate idempotency key format before processing
+    if (idempotencyKey && typeof idempotencyKey !== 'string') {
+      return res.status(400).json({ error: 'Invalid Idempotency-Key header' });
+    }
+
+    if (idempotencyKey && idempotencyKey.length === 0) {
+      return res.status(400).json({ error: 'Idempotency-Key header cannot be empty' });
+    }
+
+    // Check if this idempotency key was already processed before any other processing
     if (idempotencyKey) {
       const cached = await getIdempotencyResponse(idempotencyKey);
       if (cached) {
@@ -84,11 +81,25 @@ function idempotencyMiddleware(resourceType = 'resource') {
         res.set('Idempotency-Replay', 'true');
         return res.status(cached.statusCode).json(cached.body);
       }
-      
-      // Mark that we're processing this key
+    }
+
+    // Store the original json() method
+    const originalJson = res.json.bind(res);
+
+    // Override json() to capture and cache the response only after request is processed successfully
+    res.json = function(data) {
+      if (idempotencyKey && res.statusCode >= 200 && res.statusCode < 300) {
+        // Only cache successful responses
+        storeIdempotencyResponse(idempotencyKey, res.statusCode, data);
+      }
+      return originalJson(data);
+    };
+
+    // Mark that we're processing this key
+    if (idempotencyKey) {
       res.set('Idempotency-Key', idempotencyKey);
     }
-    
+
     return next();
   };
 }

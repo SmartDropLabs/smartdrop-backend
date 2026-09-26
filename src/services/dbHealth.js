@@ -1,25 +1,34 @@
-'use strict';
+"use strict";
 
-/**
- * Lightweight database configuration check.
- *
- * The database (added for api_key_audit_logs, see migrations) is not yet on
- * any live request path — nothing in the app queries it at runtime. So
- * `/health` only reports whether a connection string is *configured*
- * (via the same resolved config the migration CLI uses, including its
- * dev/test defaults) rather than actually opening a connection: attempting
- * a real ping here would make `/health` depend on a dependency the app
- * doesn't actually use yet, and could flap the endpoint on a DB blip that
- * doesn't affect anything real.
- */
+const knexFactory = require("knex");
+const config = require("../config");
 
-const config = require('../config');
+let db = null;
 
-function checkDatabase() {
+async function checkDatabase() {
   if (!config.databaseUrl) {
-    return { configured: false, checked: false, status: 'unavailable' };
+    return { configured: false, checked: false, status: "unavailable" };
   }
-  return { configured: true, checked: false, status: 'unused' };
+
+  try {
+    if (!db) {
+      db = knexFactory({
+        client: "pg",
+        connection: {
+          connectionString: config.databaseUrl,
+          connectionTimeoutMillis: 1000,
+          query_timeout: 1000,
+        },
+        acquireConnectionTimeout: 1000,
+        pool: { min: 0, max: 1 },
+      });
+    }
+
+    await db.raw("SELECT 1");
+    return { configured: true, checked: true, status: "ok" };
+  } catch (_err) {
+    return { configured: true, checked: true, status: "error" };
+  }
 }
 
 module.exports = { checkDatabase };

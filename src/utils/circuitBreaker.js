@@ -1,11 +1,11 @@
-'use strict';
+"use strict";
 
-const logger = require('../logger');
+const logger = require("../logger");
 
 const STATES = Object.freeze({
-  CLOSED: 'closed',
-  OPEN: 'open',
-  HALF_OPEN: 'half-open',
+  CLOSED: "closed",
+  OPEN: "open",
+  HALF_OPEN: "half-open",
 });
 
 class CircuitBreaker {
@@ -34,25 +34,15 @@ class CircuitBreaker {
   }
 
   /**
-   * Wraps a call in the breaker's failure accounting. `fn` returning
-   * `null`/`undefined` is treated exactly like a thrown error — it counts
-   * as a failure and can trip the breaker OPEN.
-   *
-   * Contract for callers: only pass `fn` here for a call the wrapped source
-   * is actually expected to be able to answer. If a source can never serve
-   * a given request (e.g. an asset it doesn't track at all), that's a
-   * permanent, per-request condition, not a signal about the source's
-   * health — decide that *before* calling `call()`, and skip it entirely
-   * rather than letting a "not supported" response reach here as a `null`.
-   * priceOracle.js's `fetchFromAllSources` does this via each source's
-   * `isSupported(assetCode, issuer)` (see #130); any future caller wrapping
-   * a new per-item resource in a shared breaker should do the same.
+   * Wraps a call in the breaker's failure accounting. Any resolved value,
+   * including `null` or `undefined`, is a successful call; only thrown
+   * errors count as failures.
    */
   async call(fn) {
     this._moveToHalfOpenIfReady();
 
     if (this.state === STATES.OPEN) {
-      this._logger.info('Circuit breaker open, skipping source call', {
+      this._logger.info("Circuit breaker open, skipping source call", {
         source: this.name,
         state: this.state,
       });
@@ -60,10 +50,13 @@ class CircuitBreaker {
     }
 
     if (this.state === STATES.HALF_OPEN && this.halfOpenInFlight) {
-      this._logger.info('Circuit breaker half-open probe already in flight, skipping source call', {
-        source: this.name,
-        state: this.state,
-      });
+      this._logger.info(
+        "Circuit breaker half-open probe already in flight, skipping source call",
+        {
+          source: this.name,
+          state: this.state,
+        },
+      );
       return null;
     }
 
@@ -74,11 +67,7 @@ class CircuitBreaker {
 
     try {
       const result = await fn();
-      if (result === null || result === undefined) {
-        this.recordFailure();
-      } else {
-        this.recordSuccess();
-      }
+      this.recordSuccess();
       return result ?? null;
     } catch (err) {
       this.recordFailure();
@@ -94,7 +83,7 @@ class CircuitBreaker {
     if (this.state === STATES.HALF_OPEN) {
       this.successCount += 1;
       if (this.successCount >= this.successThreshold) {
-        this._transitionTo(STATES.CLOSED, { reason: 'success-threshold' });
+        this._transitionTo(STATES.CLOSED, { reason: "success-threshold" });
       }
       return;
     }
@@ -106,20 +95,20 @@ class CircuitBreaker {
 
   recordFailure() {
     if (this.state === STATES.HALF_OPEN) {
-      this._transitionTo(STATES.OPEN, { reason: 'half-open-failure' });
+      this._transitionTo(STATES.OPEN, { reason: "half-open-failure" });
       return;
     }
 
     if (this.state === STATES.CLOSED) {
       this.failureCount += 1;
       if (this.failureCount >= this.failureThreshold) {
-        this._transitionTo(STATES.OPEN, { reason: 'failure-threshold' });
+        this._transitionTo(STATES.OPEN, { reason: "failure-threshold" });
       }
     }
   }
 
   reset() {
-    this._transitionTo(STATES.CLOSED, { reason: 'manual-reset' });
+    this._transitionTo(STATES.CLOSED, { reason: "manual-reset" });
   }
 
   _moveToHalfOpenIfReady() {
@@ -128,7 +117,7 @@ class CircuitBreaker {
     }
 
     if (this._now() - this.openedAt >= this.timeoutMs) {
-      this._transitionTo(STATES.HALF_OPEN, { reason: 'cooldown-elapsed' });
+      this._transitionTo(STATES.HALF_OPEN, { reason: "cooldown-elapsed" });
     }
   }
 
@@ -151,7 +140,7 @@ class CircuitBreaker {
     this.successCount = 0;
     this.openedAt = nextState === STATES.OPEN ? this._now() : null;
 
-    this._logger.info('Circuit breaker state changed', {
+    this._logger.info("Circuit breaker state changed", {
       source: this.name,
       from: previousState,
       to: nextState,

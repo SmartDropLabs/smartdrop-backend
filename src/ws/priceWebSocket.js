@@ -13,25 +13,30 @@ function extractBearerToken(header) {
   return match ? match[1].trim() : null;
 }
 
-function authenticateUpgrade(info, callback) {
+function getClientIp(req) {
+  const xForwardedFor = req.headers['x-forwarded-for'];
+  if (xForwardedFor) {
+    return xForwardedFor.split(',')[0].trim();
+  }
+  return req.socket.remoteAddress;
+}
+
+async function authenticateUpgrade(info) {
   const token = extractBearerToken(info.req.headers.authorization);
   if (!token) {
-    callback(false, 401, 'Missing or invalid API key');
-    return;
+    return false;
   }
 
-  apiKeys.validateApiKey(token)
-    .then((apiKey) => {
-      if (!apiKey) {
-        callback(false, 401, 'Missing or invalid API key');
-        return;
-      }
-      callback(true);
-    })
-    .catch((err) => {
-      logger.warn('WebSocket authentication failed', { error: err.message });
-      callback(false, 401, 'Missing or invalid API key');
-    });
+  try {
+    const apiKey = await apiKeys.validateApiKey(token);
+    if (!apiKey) {
+      return false;
+    }
+    return true;
+  } catch (err) {
+    logger.warn('WebSocket authentication failed', { error: err.message });
+    return false;
+  }
 }
 
 /**
@@ -46,7 +51,7 @@ function attach(httpServer) {
   });
 
   wss.on('connection', (ws, req) => {
-    logger.info('Incoming WS connection', { ip: req.socket.remoteAddress });
+    logger.info('Incoming WS connection', { ip: getClientIp(req) });
     subscriptionManager.add(ws, req);
   });
 

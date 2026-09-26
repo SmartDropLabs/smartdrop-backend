@@ -614,7 +614,7 @@ Returns the overall health of the service and its dependencies.
 | `redis.connected` | `true` when the Redis client is connected |
 | `jobs.price_refresh` | Health of the background price-refresh cron job |
 | `jobs.webhook_retry_worker` | Health of the webhook retry worker |
-| `database` | Reports `configured: true, checked: false, status: "unused"` — no active DB health probe |
+| `database` | Result of the database probe: `configured`, `checked`, `status` (`ok` / `error` / `unavailable`), plus `latency_ms` when probed and `error` when it failed |
 | `price_source_circuits` | Per-source circuit-breaker state (open/closed) |
 
 **Health states:**
@@ -668,7 +668,7 @@ Returns the overall health of the service and its dependencies.
       "total_retries_processed": 91
     }
   },
-  "database": { "configured": true, "checked": false, "status": "unused" },
+  "database": { "configured": true, "checked": true, "status": "ok", "latency_ms": 4 },
   "price_source_circuits": [
     { "source": "coingecko", "open": false, "openUntil": null },
     { "source": "coinmarketcap", "open": false, "openUntil": null }

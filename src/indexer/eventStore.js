@@ -4,6 +4,33 @@ const EVENT_IDS_KEY = "indexer:contract_events:ids";
 const LAST_LEDGER_KEY = "indexer:last_ledger";
 const AIRDROP_IDS_KEY = "indexer:airdrops:ids";
 
+/**
+ * CAS + monotonic advance for the cursor key. ARGV[1] is the value the
+ * caller observed ('' = key absent), ARGV[2] the value it wants to store.
+ * Returns 1 only if both conditions hold and the write happened.
+ */
+const ADVANCE_LAST_LEDGER_LUA = `
+local cursor = redis.call('GET', KEYS[1])
+local expected = ARGV[1]
+local nextValue = ARGV[2]
+
+if expected == '' then
+  if cursor then return 0 end
+elseif not cursor or cursor ~= expected then
+  return 0
+end
+
+local nextNumber = tonumber(nextValue)
+if not nextNumber then return 0 end
+if cursor then
+  local cursorNumber = tonumber(cursor)
+  if cursorNumber and nextNumber < cursorNumber then return 0 end
+end
+
+redis.call('SET', KEYS[1], nextValue)
+return 1
+`;
+
 function eventKey(id) {
   return `indexer:contract_event:${id}`;
 }
@@ -46,6 +73,46 @@ async function getLastLedger(defaultLedger = 0) {
 
 async function setLastLedger(ledger) {
   await cache.set(LAST_LEDGER_KEY, Number(ledger));
+}
+
+/**
+ * Compare-and-set advance of the indexer cursor (issue #341).
+ *
+ * Reading `indexer:last_ledger` and writing it back are two separate Redis
+ * round trips, so two overlapping pollers can both read the same cursor and
+ * both write their own answer — the slower one silently rewinds the indexer
+ * (or, on a lagging response, a plain SET can move the cursor backwards even
+ * single-threaded). Both hazards are handled here in one Lua script, which
+ * Redis runs to completion with no interleaving:
+ *
+ *   - ARGV[1] is the value the caller read ('' = "the cursor was unset").
+ *     If the stored cursor no longer matches it, nothing is written and the
+ *     caller gets 0 (false).
+ *   - The cursor is only ever moved forwards; a lower next value is refused
+ *     (0) rather than applied.
+ *
+ * Returns true when this caller's write landed.
+ *
+ * @param {number|null} expectedLedger ledger the caller last read (null = unset)
+ * @param {number} nextLedger ledger to advance to
+ * @returns {Promise<boolean>} whether the cursor was advanced
+ */
+async function advanceLastLedger(expectedLedger, nextLedger) {
+  const redis = cache.getClient();
+  if (typeof redis.advanceLastLedger !== "function") {
+    redis.defineCommand("advanceLastLedger", {
+      numberOfKeys: 1,
+      lua: ADVANCE_LAST_LEDGER_LUA,
+    });
+  }
+
+  const expected =
+    expectedLedger === null || expectedLedger === undefined
+      ? ""
+      : String(Number(expectedLedger));
+  const next = String(Number(nextLedger));
+  const applied = await redis.advanceLastLedger(LAST_LEDGER_KEY, expected, next);
+  return Number(applied) === 1;
 }
 
 async function upsertAirdrop(event) {
@@ -298,6 +365,7 @@ async function getStats() {
 }
 
 module.exports = {
+  advanceLastLedger,
   getAirdropRecipients,
   getAirdropStatus,
   getLastLedger,

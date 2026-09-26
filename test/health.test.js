@@ -42,6 +42,9 @@ jest.mock('../src/jobs/webhookRetryWorker', () => ({
 
 jest.mock('../src/ws/priceWebSocket', () => ({
   attach: jest.fn(),
+  // /health reads this to report the WS server's state (mirrors the real
+  // getHealth() for a server that has been attached).
+  getHealth: jest.fn(() => ({ healthy: true, connections: 0 })),
 }));
 
 // ---------------------------------------------------------------------------
@@ -165,6 +168,15 @@ describe('GET /health – status computation', () => {
       getHealth: () => ({ healthy: true, lastSuccessAt: Date.now(), lastError: null, stalled: false }),
     }));
     jest.mock('../src/jobs/webhookRetryWorker', () => ({
+      start: jest.fn(),
+      stop: jest.fn(),
+      tick: jest.fn(),
+      getHealth: () => ({ healthy: true, lastSuccessAt: Date.now(), lastError: null, stalled: false }),
+    }));
+    // The real airdrop expiry job exposes no getHealth(), so the wrapper can
+    // never report it as healthy — mock it here, where the point of the test
+    // is "every job healthy ⇒ ok".
+    jest.mock('../src/jobs/airdropExpiry', () => ({
       start: jest.fn(),
       stop: jest.fn(),
       tick: jest.fn(),

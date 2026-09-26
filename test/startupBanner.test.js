@@ -28,6 +28,7 @@ const {
   sanitizeUrl,
   startServer,
 } = require("../src/index");
+const webhookDispatcher = require("../src/services/webhookDispatcher");
 const config = require("../src/config");
 const { version: appVersion } = require("../package.json");
 
@@ -116,6 +117,62 @@ describe("startup banner", () => {
       "Cache warm failed; starting server anyway",
       { error: "Horizon unreachable" },
     );
+    listen.mockRestore();
+  });
+
+  test("reloads persisted webhook metrics before accepting traffic (#343)", async () => {
+    const mockServer = { close: jest.fn() };
+    const listen = jest.spyOn(app, "listen").mockReturnValue(mockServer);
+    const hydrate = jest
+      .spyOn(webhookDispatcher, "hydrateMetrics")
+      .mockResolvedValue(7);
+
+    await expect(startServer()).resolves.toBe(mockServer);
+
+    expect(hydrate).toHaveBeenCalledTimes(1);
+    expect(listen).toHaveBeenCalledWith(config.port, expect.any(Function));
+    // Counters must be restored before a delivery can be counted into them,
+    // otherwise the reload would overwrite an already-recorded delivery.
+    expect(hydrate.mock.invocationCallOrder[0]).toBeLessThan(
+      listen.mock.invocationCallOrder[0],
+    );
+    hydrate.mockRestore();
+    listen.mockRestore();
+  });
+
+  test("still starts the server when webhook metrics cannot be loaded (#342)", async () => {
+    const mockServer = { close: jest.fn() };
+    const listen = jest.spyOn(app, "listen").mockReturnValue(mockServer);
+    const hydrate = jest
+      .spyOn(webhookDispatcher, "hydrateMetrics")
+      .mockRejectedValueOnce(new Error("connection refused"));
+
+    await expect(startServer()).resolves.toBe(mockServer);
+
+    expect(listen).toHaveBeenCalledWith(config.port, expect.any(Function));
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      "Could not load persisted webhook delivery metrics; starting with empty counters",
+      { error: "connection refused" },
+    );
+    hydrate.mockRestore();
+    listen.mockRestore();
+  });
+
+  test("announces a degraded boot when Redis is down at startup (#342)", async () => {
+    const mockServer = { close: jest.fn() };
+    const listen = jest.spyOn(app, "listen").mockReturnValue(mockServer);
+    const isConnected = jest
+      .spyOn(require("../src/services/cache"), "isConnected")
+      .mockReturnValue(false);
+
+    await expect(startServer()).resolves.toBe(mockServer);
+
+    expect(listen).toHaveBeenCalledWith(config.port, expect.any(Function));
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining("starting in degraded mode"),
+      expect.objectContaining({ redis_connected: false }),
+    );
+    isConnected.mockRestore();
     listen.mockRestore();
   });
 });

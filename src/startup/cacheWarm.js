@@ -113,7 +113,13 @@ async function warmCache(
   });
 
   const summary = await Promise.race([warming, timeout]);
-  if (!summary.timedOut) clearTimeout(timeoutId);
+  if (!summary.timedOut) {
+    clearTimeout(timeoutId);
+    // One completion line per startup (mirroring the timeout path's warn)
+    // so an operator can see how much of the cache actually warmed without
+    // diffing per-asset fetch logs.
+    log.info('Cache warm complete', summary);
+  }
   return summary;
 }
 

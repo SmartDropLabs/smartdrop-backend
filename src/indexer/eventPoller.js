@@ -228,7 +228,29 @@ class EventPoller {
       ? Math.max(previousLedger ?? 0, ...eventLedgers)
       : Math.max(response.latestLedger || previousLedger || 0, ...eventLedgers);
 
-    await this.store.setLastLedger(latestIndexedLedger);
+    // Advance the cursor only if it still holds the value this poll read
+    // (issue #341). A plain set here is a read-modify-write across two
+    // round trips: an overlapping poller would have its own progress
+    // silently overwritten, and a stale/lagging answer could even move the
+    // cursor backwards. The events above are already saved either way —
+    // saves are idempotent — so refusing the write costs nothing but the
+    // duplicate work the other poller already did.
+    const cursorAdvanced = await this.store.advanceLastLedger(
+      previousLedger,
+      latestIndexedLedger,
+    );
+    if (!cursorAdvanced) {
+      this.metrics.pollsSkipped += 1;
+      this.logger.warn(
+        'Ledger cursor changed concurrently; leaving the other writer in place',
+        {
+          expected_ledger: previousLedger,
+          attempted_ledger: latestIndexedLedger,
+        },
+      );
+      return { skipped: true, reason: 'concurrent cursor advance' };
+    }
+
     this.lastIndexedLedger = latestIndexedLedger;
     this.metrics.eventsIndexed += parsedEvents.length;
 

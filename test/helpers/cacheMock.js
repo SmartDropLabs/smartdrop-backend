@@ -195,6 +195,33 @@ function createCacheMock() {
       if (!h) return {};
       return Object.fromEntries(h.entries());
     }),
+    // Issue #343 (webhookDispatcher metrics persistence): HINCRBY is the
+    // write-through primitive for the durable delivery counters.
+    hincrby: jest.fn(async (key, field, by) => {
+      const h = getHash(key);
+      const next = (Number(h.get(field)) || 0) + Number(by);
+      h.set(field, String(next));
+      return next;
+    }),
+    // Issue #343: SCAN over the whole keyspace (all key types), matching a
+    // Redis glob pattern. Returns the lot in one pass (cursor '0'), which is
+    // all callers iterating until cursor === '0' need.
+    scan: jest.fn(async (cursor, ...args) => {
+      const matchIdx = args.indexOf('MATCH');
+      const pattern = matchIdx === -1 ? '*' : String(args[matchIdx + 1]);
+      const regex = new RegExp(
+        `^${pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`,
+      );
+      const allKeys = new Set([
+        ...rawStore.keys(),
+        ...hashes.keys(),
+        ...sets.keys(),
+        ...zsets.keys(),
+        ...lists.keys(),
+      ]);
+      const matches = [...allKeys].filter((key) => regex.test(key));
+      return ['0', matches];
+    }),
     pexpire: jest.fn(async (key, ms) => {
       const entry = getLive(key);
       if (!entry) return 0;
@@ -226,6 +253,30 @@ function createCacheMock() {
             .map(([m]) => m);
           ids.forEach((id) => z.delete(id));
           return ids;
+        });
+        return;
+      }
+      if (name === 'advanceLastLedger') {
+        // Mirrors ADVANCE_LAST_LEDGER_LUA (issue #341): compare-and-set
+        // (expected === '' means "key must be absent") plus monotonicity —
+        // never store a lower ledger than the one already stored. Reads and
+        // the write below are uninterrupted, matching Redis running the
+        // script to completion.
+        redis.advanceLastLedger = jest.fn(async (key, expected, nextValue) => {
+          const cursor = getLive(key) ? getLive(key).value : null;
+          if (expected === '') {
+            if (cursor !== null) return 0;
+          } else if (cursor === null || cursor !== expected) {
+            return 0;
+          }
+          const nextNumber = Number(nextValue);
+          if (!Number.isFinite(nextNumber)) return 0;
+          if (cursor !== null) {
+            const cursorNumber = Number(cursor);
+            if (Number.isFinite(cursorNumber) && nextNumber < cursorNumber) return 0;
+          }
+          rawStore.set(key, { value: String(nextValue), expiresAt: null });
+          return 1;
         });
         return;
       }

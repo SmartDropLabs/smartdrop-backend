@@ -126,6 +126,7 @@ app.get("/health", healthRateLimit, async (req, res) => {
   const webhookWorkerHealth = wrappedWebhookRetryWorker.getHealth();
   const airdropExpiryHealth = wrappedAirdropExpiryJob.getHealth();
   const database = await checkDatabase();
+  const wsHealth = priceWebSocket.getHealth();
   // Queue depth for the retry worker (issue #235) — "the worker is alive"
   // says nothing about whether retries are piling up behind it. Health must
   // still answer if this telemetry read fails, so a failure degrades to
@@ -177,14 +178,11 @@ app.get("/health", healthRateLimit, async (req, res) => {
       concurrency: redisConcurrency,
     },
     websocket: {
-      connections: subscriptionManager.connectionCount,
-      draining: subscriptionManager.isDraining,
-      drain_stats: subscriptionManager.drainStats,
-    },
-    websocket: {
       healthy: wsHealth.healthy,
       connections: wsHealth.connections,
       error: wsHealth.error,
+      draining: subscriptionManager.isDraining,
+      drain_stats: subscriptionManager.drainStats,
     },
     jobs: {
       price_refresh: {
@@ -348,6 +346,30 @@ function logStartupBanner() {
 }
 
 async function startServer() {
+  // Redis being unreachable at boot must not stop the process from coming up
+  // (#342): everything below degrades to "no cached state" and recovers on
+  // its own once ioredis reconnects. Say so once, explicitly, so an operator
+  // reading the logs can tell a degraded boot from a healthy one.
+  const redisConnectedAtBoot = cache.isConnected();
+  if (!redisConnectedAtBoot) {
+    logger.warn(
+      "Redis unavailable at startup; starting in degraded mode (no cached state, rate limits, or leader lease until it reconnects)",
+      { redis_connected: false },
+    );
+  }
+
+  // Restore historical delivery counters before we accept traffic (#343).
+  // Best-effort: if Redis is unreachable the server still starts with empty
+  // counters rather than failing startup (#342).
+  try {
+    await webhookDispatcher.hydrateMetrics();
+  } catch (err) {
+    logger.warn(
+      "Could not load persisted webhook delivery metrics; starting with empty counters",
+      { error: err.message },
+    );
+  }
+
   try {
     await warmCache(config.watchedAssets);
   } catch (err) {

@@ -79,6 +79,30 @@ const mockRedis = {
   }),
   multi: jest.fn(() => makeChain()),
   pipeline: jest.fn(() => makeChain()),
+  // Registers the cursor CAS (issue #341) the same way eventStore does it
+  // against a real ioredis client; mirrors ADVANCE_LAST_LEDGER_LUA.
+  defineCommand: jest.fn((name, { lua } = {}) => {
+    if (name === "advanceLastLedger") {
+      mockRedis.advanceLastLedger = jest.fn(async (key, expected, nextValue) => {
+        const cursor = mockStore.has(key) ? mockStore.get(key) : null;
+        if (expected === "") {
+          if (cursor !== null) return 0;
+        } else if (cursor === null || cursor !== expected) {
+          return 0;
+        }
+        const nextNumber = Number(nextValue);
+        if (!Number.isFinite(nextNumber)) return 0;
+        if (cursor !== null) {
+          const cursorNumber = Number(cursor);
+          if (Number.isFinite(cursorNumber) && nextNumber < cursorNumber) return 0;
+        }
+        mockStore.set(key, String(nextValue));
+        return 1;
+      });
+      return;
+    }
+    throw new Error(`indexerStore test mock: unsupported defineCommand "${name}" (lua: ${typeof lua})`);
+  }),
 };
 
 jest.mock("../src/services/cache", () => ({
@@ -369,5 +393,53 @@ describe("indexer event store", () => {
         status: "claimed",
       }),
     ]);
+  });
+});
+
+describe("ledger cursor compare-and-set (#341)", () => {
+  const LEDGER_KEY = "indexer:last_ledger";
+
+  test("advances an unset cursor and then reads it back", async () => {
+    await expect(eventStore.getLastLedger(null)).resolves.toBeNull();
+
+    await expect(eventStore.advanceLastLedger(null, 100)).resolves.toBe(true);
+    await expect(eventStore.getLastLedger(null)).resolves.toBe(100);
+  });
+
+  test("advances only when the cursor still holds what the caller read", async () => {
+    await eventStore.advanceLastLedger(null, 100);
+
+    // Second poller read 100 too, but the first one already moved on.
+    await expect(eventStore.advanceLastLedger(100, 140)).resolves.toBe(true);
+    await expect(eventStore.advanceLastLedger(100, 150)).resolves.toBe(false);
+    await expect(eventStore.getLastLedger(null)).resolves.toBe(140);
+  });
+
+  test("refuses a write that would move the cursor backwards", async () => {
+    await eventStore.advanceLastLedger(null, 200);
+
+    await expect(eventStore.advanceLastLedger(200, 150)).resolves.toBe(false);
+    await expect(eventStore.getLastLedger(null)).resolves.toBe(200);
+    // Re-applying the same value is a no-op advance, not a regression.
+    await expect(eventStore.advanceLastLedger(200, 200)).resolves.toBe(true);
+  });
+
+  test("refuses when an unset cursor was claimed in the meantime", async () => {
+    await eventStore.advanceLastLedger(null, 1);
+
+    await expect(eventStore.advanceLastLedger(null, 2)).resolves.toBe(false);
+    await expect(eventStore.getLastLedger(null)).resolves.toBe(1);
+  });
+
+  test("two overlapping pollers converge on the winner's cursor", async () => {
+    // Both read the same starting point before either writes.
+    const readA = await eventStore.getLastLedger(null);
+    const readB = await eventStore.getLastLedger(null);
+
+    await expect(eventStore.advanceLastLedger(readA, 10)).resolves.toBe(true);
+    await expect(eventStore.advanceLastLedger(readB, 12)).resolves.toBe(false);
+
+    await expect(eventStore.getLastLedger(null)).resolves.toBe(10);
+    expect(mockStore.get(LEDGER_KEY)).toBeDefined();
   });
 });

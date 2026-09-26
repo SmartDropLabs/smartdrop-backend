@@ -16,7 +16,16 @@ const USER_AGENT = "SmartDrop-Webhooks/1.0";
 const WEBHOOK_CACHE_TTL_MS = 60_000;
 const webhookCache = new Map();
 
-// ── Delivery metrics (in-memory, reset on process restart) ──────────────
+// ── Delivery metrics (#343) ─────────────────────────────────────────────
+// Counters live in Redis (hash-per-webhook plus one aggregate hash) so a
+// process restart no longer zeros historical delivery success rates. The
+// in-memory copy below is the read model getMetrics() answers from: it is
+// loaded once at startup via hydrateMetrics() and then written through on
+// every completed delivery. Redis is the durable copy; if it is unavailable
+// the write is logged and dropped rather than failing the delivery.
+const METRICS_AGGREGATE_KEY = 'webhook:metrics:aggregate';
+const METRICS_WEBHOOK_KEY_PREFIX = 'webhook:metrics:webhook:';
+
 const metrics = {
   _deliveries: new Map(), // webhook_id → { total, success, failed, totalAttempts, totalLatencyMs }
   _inFlight: new Set(), // delivery IDs currently being attempted
@@ -40,6 +49,109 @@ function _ensureWebhookMetrics(webhookId) {
     });
   }
   return metrics._deliveries.get(webhookId);
+}
+
+function _fromRedisFields(raw) {
+  const num = (value) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+  return {
+    total: num(raw.total),
+    success: num(raw.success),
+    failed: num(raw.failed),
+    totalAttempts: num(raw.total_attempts),
+    totalLatencyMs: num(raw.total_latency_ms),
+  };
+}
+
+/**
+ * Best-effort write-through of one completed delivery's contribution to the
+ * durable counters. Fire-and-forget on purpose: a metrics write must never
+ * be able to fail or delay the delivery it is describing.
+ */
+function _persistDeliveryMetrics(webhookId, { success, attempts, latencyMs }) {
+  try {
+    const redis = cache.getClient();
+    const pipeline = redis.pipeline();
+    const deltas = [
+      ['total', 1],
+      [success ? 'success' : 'failed', 1],
+      ['total_attempts', attempts],
+      ['total_latency_ms', latencyMs],
+    ];
+    for (const [field, by] of deltas) {
+      pipeline.hincrby(METRICS_AGGREGATE_KEY, field, by);
+      pipeline.hincrby(`${METRICS_WEBHOOK_KEY_PREFIX}${webhookId}`, field, by);
+    }
+    pipeline
+      .exec()
+      .then((results) => {
+        // ioredis resolves exec() with per-command [err, result] pairs; a
+        // rejected command (WRONGTYPE, OOM, …) would otherwise be invisible.
+        const failed = (results || []).find(([err]) => err);
+        if (failed) throw failed[0];
+      })
+      .catch((err) => {
+        logger.warn('Failed to persist webhook delivery metrics', {
+          webhook_id: webhookId,
+          error: err.message,
+        });
+      });
+  } catch (err) {
+    logger.warn('Failed to persist webhook delivery metrics', {
+      webhook_id: webhookId,
+      error: err.message,
+    });
+  }
+}
+
+async function _scanMetricKeys(pattern) {
+  const redis = cache.getClient();
+  const keys = [];
+  let cursor = '0';
+  do {
+    const [nextCursor, batch] = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+    cursor = String(nextCursor);
+    keys.push(...batch);
+  } while (cursor !== '0');
+  return keys;
+}
+
+/**
+ * Loads the durable counters back into the in-memory read model (#343).
+ *
+ * Called once from startServer(), before the server begins accepting
+ * requests, so no delivery can be counted twice (the overwrite below would
+ * otherwise discard a locally-recorded delta). Rejects if Redis cannot be
+ * read — callers are expected to treat that as "start with empty counters",
+ * not as a fatal startup error (#342).
+ */
+async function hydrateMetrics() {
+  const redis = cache.getClient();
+  const [aggregateRaw, webhookKeys] = await Promise.all([
+    redis.hgetall(METRICS_AGGREGATE_KEY),
+    _scanMetricKeys(`${METRICS_WEBHOOK_KEY_PREFIX}*`),
+  ]);
+
+  metrics._aggregate = _fromRedisFields(aggregateRaw || {});
+  metrics._deliveries.clear();
+
+  const perWebhook = await Promise.all(
+    webhookKeys.map(async (key) => [
+      key.slice(METRICS_WEBHOOK_KEY_PREFIX.length),
+      await redis.hgetall(key),
+    ]),
+  );
+  for (const [webhookId, raw] of perWebhook) {
+    metrics._deliveries.set(webhookId, _fromRedisFields(raw || {}));
+  }
+
+  logger.info('Webhook delivery metrics loaded from Redis', {
+    aggregate_total: metrics._aggregate.total,
+    webhooks_tracked: metrics._deliveries.size,
+  });
+  return metrics._aggregate.total;
 }
 
 function recordDeliveryStart(deliveryId, webhookId) {
@@ -70,6 +182,8 @@ function recordDeliveryEnd(
     wm.failed += 1;
     ag.failed += 1;
   }
+
+  _persistDeliveryMetrics(webhookId, { success, attempts, latencyMs });
 }
 
 function getMetrics() {
@@ -685,4 +799,7 @@ module.exports = {
   shouldRetry,
   getMetrics,
   getInFlightCount,
+  hydrateMetrics,
+  recordDeliveryStart,
+  recordDeliveryEnd,
 };

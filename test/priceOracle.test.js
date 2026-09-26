@@ -617,7 +617,9 @@ describe('refreshAllCachedPrices', () => {
 
     const result = await refreshAllCachedPrices();
 
-    expect(redis.scan).toHaveBeenCalledWith('0', 'MATCH', 'price:*', 'COUNT', 100);
+    // History keys are excluded by the MATCH pattern itself (price:history:*
+    // is skipped at the Redis level), not just by client-side filtering.
+    expect(redis.scan).toHaveBeenCalledWith('0', 'MATCH', 'price:[^h]*', 'COUNT', 100);
     // Only the non-history key is refreshed.
     expect(mockStellarFetch).toHaveBeenCalledWith('XLM', null);
     expect(result).toEqual({ XLM: { price: 0.1, source: 'stellar_dex' } });

@@ -66,6 +66,22 @@ function attach(httpServer) {
 }
 
 /**
+ * Health snapshot of the WebSocket server for the /health endpoint.
+ * Reports unhealthy (rather than throwing) when the server has not been
+ * attached yet, so /health can still answer during early startup.
+ */
+function getHealth() {
+  if (!wss) {
+    return { healthy: false, connections: 0, error: 'WebSocket server not initialized' };
+  }
+  return {
+    healthy: true,
+    connections: wss.clients ? wss.clients.size : 0,
+    error: null,
+  };
+}
+
+/**
  * Gracefully close all WebSocket connections and stop the heartbeat.
  * Call this during process shutdown to avoid abrupt connection drops.
  */
@@ -82,4 +98,4 @@ async function shutdown(wss, drainTimeoutMs = 5000) {
   });
 }
 
-module.exports = { attach, shutdown };
+module.exports = { attach, getHealth, shutdown };

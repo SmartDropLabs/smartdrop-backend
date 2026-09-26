@@ -8,6 +8,13 @@ const { reset, zsets } = mockHelper;
 jest.mock("../src/services/cache", () => mockHelper.cacheMock);
 jest.mock("../src/config", () => ({
   webhookSecretEncryptionKey: "test-webhook-secret-key",
+  // validation/schemas.js enumerates the API key tiers from config at module
+  // load, so the config mock has to carry them too.
+  apiKeyRateLimit: {
+    windowSeconds: 60,
+    defaultTier: "free",
+    tiers: { free: 100, pro: 500, admin: 5000 },
+  },
   webhooks: {
     retryBaseMs: 30000,
     retryFactor: 2,

@@ -88,6 +88,7 @@ const env = cleanEnv(rawEnv, {
   AIRDROP_JSON_MAX_BYTES: positiveInteger({ default: 2 * 1024 * 1024 }),
   AIRDROP_RATELIMIT_WINDOW: positiveInteger({ default: 60 }),
   AIRDROP_RATELIMIT_MAX: positiveInteger({ default: 10 }),
+  CORS_MAX_AGE_SECONDS: positiveInteger({ default: 86400 }),
   PRICE_CACHE_TTL_SECONDS: num({ default: 60 }),
   PRICE_REFRESH_INTERVAL_SECONDS: num({ default: 30 }),
   PRICE_STALE_THRESHOLD_MINUTES: num({ default: 5 }),
@@ -129,116 +130,7 @@ const parsedWatchedAssets = Array.isArray(env.WATCHED_ASSETS)
   ? env.WATCHED_ASSETS
   : parseWatchedAssets(env.WATCHED_ASSETS);
 
-const config = module.exports;
-
-// #291 — Runtime config hot-reload support. When the server receives a
-// SIGHUP signal (or watches for .env file changes in development), it
-// re-reads environment variables and re-validates them via envalid, then
-// replaces the exported config values in-place so all consumers see the
-// updated config without a restart.
-function reload() {
-  require('dotenv').config({ override: true });
-  const reloaded = cleanEnv({ ...process.env }, {
-    NODE_ENV: str({ default: 'development', choices: ['development', 'test', 'production'] }),
-    PORT: port({ default: 3000 }),
-    REDIS_URL: url({ devDefault: 'redis://localhost:6379' }),
-    DATABASE_URL: url({ devDefault: databaseDevDefault }),
-    STELLAR_HORIZON_URL: url({ default: 'https://horizon.stellar.org' }),
-    SOROBAN_RPC_URL: url({ default: 'https://soroban-rpc.mainnet.stellar.gateway.fm' }),
-    USDC_ISSUER: stellarAddress({ default: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA' }),
-    COINGECKO_API_KEY: str({ default: '' }),
-    COINMARKETCAP_API_KEY: str({ default: '' }),
-    INSTANCE_ID: str({ default: '' }),
-    LEASE_TTL_MS: positiveInteger({ default: 15000 }),
-    LEASE_RENEW_INTERVAL_MS: positiveInteger({ default: 5000 }),
-    ADMIN_API_KEY: str({ default: '' }),
-    WEBHOOK_SECRET_ENCRYPTION_KEY: str({ default: '' }),
-    AIRDROP_CSV_MAX_BYTES: positiveInteger({ default: 5 * 1024 * 1024 }),
-    AIRDROP_JSON_MAX_BYTES: positiveInteger({ default: 2 * 1024 * 1024 }),
-    AIRDROP_RATELIMIT_WINDOW: positiveInteger({ default: 60 }),
-    AIRDROP_RATELIMIT_MAX: positiveInteger({ default: 10 }),
-    PRICE_CACHE_TTL_SECONDS: num({ default: 60 }),
-    PRICE_REFRESH_INTERVAL_SECONDS: num({ default: 30 }),
-    PRICE_STALE_THRESHOLD_MINUTES: num({ default: 5 }),
-    PRICE_ANOMALY_THRESHOLD_PCT: num({ default: 20 }),
-    PRICE_MIN_SOURCES: num({ default: 2 }),
-    PRICE_ANOMALY_ACTION: str({ default: 'warn', choices: ['warn', 'reject'] }),
-    PRICE_SOURCE_PRIORITY: str({ default: '' }),
-    PRICE_REFRESH_MAX_CYCLE_MS: num({ default: 90000 }),
-    CIRCUIT_BREAKER_FAILURE_THRESHOLD: num({ default: 3 }),
-    CIRCUIT_BREAKER_SUCCESS_THRESHOLD: num({ default: 1 }),
-    CIRCUIT_BREAKER_TIMEOUT_MS: num({ default: 30000 }),
-    PRICE_SOURCE_CIRCUIT_COOLDOWN_MS: num({ default: 15 * 60 * 1000 }),
-    PRICE_SOURCE_CIRCUIT_REMINDER_MS: num({ default: 5 * 60 * 1000 }),
-    AIRDROP_EXPIRY_CHECK_INTERVAL_SECONDS: num({ default: 60 }),
-    AIRDROP_LEDGER_CACHE_TTL_MS: num({ default: 5000 }),
-    AIRDROP_EXPIRY_SCAN_BATCH_SIZE: num({ default: 100 }),
-    WATCHED_ASSETS: watchedAssets({ default: '' }),
-    SENTRY_DSN: str({ default: '' }),
-    LOG_LEVEL: str({ default: 'info', choices: ['debug', 'info', 'warn', 'error'] }),
-    SLOW_REQUEST_THRESHOLD_MS: num({ default: 1000 }),
-    ROUTE_TIMEOUT_MS: num({ default: 30000 }),
-    API_KEY_RATELIMIT_WINDOW_SECONDS: positiveInteger({ default: 60 }),
-    API_KEY_RATELIMIT_FREE_MAX: positiveInteger({ default: 100 }),
-    API_KEY_RATELIMIT_PRO_MAX: positiveInteger({ default: 1000 }),
-    API_KEY_RATELIMIT_ADMIN_MAX: positiveInteger({ default: 10000 }),
-  });
-
-  const reloadedUsdcIssuer = reloaded.USDC_ISSUER;
-  const reloadedWatchedAssets = Array.isArray(reloaded.WATCHED_ASSETS)
-    ? reloaded.WATCHED_ASSETS
-    : parseWatchedAssets(reloaded.WATCHED_ASSETS);
-
-  // Update all config properties in-place so existing references see new values.
-  Object.assign(config, {
-    nodeEnv: reloaded.NODE_ENV,
-    port: reloaded.PORT,
-    databaseUrl: reloaded.DATABASE_URL,
-    redis: { url: reloaded.REDIS_URL },
-    stellar: {
-      horizonUrl: reloaded.STELLAR_HORIZON_URL,
-      sorobanRpcUrl: reloaded.SOROBAN_RPC_URL,
-      usdcIssuer: reloadedUsdcIssuer,
-    },
-    auth: { adminApiKey: reloaded.ADMIN_API_KEY },
-    // Issue #373: reload() already re-validated COINMARKETCAP_API_KEY above
-    // (it's in the env schema passed to validateEnv) but never applied it —
-    // config.coinmarketcap was silently left out of this Object.assign
-    // entirely, so even a caller that re-read config.coinmarketcap.apiKey
-    // fresh on every call (see coinmarketcap.js's own fix for #373) would
-    // still never see a reloaded key change without this.
-    coinmarketcap: { ...config.coinmarketcap, apiKey: reloaded.COINMARKETCAP_API_KEY },
-    sentryDsn: reloaded.SENTRY_DSN,
-    slowRequestThresholdMs: reloaded.SLOW_REQUEST_THRESHOLD_MS,
-    routeTimeoutMs: reloaded.ROUTE_TIMEOUT_MS,
-    webhookSecretEncryptionKey: reloaded.WEBHOOK_SECRET_ENCRYPTION_KEY,
-    watchedAssets: reloadedWatchedAssets,
-    webhooks: {
-      ...config.webhooks,
-      maxAttempts: parseInt(process.env.WEBHOOK_MAX_ATTEMPTS, 10) || 3,
-      retryBaseMs: parseInt(process.env.WEBHOOK_RETRY_BASE_MS, 10) || 30000,
-      retryFactor: parseFloat(process.env.WEBHOOK_RETRY_FACTOR) || 2,
-      timeoutMs: parseInt(process.env.WEBHOOK_TIMEOUT_MS, 10) || 5000,
-    },
-    LOG_LEVEL: reloaded.LOG_LEVEL,
-  });
-
-  return config;
-}
-
-// Register SIGHUP handler for production hot-reload
-if (process.env.NODE_ENV === 'production') {
-  process.on('SIGHUP', () => {
-    try {
-      reload();
-      console.log('[config] Configuration reloaded via SIGHUP');
-    } catch (err) {
-      console.error('[config] Failed to reload configuration:', err.message);
-    }
-  });
-}
-
-module.exports.reload = reload;
+const config = module.exports = {
   nodeEnv: env.NODE_ENV,
   port: env.PORT,
   databaseUrl: env.DATABASE_URL,
@@ -343,6 +235,9 @@ module.exports.reload = reload;
   slowRequestThresholdMs: env.SLOW_REQUEST_THRESHOLD_MS,
   routeTimeoutMs: env.ROUTE_TIMEOUT_MS,
   webhookSecretEncryptionKey: env.WEBHOOK_SECRET_ENCRYPTION_KEY,
+  // How long browsers may cache a CORS preflight response (issue #344).
+  // Exposed as Access-Control-Max-Age on every successful OPTIONS preflight.
+  corsMaxAgeSeconds: env.CORS_MAX_AGE_SECONDS,
   corsAllowedOrigins: (process.env.CORS_ALLOWED_ORIGINS || 'http://localhost:3000,http://localhost:3001')
     .split(',')
     .map((o) => o.trim())
@@ -387,3 +282,115 @@ module.exports.reload = reload;
     maxConnectionsPerIp: parseInt(process.env.WS_MAX_CONNECTIONS_PER_IP, 10) || 5,
   },
 };
+
+
+// #291 — Runtime config hot-reload support. When the server receives a
+// SIGHUP signal (or watches for .env file changes in development), it
+// re-reads environment variables and re-validates them via envalid, then
+// replaces the exported config values in-place so all consumers see the
+// updated config without a restart.
+function reload() {
+  require('dotenv').config({ override: true });
+  const reloaded = cleanEnv({ ...process.env }, {
+    NODE_ENV: str({ default: 'development', choices: ['development', 'test', 'production'] }),
+    PORT: port({ default: 3000 }),
+    REDIS_URL: url({ devDefault: 'redis://localhost:6379' }),
+    DATABASE_URL: url({ devDefault: databaseDevDefault }),
+    STELLAR_HORIZON_URL: url({ default: 'https://horizon.stellar.org' }),
+    SOROBAN_RPC_URL: url({ default: 'https://soroban-rpc.mainnet.stellar.gateway.fm' }),
+    USDC_ISSUER: stellarAddress({ default: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA' }),
+    COINGECKO_API_KEY: str({ default: '' }),
+    COINMARKETCAP_API_KEY: str({ default: '' }),
+    INSTANCE_ID: str({ default: '' }),
+    LEASE_TTL_MS: positiveInteger({ default: 15000 }),
+    LEASE_RENEW_INTERVAL_MS: positiveInteger({ default: 5000 }),
+    ADMIN_API_KEY: str({ default: '' }),
+    WEBHOOK_SECRET_ENCRYPTION_KEY: str({ default: '' }),
+    AIRDROP_CSV_MAX_BYTES: positiveInteger({ default: 5 * 1024 * 1024 }),
+    AIRDROP_JSON_MAX_BYTES: positiveInteger({ default: 2 * 1024 * 1024 }),
+    AIRDROP_RATELIMIT_WINDOW: positiveInteger({ default: 60 }),
+    AIRDROP_RATELIMIT_MAX: positiveInteger({ default: 10 }),
+    CORS_MAX_AGE_SECONDS: positiveInteger({ default: 86400 }),
+    PRICE_CACHE_TTL_SECONDS: num({ default: 60 }),
+    PRICE_REFRESH_INTERVAL_SECONDS: num({ default: 30 }),
+    PRICE_STALE_THRESHOLD_MINUTES: num({ default: 5 }),
+    PRICE_ANOMALY_THRESHOLD_PCT: num({ default: 20 }),
+    PRICE_MIN_SOURCES: num({ default: 2 }),
+    PRICE_ANOMALY_ACTION: str({ default: 'warn', choices: ['warn', 'reject'] }),
+    PRICE_SOURCE_PRIORITY: str({ default: '' }),
+    PRICE_REFRESH_MAX_CYCLE_MS: num({ default: 90000 }),
+    CIRCUIT_BREAKER_FAILURE_THRESHOLD: num({ default: 3 }),
+    CIRCUIT_BREAKER_SUCCESS_THRESHOLD: num({ default: 1 }),
+    CIRCUIT_BREAKER_TIMEOUT_MS: num({ default: 30000 }),
+    PRICE_SOURCE_CIRCUIT_COOLDOWN_MS: num({ default: 15 * 60 * 1000 }),
+    PRICE_SOURCE_CIRCUIT_REMINDER_MS: num({ default: 5 * 60 * 1000 }),
+    AIRDROP_EXPIRY_CHECK_INTERVAL_SECONDS: num({ default: 60 }),
+    AIRDROP_LEDGER_CACHE_TTL_MS: num({ default: 5000 }),
+    AIRDROP_EXPIRY_SCAN_BATCH_SIZE: num({ default: 100 }),
+    WATCHED_ASSETS: watchedAssets({ default: '' }),
+    SENTRY_DSN: str({ default: '' }),
+    LOG_LEVEL: str({ default: 'info', choices: ['debug', 'info', 'warn', 'error'] }),
+    SLOW_REQUEST_THRESHOLD_MS: num({ default: 1000 }),
+    ROUTE_TIMEOUT_MS: num({ default: 30000 }),
+    API_KEY_RATELIMIT_WINDOW_SECONDS: positiveInteger({ default: 60 }),
+    API_KEY_RATELIMIT_FREE_MAX: positiveInteger({ default: 100 }),
+    API_KEY_RATELIMIT_PRO_MAX: positiveInteger({ default: 1000 }),
+    API_KEY_RATELIMIT_ADMIN_MAX: positiveInteger({ default: 10000 }),
+  });
+
+  const reloadedUsdcIssuer = reloaded.USDC_ISSUER;
+  const reloadedWatchedAssets = Array.isArray(reloaded.WATCHED_ASSETS)
+    ? reloaded.WATCHED_ASSETS
+    : parseWatchedAssets(reloaded.WATCHED_ASSETS);
+
+  // Update all config properties in-place so existing references see new values.
+  Object.assign(config, {
+    nodeEnv: reloaded.NODE_ENV,
+    port: reloaded.PORT,
+    databaseUrl: reloaded.DATABASE_URL,
+    redis: { url: reloaded.REDIS_URL },
+    stellar: {
+      horizonUrl: reloaded.STELLAR_HORIZON_URL,
+      sorobanRpcUrl: reloaded.SOROBAN_RPC_URL,
+      usdcIssuer: reloadedUsdcIssuer,
+    },
+    auth: { adminApiKey: reloaded.ADMIN_API_KEY },
+    // Issue #373: reload() already re-validated COINMARKETCAP_API_KEY above
+    // (it's in the env schema passed to validateEnv) but never applied it —
+    // config.coinmarketcap was silently left out of this Object.assign
+    // entirely, so even a caller that re-read config.coinmarketcap.apiKey
+    // fresh on every call (see coinmarketcap.js's own fix for #373) would
+    // still never see a reloaded key change without this.
+    coinmarketcap: { ...config.coinmarketcap, apiKey: reloaded.COINMARKETCAP_API_KEY },
+    sentryDsn: reloaded.SENTRY_DSN,
+    slowRequestThresholdMs: reloaded.SLOW_REQUEST_THRESHOLD_MS,
+    routeTimeoutMs: reloaded.ROUTE_TIMEOUT_MS,
+    webhookSecretEncryptionKey: reloaded.WEBHOOK_SECRET_ENCRYPTION_KEY,
+    corsMaxAgeSeconds: reloaded.CORS_MAX_AGE_SECONDS,
+    watchedAssets: reloadedWatchedAssets,
+    webhooks: {
+      ...config.webhooks,
+      maxAttempts: parseInt(process.env.WEBHOOK_MAX_ATTEMPTS, 10) || 3,
+      retryBaseMs: parseInt(process.env.WEBHOOK_RETRY_BASE_MS, 10) || 30000,
+      retryFactor: parseFloat(process.env.WEBHOOK_RETRY_FACTOR) || 2,
+      timeoutMs: parseInt(process.env.WEBHOOK_TIMEOUT_MS, 10) || 5000,
+    },
+    LOG_LEVEL: reloaded.LOG_LEVEL,
+  });
+
+  return config;
+}
+
+// Register SIGHUP handler for production hot-reload
+if (process.env.NODE_ENV === 'production') {
+  process.on('SIGHUP', () => {
+    try {
+      reload();
+      console.log('[config] Configuration reloaded via SIGHUP');
+    } catch (err) {
+      console.error('[config] Failed to reload configuration:', err.message);
+    }
+  });
+}
+
+module.exports.reload = reload;

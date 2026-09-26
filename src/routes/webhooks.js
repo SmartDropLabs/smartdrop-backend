@@ -8,6 +8,7 @@ const deliveryRepo = require("../repositories/deliveryRepository");
 const dispatcher = require("../services/webhookDispatcher");
 const signatureService = require("../services/webhookSignature");
 const { probeReachability } = require("../services/webhook");
+const { assertPublicTarget } = require("../services/ssrfGuard");
 const { idempotencyMiddleware } = require("../services/idempotency");
 const { requireCsrfHeader } = require("../middleware/csrf");
 const buildRateLimit = require("../middleware/rateLimit");
@@ -121,6 +122,14 @@ router.post(
           ),
         );
       }
+
+      // Issue #313: probeReachability makes a real outbound HTTP request to
+      // the caller-supplied URL — used to happen here before the URL had
+      // been validated at all (webhookRepo.create()'s SSRF check only runs
+      // *after* this point), making the probe itself an SSRF oracle against
+      // internal/private targets. Validate (format, protocol, and resolved
+      // address) before probing, the same guard used at delivery time.
+      await assertPublicTarget(body.url);
 
       const secret = body.secret || signatureService.generateSecret();
       const reachability = await probeReachability(body.url);

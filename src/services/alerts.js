@@ -15,6 +15,16 @@ function alertKey(id) {
   return `alert:${id}`;
 }
 
+// Secondary index (issue #310): evaluateForAsset only ever needs the alerts
+// for one asset, but used to ZREVRANGE the *entire* IDS_KEY sorted set and
+// fetch + filter every alert in the system on every price tick, regardless
+// of how many assets it actually watches. Kept in sync with IDS_KEY by
+// create()/remove() so evaluateForAssetInner can look up just this asset's
+// ids directly instead of scanning everything.
+function assetIdsKey(asset) {
+  return `alerts:asset:${asset.toUpperCase()}`;
+}
+
 function generateId() {
   return `alrt_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
 }
@@ -63,6 +73,7 @@ async function create(data) {
   await redis.multi()
     .set(alertKey(id), JSON.stringify(alert))
     .zadd(IDS_KEY, Date.now(), id)
+    .sadd(assetIdsKey(alert.asset), id)
     .exec();
 
   return alert;
@@ -100,6 +111,7 @@ async function remove(id) {
   await redis.multi()
     .del(alertKey(id))
     .zrem(IDS_KEY, id)
+    .srem(assetIdsKey(existing.asset), id)
     .exec();
   return existing;
 }
@@ -143,10 +155,13 @@ async function evaluateForAsset(asset, priceUsd) {
 
 async function evaluateForAssetInner(asset, priceUsd) {
   const redis = cache.getClient();
-  const ids = await redis.zrevrange(IDS_KEY, 0, -1);
+  const ids = await redis.smembers(assetIdsKey(asset));
 
   for (const id of ids) {
     const alert = await cache.get(alertKey(id));
+    // Index and record can drift (e.g. a record written by an older
+    // version before this index existed) — fall back to the asset check
+    // rather than trusting the index blindly.
     if (!alert || alert.asset !== asset.toUpperCase()) continue;
 
     if (!isTriggered(alert, priceUsd)) continue;
@@ -207,4 +222,27 @@ async function evaluateAll() {
   }
 }
 
-module.exports = { create, list, listPaginated, remove, evaluateForAsset, evaluateAll };
+// One-time backfill for the assetIdsKey() index (issue #310): populates it
+// for alerts that were created before this index existed, so
+// evaluateForAssetInner doesn't silently stop seeing them. Safe to run
+// repeatedly (SADD is idempotent); not wired into any automatic startup
+// path since it's an O(n) full scan — meant to be run once, manually, by an
+// operator against an existing deployment's pre-existing alert set.
+async function backfillAssetIndex() {
+  const redis = cache.getClient();
+  const ids = await redis.zrevrange(IDS_KEY, 0, -1);
+  const multi = redis.multi();
+  let queued = 0;
+  for (const id of ids) {
+    const alert = await cache.get(alertKey(id));
+    if (!alert) continue;
+    multi.sadd(assetIdsKey(alert.asset), id);
+    queued += 1;
+  }
+  if (queued > 0) await multi.exec();
+  return queued;
+}
+
+module.exports = {
+  create, list, listPaginated, remove, evaluateForAsset, evaluateAll, backfillAssetIndex,
+};

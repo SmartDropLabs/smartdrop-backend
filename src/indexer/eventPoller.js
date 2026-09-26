@@ -176,6 +176,10 @@ class EventPoller {
     let response;
     let lastError;
     for (let attempt = 1; attempt <= RPC_MAX_RETRIES; attempt++) {
+      if (this.stopped) {
+        throw new Error('Poll stopped during RPC retry');
+      }
+
       try {
         response = await this.rpcBreaker.call(() =>
           this.server.getEvents({

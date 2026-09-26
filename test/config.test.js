@@ -73,6 +73,7 @@ describe('configuration validation', () => {
         anomalyThresholdPercent: 20,
         minSources: 2,
         anomalyAction: 'warn',
+        sourcePriority: [],
         refreshMaxCycleMs: 90000,
         circuitBreaker: {
           failureThreshold: 3,
@@ -125,5 +126,43 @@ describe('configuration validation', () => {
     const output = `${result.stdout}\n${result.stderr}`;
     expect(result.status).toBe(1);
     expect(output).toContain('WATCHED_ASSETS');
+  });
+
+  // Issue #373's root cause: reload() re-validated COINMARKETCAP_API_KEY
+  // (it's in the schema passed to validateEnv) but never applied it to
+  // config.coinmarketcap, so a caller reading config.coinmarketcap.apiKey
+  // fresh on every call would still never observe a reloaded key change.
+  test('reload() applies a changed COINMARKETCAP_API_KEY to config.coinmarketcap', () => {
+    const result = runConfig(
+      [
+        "const config = require('./src/config');",
+        "process.env.COINMARKETCAP_API_KEY = 'rotated-key';",
+        'config.reload();',
+        'console.log(JSON.stringify({ apiKey: config.coinmarketcap.apiKey, baseUrl: config.coinmarketcap.baseUrl }));',
+      ].join(' '),
+      { NODE_ENV: 'test', COINMARKETCAP_API_KEY: 'original-key' }
+    );
+
+    expect(result.status).toBe(0);
+    const parsed = JSON.parse(result.stdout.trim());
+    expect(parsed.apiKey).toBe('rotated-key');
+    // baseUrl isn't env-driven at all; reload() must preserve it rather
+    // than dropping it while updating apiKey.
+    expect(parsed.baseUrl).toBe('https://pro-api.coinmarketcap.com/v1');
+  });
+
+  test('reload() updates config.stellar.horizonUrl', () => {
+    const result = runConfig(
+      [
+        "const config = require('./src/config');",
+        "process.env.STELLAR_HORIZON_URL = 'https://horizon.stellar.org';",
+        'config.reload();',
+        'console.log(config.stellar.horizonUrl);',
+      ].join(' '),
+      { NODE_ENV: 'test', STELLAR_HORIZON_URL: 'https://horizon-testnet.stellar.org' }
+    );
+
+    expect(result.status).toBe(0);
+    expect(result.stdout.trim()).toBe('https://horizon.stellar.org');
   });
 });

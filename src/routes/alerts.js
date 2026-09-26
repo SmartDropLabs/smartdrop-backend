@@ -40,7 +40,7 @@ router.delete('/alerts/:id', validateRouteIdParams, async (req, res, next) => {
   try {
     const deleted = await alertsService.remove(req.params.id);
     if (!deleted) {
-      return next(new AppError('NOT_FOUND', 'Alert not found', 404));
+      return next(new AppError('ALERT_NOT_FOUND', 'Alert not found', 404));
     }
     return res.json({ deleted: true, id: req.params.id });
   } catch (err) {

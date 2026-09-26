@@ -148,4 +148,29 @@ describe('webhookRepository', () => {
       expect(found.secret).toBe('whsec_neverencrypted00000');
     });
   });
+
+  describe('atomic create (#355)', () => {
+    test('create writes the record and its id-set membership in one MULTI/EXEC transaction', async () => {
+      const w = await webhookRepo.create({
+        url: 'https://a.com',
+        events: ['*'],
+        secret: 'whsec_aaaaaaaaaaaaaaaa',
+        owner_ip: '203.0.113.5',
+      });
+
+      expect(mockHelper.redis.multi).toHaveBeenCalledTimes(1);
+      // Both the record and both index entries (global + per-owner) must
+      // have actually landed — not just that multi() was called.
+      expect(await webhookRepo.findById(w.id)).not.toBeNull();
+      const all = await webhookRepo.listAll();
+      expect(all.map((wh) => wh.id)).toContain(w.id);
+      expect(await webhookRepo.countByOwner('203.0.113.5')).toBe(1);
+    });
+
+    test('create without owner_ip still commits the record and the global index atomically', async () => {
+      const w = await webhookRepo.create({ url: 'https://b.com', events: ['*'], secret: 'whsec_bbbbbbbbbbbbbbbb' });
+      expect(mockHelper.redis.multi).toHaveBeenCalledTimes(1);
+      expect(await webhookRepo.findById(w.id)).not.toBeNull();
+    });
+  });
 });

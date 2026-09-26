@@ -1,18 +1,18 @@
-const crypto = require('crypto');
-const cache = require('./cache');
-const config = require('../config');
+const crypto = require("crypto");
+const cache = require("./cache");
+const config = require("../config");
 
-const KEY_PREFIX = 'api_key:';
-const HASH_PREFIX = 'api_key_hash:';
-const IDS_KEY = 'api_keys';
+const KEY_PREFIX = "api_key:";
+const HASH_PREFIX = "api_key_hash:";
+const IDS_KEY = "api_keys";
 
 function hashApiKey(apiKey) {
-  return crypto.createHash('sha256').update(apiKey).digest('hex');
+  return crypto.createHash("sha256").update(apiKey).digest("hex");
 }
 
 function constantTimeSecretEqual(actual, expected) {
-  const actualDigest = crypto.createHash('sha256').update(actual).digest();
-  const expectedDigest = crypto.createHash('sha256').update(expected).digest();
+  const actualDigest = crypto.createHash("sha256").update(actual).digest();
+  const expectedDigest = crypto.createHash("sha256").update(expected).digest();
   return crypto.timingSafeEqual(actualDigest, expectedDigest);
 }
 
@@ -23,11 +23,11 @@ function sanitize(record) {
 }
 
 function generateApiKey() {
-  return crypto.randomBytes(32).toString('hex');
+  return crypto.randomBytes(32).toString("hex");
 }
 
 function keyId() {
-  return `key_${crypto.randomUUID().replace(/-/g, '')}`;
+  return `key_${crypto.randomUUID().replace(/-/g, "")}`;
 }
 
 function keyPath(id) {
@@ -49,7 +49,18 @@ async function listKeys() {
   return records.filter(Boolean).map(sanitize);
 }
 
-async function createKey({ label, scopes = ['default'] }) {
+function normalizeTier(tier) {
+  const tiers = config.apiKeyRateLimit.tiers;
+  if (
+    typeof tier === "string" &&
+    Object.prototype.hasOwnProperty.call(tiers, tier)
+  ) {
+    return tier;
+  }
+  return config.apiKeyRateLimit.defaultTier;
+}
+
+async function createKey({ label, scopes = ["default"], tier }) {
   const apiKey = generateApiKey();
   const hashed = hashApiKey(apiKey);
   const now = new Date().toISOString();
@@ -59,14 +70,18 @@ async function createKey({ label, scopes = ['default'] }) {
     key_prefix: apiKey.slice(0, 8),
     key_hash: hashed,
     scopes,
+    // Sizes this key's own rate limit bucket (issue #251).
+    tier: normalizeTier(tier),
     created_at: now,
     last_used_at: null,
   };
 
   const redis = cache.getClient();
-  await cache.set(keyPath(record.id), record);
-  await cache.set(hashPath(hashed), record.id);
-  await redis.zadd(IDS_KEY, Date.now(), record.id);
+  const multi = redis.multi();
+  multi.set(keyPath(record.id), JSON.stringify(record));
+  multi.set(hashPath(hashed), record.id);
+  multi.zadd(IDS_KEY, Date.now(), record.id);
+  await multi.exec();
 
   return {
     api_key: apiKey,
@@ -79,9 +94,11 @@ async function revokeKey(id) {
   if (!record) return null;
 
   const redis = cache.getClient();
-  await cache.del(keyPath(id));
-  await cache.del(hashPath(record.key_hash));
-  await redis.zrem(IDS_KEY, id);
+  const multi = redis.multi();
+  multi.del(keyPath(id));
+  multi.del(hashPath(record.key_hash));
+  multi.zrem(IDS_KEY, id);
+  await multi.exec();
   return sanitize(record);
 }
 
@@ -94,15 +111,60 @@ async function touch(record) {
   return sanitize(updated);
 }
 
+async function rotateKey(id, options = {}) {
+  const oldRecord = await getKey(id);
+  if (!oldRecord) return null;
+
+  // Create new key with same label and scopes, but allow tier override
+  const newApiKey = generateApiKey();
+  const hashed = hashApiKey(newApiKey);
+  const now = new Date().toISOString();
+  const newRecord = {
+    id: keyId(),
+    label: oldRecord.label,
+    key_prefix: newApiKey.slice(0, 8),
+    key_hash: hashed,
+    scopes: oldRecord.scopes,
+    tier: options.tier ? normalizeTier(options.tier) : oldRecord.tier,
+    created_at: now,
+    last_used_at: null,
+  };
+
+  const redis = cache.getClient();
+  const multi = redis.multi();
+
+  // Create new key
+  multi.set(keyPath(newRecord.id), JSON.stringify(newRecord));
+  multi.set(hashPath(hashed), newRecord.id);
+  multi.zadd(IDS_KEY, Date.now(), newRecord.id);
+
+  // Revoke old key
+  multi.del(keyPath(id));
+  multi.del(hashPath(oldRecord.key_hash));
+  multi.zrem(IDS_KEY, id);
+
+  await multi.exec();
+
+  return {
+    api_key: newApiKey,
+    key: sanitize(newRecord),
+    rotated_from: sanitize(oldRecord),
+  };
+}
+
 async function validateApiKey(apiKey) {
   if (!apiKey) return null;
 
-  if (config.auth.adminApiKey && constantTimeSecretEqual(apiKey, config.auth.adminApiKey)) {
+  if (
+    config.auth.adminApiKey &&
+    constantTimeSecretEqual(apiKey, config.auth.adminApiKey)
+  ) {
     return {
-      id: 'admin',
-      label: 'Bootstrap admin key',
+      id: "admin",
+      label: "Bootstrap admin key",
       key_prefix: apiKey.slice(0, 8),
-      scopes: ['admin'],
+      scopes: ["admin"],
+      tier: "admin",
       created_at: null,
       last_used_at: new Date().toISOString(),
     };
@@ -115,6 +177,12 @@ async function validateApiKey(apiKey) {
   const record = await getKey(id);
   if (!record || record.key_hash !== hashed) return null;
 
+  // Keys created before tiers existed have no `tier`; resolve them to the
+  // default tier rather than leaving the rate limiter to guess.
+  if (!record.tier) {
+    record.tier = config.apiKeyRateLimit.defaultTier;
+  }
+
   return touch(record);
 }
 
@@ -123,6 +191,8 @@ module.exports = {
   getKey,
   hashApiKey,
   listKeys,
+  normalizeTier,
+  rotateKey,
   revokeKey,
   validateApiKey,
 };

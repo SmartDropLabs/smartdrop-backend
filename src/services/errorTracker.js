@@ -8,10 +8,11 @@ let initialized = false;
 function init() {
   const dsn = config.sentryDsn || process.env.SENTRY_DSN;
   if (dsn) {
+    const isProduction = (config.nodeEnv || 'development') === 'production';
     Sentry.init({
       dsn,
       environment: config.nodeEnv || 'development',
-      tracesSampleRate: 1.0,
+      tracesSampleRate: isProduction ? 0.1 : 1.0,
     });
     initialized = true;
   }

@@ -15,12 +15,15 @@ function isWarmSuccess(result) {
   );
 }
 
-async function runWarmCache(assets, oracle) {
+async function runWarmCache(assets, oracle, abortSignal) {
   const startedAt = Date.now();
   const results = await Promise.allSettled(
-    assets.map(({ code, issuer }) => (
-      Promise.resolve().then(() => oracle.fetchFreshPrice(code, issuer || null))
-    ))
+    assets.map(({ code, issuer }) => {
+      if (abortSignal && abortSignal.aborted) {
+        return Promise.reject(new Error('Warming cancelled'));
+      }
+      return Promise.resolve().then(() => oracle.fetchFreshPrice(code, issuer || null));
+    })
   );
   const succeeded = results.filter(isWarmSuccess).length;
 
@@ -38,28 +41,69 @@ async function warmCache(
   oracle = priceOracle,
   { timeoutMs = DEFAULT_TIMEOUT_MS, log = logger } = {}
 ) {
-  if (!assets || assets.length === 0) {
+  let allAssets = Array.isArray(assets) ? [...assets] : [];
+
+  if (oracle && typeof oracle.getQueriedAssets === 'function') {
+    try {
+      const queried = await oracle.getQueriedAssets();
+      const seen = new Set(allAssets.map((a) => (a.issuer ? `${a.code}:${a.issuer}` : a.code)));
+      for (const item of queried) {
+        const key = item.issuer ? `${item.code}:${item.issuer}` : item.code;
+        if (!seen.has(key)) {
+          seen.add(key);
+          allAssets.push(item);
+        }
+      }
+    } catch (err) {
+      log.warn('Failed to fetch queried assets during cache warming', { error: err.message });
+    }
+  }
+
+  if (!allAssets || allAssets.length === 0) {
     log.info('Cache warm skipped: no watched assets configured');
     return { total: 0, succeeded: 0, failed: 0, timedOut: false, durationMs: 0 };
   }
 
+  const abortController = new AbortController();
   let timedOut = false;
   let timeoutId;
 
-  const warming = runWarmCache(assets, oracle).then((summary) => {
-    if (!timedOut) {
-      log.info('Cache warm complete', summary);
+  // Wrap each fetch to track successes incrementally, so the timeout
+  // handler can snapshot the real count instead of hardcoding 0 (#413).
+  let succeededSoFar = 0;
+  const trackedResults = allAssets.map(({ code, issuer }) => {
+    if (abortController.signal.aborted) {
+      return Promise.reject(new Error('Warming cancelled'));
     }
-    return summary;
+    return Promise.resolve()
+      .then(() => oracle.fetchFreshPrice(code, issuer || null))
+      .then((value) => {
+        if (isWarmSuccess({ status: 'fulfilled', value })) {
+          succeededSoFar++;
+        }
+        return { status: 'fulfilled', value };
+      })
+      .catch((reason) => ({ status: 'rejected', reason }));
   });
+
+  const warming = Promise.all(trackedResults).then((results) => ({
+    total: allAssets.length,
+    succeeded: results.filter(isWarmSuccess).length,
+    failed: allAssets.length - results.filter(isWarmSuccess).length,
+    timedOut: false,
+    durationMs: 0,
+  }));
 
   const timeout = new Promise((resolve) => {
     timeoutId = setTimeout(() => {
       timedOut = true;
+      // Signal abort to cancel in-flight fetches (#402)
+      abortController.abort();
+      const failed = allAssets.length - succeededSoFar;
       const summary = {
-        total: assets.length,
-        succeeded: 0,
-        failed: assets.length,
+        total: allAssets.length,
+        succeeded: succeededSoFar,
+        failed,
         timedOut: true,
         durationMs: timeoutMs,
       };

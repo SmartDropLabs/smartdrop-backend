@@ -61,18 +61,20 @@ function attach(httpServer) {
 }
 
 /**
- * Returns health information about the WebSocket server.
- * Used by the /health endpoint to check if the WS server is accepting connections.
+ * Gracefully close all WebSocket connections and stop the heartbeat.
+ * Call this during process shutdown to avoid abrupt connection drops.
  */
-function getHealth() {
-  if (!wss) {
-    return { healthy: false, connections: 0, error: 'WebSocket server not initialized' };
-  }
-  return {
-    healthy: wss.readyState === undefined || wss.readyState === 0, // 0 = CONNECTING (normal for server)
-    connections: wss.clients.size,
-    error: null,
-  };
+async function shutdown(wss, drainTimeoutMs = 5000) {
+  if (!wss) return;
+
+  await subscriptionManager.drain(drainTimeoutMs);
+
+  await new Promise((resolve) => {
+    wss.close(() => {
+      logger.info('WebSocket server closed');
+      resolve();
+    });
+  });
 }
 
-module.exports = { attach, getHealth };
+module.exports = { attach, shutdown };

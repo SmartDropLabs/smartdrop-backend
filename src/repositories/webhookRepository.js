@@ -25,6 +25,31 @@ const { encryptSecret, decryptSecret, isEncrypted } = require('../services/webho
 
 const IDS_KEY = 'webhooks:ids';
 
+// #369 — per-event-type index sets so listActiveForEvent can fetch only the
+// webhook IDs that subscribe to a given event, rather than loading every
+// webhook record in the system and filtering in JS. Each set is keyed by
+// event type and contains the webhook IDs that subscribe to it.
+function eventIndexKey(eventType) {
+  return `webhooks:event:${eventType}`;
+}
+
+// Add webhook IDs to the per-event-type index for the given events array.
+function addEventIndexes(redis, webhookId, events) {
+  if (!Array.isArray(events)) return;
+  for (const evt of events) {
+    redis.sadd(eventIndexKey(evt), webhookId);
+  }
+}
+
+// Remove webhook IDs from all per-event-type index sets (used before
+// re-indexing on update, or on deletion).
+function removeEventIndexes(redis, webhookId, events) {
+  if (!Array.isArray(events)) return;
+  for (const evt of events) {
+    redis.srem(eventIndexKey(evt), webhookId);
+  }
+}
+
 function key(id) {
   return `webhook:${id}`;
 }
@@ -66,7 +91,27 @@ function normalize(record) {
   };
 }
 
-async function create({ url, events, secret, description, filters }) {
+async function create({ url, events, secret, description, filters, owner_ip }) {
+  // Validate URL before storing (#410) — repository-level guard so callers
+  // that bypass the route layer still get a well-formed, non-internal URL.
+  if (!url || typeof url !== 'string') {
+    throw new Error('webhookRepository.create: url is required');
+  }
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error('webhookRepository.create: url must be a valid URL');
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    throw new Error('webhookRepository.create: url must use http or https protocol');
+  }
+  // Block private/internal network targets to prevent SSRF.
+  const { isPrivateTarget } = require('../validation/schemas');
+  if (isPrivateTarget(parsed.hostname)) {
+    throw new Error('webhookRepository.create: url must not target a private or internal network address');
+  }
+
   const id = generateId();
   const now = new Date().toISOString();
   const record = {
@@ -77,19 +122,36 @@ async function create({ url, events, secret, description, filters }) {
     active: true,
     description: description || null,
     filters: filters || null,
+    // Persisted so remove() can clean up the per-owner index, and so the
+    // per-subscriber cap enforced in routes/webhooks.js actually has an
+    // index to count.
+    owner_ip: owner_ip || null,
     created_at: now,
     updated_at: now,
   };
   const redis = cache.getClient();
-  await cache.set(key(id), record);
-  // A sorted set scored by creation time, not a plain set — mirrors
-  // airdropsService/alerts.js's own IDS_KEY pattern, so paginating (added
-  // below) walks a deterministic, newest-first order rather than
-  // whatever arbitrary order SMEMBERS happened to return (#131).
-  await redis.zadd(IDS_KEY, Date.parse(now), id);
+  // Issue #355: one MULTI/EXEC transaction instead of two or three separate
+  // round trips — every value here is freshly computed above (no read of
+  // prior state feeds into any of these writes), so unlike the read-modify-
+  // write helpers in eventStore.js, this can go directly into one atomic
+  // batch. A crash mid-way used to leave a webhook record with no entry in
+  // IDS_KEY (invisible to list()/listAll(), so it would never fire), or an
+  // id in IDS_KEY with no backing record (a 404 from findById() that list()
+  // still returned as a phantom entry).
+  const multi = redis.multi()
+    .set(key(id), JSON.stringify(record))
+    // A sorted set scored by creation time, not a plain set — mirrors
+    // airdropsService/alerts.js's own IDS_KEY pattern, so paginating (added
+    // below) walks a deterministic, newest-first order rather than
+    // whatever arbitrary order SMEMBERS happened to return (#131).
+    .zadd(IDS_KEY, Date.parse(now), id);
+  // #369 — populate per-event-type index sets so listActiveForEvent can
+  // filter by event type in Redis instead of loading every webhook record.
+  addEventIndexes(multi, id, events);
   if (owner_ip) {
-    await redis.zadd(`webhooks:owner:${owner_ip}`, Date.parse(now), id);
+    multi.zadd(`webhooks:owner:${owner_ip}`, Date.parse(now), id);
   }
+  await multi.exec();
   return normalize(record);
 }
 
@@ -147,8 +209,18 @@ async function list(page = 1, limit = 20) {
 }
 
 async function listActiveForEvent(eventType, matcher) {
-  const all = await listAll();
-  return all.filter((w) => w.active && matcher(w.events, eventType));
+  // #369 — use the per-event-type index to load only webhooks that subscribe
+  // to this event, rather than loading every webhook in the system.
+  try {
+    const redis = cache.getClient();
+    const ids = await redis.smembers(eventIndexKey(eventType));
+    if (ids.length === 0) return [];
+    const records = await Promise.all(ids.map((id) => cache.get(key(id))));
+    return records.filter(Boolean).map(normalize).filter((w) => w.active && matcher(w.events, eventType));
+  } catch (err) {
+    logger.error('webhookRepository.listActiveForEvent Redis error', { eventType, error: err.message });
+    return [];
+  }
 }
 
 async function update(id, patch) {
@@ -165,6 +237,12 @@ async function update(id, patch) {
     created_at: existing.created_at,
     updated_at: new Date().toISOString(),
   };
+  // #369 — re-index event types when the events array changes.
+  if (patch.events && Array.isArray(patch.events)) {
+    const redis = cache.getClient();
+    removeEventIndexes(redis, id, existing.events);
+    addEventIndexes(redis, id, patch.events);
+  }
   await cache.set(key(id), next);
   return normalize(next);
 }
@@ -173,6 +251,8 @@ async function remove(id) {
   const redis = cache.getClient();
   const existing = await cache.get(key(id));
   if (!existing) return null;
+  // #369 — clean up per-event-type index entries before deleting the record.
+  removeEventIndexes(redis, id, existing.events);
   await cache.del(key(id));
   await redis.zrem(IDS_KEY, id);
   if (existing.owner_ip) {

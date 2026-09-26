@@ -3,6 +3,7 @@
 const express = require('express');
 const request = require('supertest');
 const buildCorsMiddleware = require('../src/middleware/cors');
+const { errorHandler } = require('../src/middleware/errorHandler');
 
 const ALLOWED = ['http://localhost:3000', 'https://app.smartdrop.io'];
 
@@ -10,9 +11,7 @@ function buildApp(allowedOrigins) {
   const app = express();
   app.use(buildCorsMiddleware(allowedOrigins));
   app.get('/test', (req, res) => res.json({ ok: true }));
-  app.use((err, req, res, _next) => {
-    res.status(err.status || 500).json({ error: err.message });
-  });
+  app.use(errorHandler);
   return app;
 }
 
@@ -70,6 +69,16 @@ describe('CORS rejected origins', () => {
       .get('/test')
       .set('Origin', 'https://evil.com');
     expect(res.status).toBe(403);
+  });
+
+  test('rejected origin includes the offending origin in the error message', async () => {
+    const res = await request(app)
+      .get('/test')
+      .set('Origin', 'https://evil.com');
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBeDefined();
+    expect(res.body.error.message).toContain('https://evil.com');
+    expect(res.body.error.message).toContain('not allowed');
   });
 
   test('rejected origin does not receive Access-Control-Allow-Origin', async () => {

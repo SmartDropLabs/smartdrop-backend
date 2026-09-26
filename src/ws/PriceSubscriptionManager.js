@@ -2,6 +2,7 @@
 
 const config = require('../config');
 const logger = require('../logger');
+const { WebSocket } = require('ws');
 
 const MAX_ASSETS_PER_CLIENT = 5;
 const MAX_CONNECTIONS = config.ws.maxConnections;
@@ -38,7 +39,10 @@ class PriceSubscriptionManager {
     this._clientIpBySocket = new Map(); // ws → string
     this._connectionsByIp = new Map(); // ip → number
     this._previousPrices = new Map(); // assetKey → number
+    this._assetSubscribers = new Map(); // assetKey → Set<ws>
     this._pingTimer = null;
+    this._draining = false;
+    this._drainStats = { warned: 0, closed: 0, forceClosed: 0 };
   }
 
   _getClientIp(req) {
@@ -53,8 +57,13 @@ class PriceSubscriptionManager {
     return socket?.remoteAddress || 'unknown';
   }
 
-  /** Register a new WebSocket connection. Returns false when at capacity. */
+  /** Register a new WebSocket connection. Returns false when at capacity or draining. */
   add(ws, req = {}) {
+    if (this._draining) {
+      ws.close(1013, 'Server shutting down');
+      return false;
+    }
+
     const clientIp = this._getClientIp(req).replace(/^::ffff:/, '');
     const currentByIp = this._connectionsByIp.get(clientIp) || 0;
 
@@ -79,9 +88,32 @@ class PriceSubscriptionManager {
     return true;
   }
 
+  _removeFromAssetIndex(ws, assets) {
+    for (const asset of assets) {
+      const subs = this._assetSubscribers.get(asset);
+      if (subs) {
+        subs.delete(ws);
+        if (subs.size === 0) this._assetSubscribers.delete(asset);
+      }
+    }
+  }
+
+  _addToAssetIndex(ws, assets) {
+    for (const asset of assets) {
+      let subs = this._assetSubscribers.get(asset);
+      if (!subs) {
+        subs = new Set();
+        this._assetSubscribers.set(asset, subs);
+      }
+      subs.add(ws);
+    }
+  }
+
   _remove(ws) {
     if (!this._clients.has(ws)) return;
     const clientIp = this._clientIpBySocket.get(ws) || 'unknown';
+    const client = this._clients.get(ws);
+    this._removeFromAssetIndex(ws, client.assets);
     this._clients.delete(ws);
     this._clientIpBySocket.delete(ws);
     const nextCount = (this._connectionsByIp.get(clientIp) || 1) - 1;
@@ -118,6 +150,8 @@ class PriceSubscriptionManager {
           added.push(key);
         }
       }
+      // Update reverse index for newly added assets.
+      if (added.length > 0) this._addToAssetIndex(ws, added);
       if (added.length === 0 && client.assets.size >= MAX_ASSETS_PER_CLIENT && requested.length > 0) {
         this._send(ws, { type: 'error', message: `Subscription cap reached (${MAX_ASSETS_PER_CLIENT} max)` });
       } else {
@@ -126,6 +160,8 @@ class PriceSubscriptionManager {
 
     } else if (msg.action === 'unsubscribe') {
       const toRemove = Array.isArray(msg.assets) ? msg.assets : [];
+      // Update reverse index before removing from client's asset set.
+      this._removeFromAssetIndex(ws, toRemove.map(String));
       for (const a of toRemove) client.assets.delete(String(a));
       this._send(ws, { type: 'unsubscribed', assets: [...client.assets] });
 
@@ -138,7 +174,7 @@ class PriceSubscriptionManager {
   }
 
   _send(ws, payload) {
-    if (ws.readyState !== ws.constructor.OPEN) return;
+    if (ws.readyState !== WebSocket.OPEN) return;
     try {
       ws.send(JSON.stringify(payload));
     } catch (err) {
@@ -175,10 +211,10 @@ class PriceSubscriptionManager {
   }
 
   _broadcast(assetKey, payload) {
-    for (const [ws, client] of this._clients) {
-      if (client.assets.has(assetKey)) {
-        this._send(ws, payload);
-      }
+    const subscribers = this._assetSubscribers.get(assetKey);
+    if (!subscribers) return;
+    for (const ws of subscribers) {
+      this._send(ws, payload);
     }
   }
 
@@ -186,15 +222,22 @@ class PriceSubscriptionManager {
   startHeartbeat() {
     if (this._pingTimer) return;
     this._pingTimer = setInterval(() => {
+      // #363 — Collect timed-out clients first, then disconnect after
+      // iteration. Modifying a Map during for-of iteration is undefined
+      // behavior in JS; snapshotting the keys avoids the mutation.
+      const timedOut = [];
       for (const [ws, client] of this._clients) {
         if (client.missedPings >= MAX_MISSED_PINGS) {
-          logger.info('WS client timed out, disconnecting');
-          ws.terminate();
-          this._remove(ws);
+          timedOut.push(ws);
           continue;
         }
         client.missedPings += 1;
         this._send(ws, { type: 'ping' });
+      }
+      for (const ws of timedOut) {
+        logger.info('WS client timed out, disconnecting');
+        ws.terminate();
+        this._remove(ws);
       }
     }, PING_INTERVAL_MS);
   }
@@ -206,8 +249,90 @@ class PriceSubscriptionManager {
     }
   }
 
+  /**
+   * Gracefully drain all connected clients during server shutdown.
+   * Broadcasts a shutdown warning, then sends close frames, and force-closes
+   * any connections still open after `drainTimeoutMs` (issue #248).
+   */
+  drain(drainTimeoutMs = 5000) {
+    this.stopHeartbeat();
+    this._draining = true;
+
+    // Issue #364: freeze the exact set of sockets being drained right here,
+    // in the same synchronous tick as the flag flip above — add() checks
+    // this._draining as its very first statement, so nothing can be
+    // inserted into this._clients after this line runs. Every later phase
+    // below (which resumes asynchronously via setTimeout, real yield
+    // points where a lot can happen in the live map) iterates this frozen
+    // list rather than the live this._clients, so a client connecting
+    // (and being rejected) mid-drain, or one that legitimately disconnects
+    // and is removed via _remove() between phases, can never change what
+    // this specific drain run touches.
+    const drainedSockets = [...this._clients.keys()];
+    const clientCount = drainedSockets.length;
+    if (clientCount === 0) return Promise.resolve();
+
+    this._drainStats = { warned: clientCount, closed: 0, forceClosed: 0 };
+    logger.info('Draining WebSocket connections', { count: clientCount, drain_timeout_ms: drainTimeoutMs });
+
+    // Phase 1: Broadcast shutdown warning so clients can prepare
+    for (const ws of drainedSockets) {
+      try {
+        this._send(ws, { type: 'server_shutdown', message: 'Server is shutting down', drain_timeout_ms: drainTimeoutMs });
+      } catch {
+        // already closed or errored — ignore
+      }
+    }
+
+    // Phase 2: After a brief grace period for clients to finish in-flight work,
+    // send close frames to initiate orderly disconnection
+    const closeDelayMs = Math.min(1000, drainTimeoutMs / 2);
+    return new Promise((resolve) => {
+      const closeTimer = setTimeout(() => {
+        for (const ws of drainedSockets) {
+          if (!this._clients.has(ws)) continue; // already disconnected on its own
+          try {
+            ws.close(1001, 'Server shutting down');
+            this._drainStats.closed++;
+          } catch {
+            // already closed or errored — ignore
+          }
+        }
+      }, closeDelayMs);
+
+      closeTimer.unref();
+
+      const deadline = setTimeout(() => {
+        let remaining = 0;
+        for (const ws of drainedSockets) {
+          if (!this._clients.has(ws)) continue; // already disconnected on its own
+          remaining++;
+          try { ws.terminate(); } catch { /* ignore */ }
+          this._remove(ws);
+          this._drainStats.forceClosed++;
+        }
+        logger.info('WebSocket drain complete', {
+          total: clientCount,
+          gracefully_closed: this._drainStats.closed,
+          force_closed: remaining,
+        });
+        resolve();
+      }, drainTimeoutMs);
+
+      deadline.unref();
+    });
+  }
+
   get connectionCount() {
     return this._clients.size;
+  }
+
+  get isDraining() {
+    return this._draining;
+  }
+
+  get drainStats() {
+    return { ...this._drainStats };
   }
 }
 

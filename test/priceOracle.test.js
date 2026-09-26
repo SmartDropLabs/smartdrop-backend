@@ -258,6 +258,39 @@ describe('detectAnomaly', () => {
 describe('fetchFromAllSources', () => {
   const { fetchFromAllSources } = oracle;
 
+  test('starts supported source fetches concurrently', async () => {
+    let releaseSources;
+    const sourcesStarted = new Promise((resolve) => {
+      releaseSources = resolve;
+    });
+    let started = 0;
+    const fetches = [mockStellarFetch, mockCoingeckoFetch, mockCoinmarketcapFetch];
+    for (const fetch of fetches) {
+      fetch.mockImplementationOnce(() => {
+        started += 1;
+        if (started === fetches.length) releaseSources();
+        return new Promise((resolve) => {
+          fetch.resolve = resolve;
+        });
+      });
+      fetch.resolve = null;
+    }
+
+    const resultPromise = fetchFromAllSources('XLM', null);
+    await sourcesStarted;
+    expect(started).toBe(3);
+
+    mockStellarFetch.resolve(0.1);
+    mockCoingeckoFetch.resolve(0.11);
+    mockCoinmarketcapFetch.resolve(0.12);
+
+    await expect(resultPromise).resolves.toEqual([
+      { source: 'stellar_dex', price: 0.1 },
+      { source: 'coingecko', price: 0.11 },
+      { source: 'coinmarketcap', price: 0.12 },
+    ]);
+  });
+
   test('returns a result entry for every source that succeeds', async () => {
     mockStellarFetch.mockResolvedValueOnce(0.1);
     mockCoingeckoFetch.mockResolvedValueOnce(0.11);

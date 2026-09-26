@@ -138,6 +138,14 @@ class CircuitBreaker {
     }
 
     const previousState = this.state;
+    // Issue #374: capture the counts that actually drove this transition
+    // before resetting them — CLOSED -> OPEN otherwise logs with
+    // failureCount already back at 0, making it impossible to tell how
+    // many failures tripped the breaker from the log line alone. The
+    // reset itself is correct (the next period should start from zero);
+    // only the diagnostic was being lost.
+    const previousFailureCount = this.failureCount;
+    const previousSuccessCount = this.successCount;
     this.state = nextState;
     this.failureCount = 0;
     this.successCount = 0;
@@ -147,6 +155,8 @@ class CircuitBreaker {
       source: this.name,
       from: previousState,
       to: nextState,
+      failure_count: previousFailureCount,
+      success_count: previousSuccessCount,
       ...metadata,
     });
   }

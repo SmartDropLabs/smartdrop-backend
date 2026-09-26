@@ -1,48 +1,25 @@
 'use strict';
 
 /**
- * Lightweight database health check. Uses the `pg` driver directly if
- * available; gracefully reports unconfigured when the driver or
- * DATABASE_URL is absent.
+ * Lightweight database configuration check.
  *
- * The check runs a `SELECT 1` ping with a 3-second timeout so a
- * hung connection cannot block the /health response indefinitely.
+ * The database (added for api_key_audit_logs, see migrations) is not yet on
+ * any live request path — nothing in the app queries it at runtime. So
+ * `/health` only reports whether a connection string is *configured*
+ * (via the same resolved config the migration CLI uses, including its
+ * dev/test defaults) rather than actually opening a connection: attempting
+ * a real ping here would make `/health` depend on a dependency the app
+ * doesn't actually use yet, and could flap the endpoint on a DB blip that
+ * doesn't affect anything real.
  */
 
-let Pool;
-try {
-  ({ Pool } = require('pg'));
-} catch {
-  // pg not installed — database is not part of this deployment's stack.
-}
+const config = require('../config');
 
-let pool = null;
-
-function getPool() {
-  if (pool) return pool;
-  const url = process.env.DATABASE_URL;
-  if (!Pool || !url) return null;
-  pool = new Pool({ connectionString: url, connectionTimeoutMillis: 3000 });
-  return pool;
-}
-
-async function checkDatabase() {
-  const p = getPool();
-  if (!p) {
+function checkDatabase() {
+  if (!config.databaseUrl) {
     return { configured: false, checked: false, status: 'unavailable' };
   }
-
-  try {
-    const client = await p.connect();
-    try {
-      await client.query('SELECT 1');
-      return { configured: true, checked: true, status: 'ok' };
-    } finally {
-      client.release();
-    }
-  } catch (err) {
-    return { configured: true, checked: true, status: 'error', error: err.message };
-  }
+  return { configured: true, checked: false, status: 'unused' };
 }
 
 module.exports = { checkDatabase };

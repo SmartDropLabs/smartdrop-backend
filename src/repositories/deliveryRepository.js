@@ -17,6 +17,7 @@
  *     next_retry_at    timestamptz,
  *     response_status  int,
  *     trace_id         text not null,
+ *     request_id       text,                 -- originating HTTP request (issue #250)
  *     created_at       timestamptz not null default now()
  *   )
  *
@@ -37,6 +38,7 @@
 const crypto = require('crypto');
 const cache = require('../services/cache');
 const logger = require('../logger');
+const webhookRepository = require('./webhookRepository');
 
 const RETRY_QUEUE_KEY = 'webhooks:retries';
 const RECENT_DELIVERIES_LIMIT = 100;
@@ -77,7 +79,16 @@ function generateTraceId() {
   return `trace_${crypto.randomUUID().replace(/-/g, '').slice(0, 20)}`;
 }
 
-async function create({ webhook_id, event_id, event_type, trace_id }) {
+async function create({ webhook_id, event_id, event_type, trace_id, request_id }) {
+  // Validate webhook exists before creating delivery to prevent orphaned records (#411).
+  if (!webhook_id) {
+    throw new Error('deliveryRepository.create: webhook_id is required');
+  }
+  const webhook = await webhookRepository.findById(webhook_id);
+  if (!webhook) {
+    throw new Error(`deliveryRepository.create: webhook '${webhook_id}' does not exist`);
+  }
+
   const id = generateId();
   const now = new Date().toISOString();
   const record = {
@@ -92,6 +103,10 @@ async function create({ webhook_id, event_id, event_type, trace_id }) {
     next_retry_at: null,
     response_status: null,
     trace_id: trace_id || generateTraceId(),
+    // Correlates this delivery back to the HTTP request that triggered it
+    // (issue #250). Null for deliveries originated by background jobs,
+    // which have no inbound request.
+    request_id: request_id || null,
     created_at: now,
   };
 
@@ -161,9 +176,33 @@ async function popDueRetries(nowMs, max = 25) {
   return redis.popDueRetriesAtomic(RETRY_QUEUE_KEY, nowMs, max);
 }
 
+/**
+ * Number of deliveries currently sitting in the retry queue (issue #235).
+ *
+ * Counts the whole sorted set, not just entries already due, so operators
+ * see retries backing up before they come due rather than after.
+ */
+async function countPendingRetries() {
+  try {
+    const redis = cache.getClient();
+    return await redis.zcard(RETRY_QUEUE_KEY);
+  } catch (err) {
+    logger.error('deliveryRepository.countPendingRetries Redis error', { error: err.message });
+    return null;
+  }
+}
+
 async function cancelRetry(deliveryId) {
+  // #371 — verify the delivery exists before attempting removal so callers
+  // get a clear signal when the ID is invalid or the delivery was never
+  // scheduled for retry.
+  const delivery = await findById(deliveryId);
+  if (!delivery) {
+    return { removed: false, reason: 'delivery not found' };
+  }
   const redis = cache.getClient();
-  await redis.zrem(RETRY_QUEUE_KEY, deliveryId);
+  const removed = await redis.zrem(RETRY_QUEUE_KEY, deliveryId);
+  return { removed: removed === 1, reason: removed === 1 ? 'ok' : 'not in retry queue' };
 }
 
 module.exports = {
@@ -173,5 +212,6 @@ module.exports = {
   listByWebhook,
   scheduleRetry,
   popDueRetries,
+  countPendingRetries,
   cancelRetry,
 };

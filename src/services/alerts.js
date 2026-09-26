@@ -5,6 +5,11 @@ const logger = require('../logger');
 
 const IDS_KEY = 'alerts:ids';
 const COOLDOWN_MS = 5 * 60 * 1000;
+// Ceiling on one asset's alert evaluation pass (issue #315). evaluateForAsset
+// makes several Redis round trips per alert with no timeout of its own, so a
+// slow/hanging Redis instance could otherwise block the evaluation loop
+// (and evaluateAll's iteration over every watched asset) indefinitely.
+const ALERT_EVAL_TIMEOUT_MS = parseInt(process.env.ALERT_EVAL_TIMEOUT_MS, 10) || 10000;
 
 function alertKey(id) {
   return `alert:${id}`;
@@ -50,8 +55,15 @@ async function create(data) {
   };
 
   const redis = cache.getClient();
-  await cache.set(alertKey(id), alert);
-  await redis.zadd(IDS_KEY, Date.now(), id);
+  // One MULTI/EXEC transaction instead of two separate round trips (issue
+  // #303) — both writes are freshly computed above, so a crash between them
+  // used to leave either an alert record with no entry in IDS_KEY (invisible
+  // to list()/evaluateAll(), so it would never fire), or an id in IDS_KEY
+  // with no backing record (a phantom entry list() would still return).
+  await redis.multi()
+    .set(alertKey(id), JSON.stringify(alert))
+    .zadd(IDS_KEY, Date.now(), id)
+    .exec();
 
   return alert;
 }
@@ -80,8 +92,15 @@ async function remove(id) {
   const redis = cache.getClient();
   const existing = await cache.get(alertKey(id));
   if (!existing) return null;
-  await cache.del(alertKey(id));
-  await redis.zrem(IDS_KEY, id);
+  // One MULTI/EXEC transaction instead of two separate round trips (issue
+  // #304) — a crash between them used to leave either a dangling id in
+  // IDS_KEY with no backing record (a phantom entry list() would still
+  // return), or a deleted-but-still-indexed alert that evaluateAll() would
+  // try to re-read as null.
+  await redis.multi()
+    .del(alertKey(id))
+    .zrem(IDS_KEY, id)
+    .exec();
   return existing;
 }
 
@@ -105,6 +124,24 @@ function assetCooldownKey(asset) {
 }
 
 async function evaluateForAsset(asset, priceUsd) {
+  let timeoutHandle;
+  const timeout = new Promise((_, reject) => {
+    timeoutHandle = setTimeout(
+      () => reject(new Error(`evaluateForAsset timed out after ${ALERT_EVAL_TIMEOUT_MS}ms`)),
+      ALERT_EVAL_TIMEOUT_MS
+    );
+  });
+
+  try {
+    await Promise.race([evaluateForAssetInner(asset, priceUsd), timeout]);
+  } catch (err) {
+    logger.error('Alert evaluation failed or timed out', { asset, error: err.message });
+  } finally {
+    clearTimeout(timeoutHandle);
+  }
+}
+
+async function evaluateForAssetInner(asset, priceUsd) {
   const redis = cache.getClient();
   const ids = await redis.zrevrange(IDS_KEY, 0, -1);
 
@@ -142,9 +179,26 @@ async function evaluateForAsset(asset, priceUsd) {
   }
 }
 
+const EVALUATE_ALL_PAGE_SIZE = 100;
+
 async function evaluateAll() {
-  const allAlerts = await list();
-  const assets = [...new Set(allAlerts.map((a) => a.asset))];
+  const assets = new Set();
+  let offset = 0;
+
+  // Page through via listPaginated instead of list()'s unbounded
+  // ZREVRANGE 0 -1 (#319) — evaluateForAsset only needs the distinct
+  // asset set, not every alert loaded into memory at once.
+  for (;;) {
+    const { alerts: page, total } = await listPaginated({
+      offset,
+      limit: EVALUATE_ALL_PAGE_SIZE,
+    });
+    for (const alert of page) {
+      assets.add(alert.asset);
+    }
+    offset += EVALUATE_ALL_PAGE_SIZE;
+    if (offset >= total || page.length === 0) break;
+  }
 
   for (const asset of assets) {
     const cached = await cache.get(`price:${asset}`);

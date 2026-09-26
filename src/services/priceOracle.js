@@ -15,7 +15,7 @@ const breakerOptions = config.price.circuitBreaker;
 // upstream sources (CoinGecko, CoinMarketCap, Stellar DEX) on a cache miss.
 const inFlight = new Map();
 
-const SOURCES = [
+const ALL_SOURCES = [
   {
     name: 'stellar_dex',
     fetch: stellarDex.fetchPrice,
@@ -37,6 +37,18 @@ const SOURCES = [
     getCircuitState: coinmarketcap.getCircuitState,
   },
 ];
+
+function sortByPriority(sources, priority) {
+  if (!priority || priority.length === 0) return sources;
+  const order = new Map(priority.map((name, i) => [name, i]));
+  return [...sources].sort((a, b) => {
+    const ia = order.has(a.name) ? order.get(a.name) : Infinity;
+    const ib = order.has(b.name) ? order.get(b.name) : Infinity;
+    return ia - ib;
+  });
+}
+
+const SOURCES = sortByPriority(ALL_SOURCES, config.price.sourcePriority);
 
 /**
  * Circuit-breaker state for every source that has one (currently coingecko
@@ -113,9 +125,7 @@ async function detectAnomaly(currentPrice, assetCode, issuer) {
 }
 
 async function fetchFromAllSources(assetCode, issuer) {
-  const results = [];
-
-  for (const source of SOURCES) {
+  const sourceResults = await Promise.allSettled(SOURCES.map(async (source) => {
     // A source that cannot serve this asset at all (e.g. CoinGecko has no
     // mapping for a non-XLM asset) is a permanent, per-asset condition, not
     // a source failure — skip the breaker-wrapped call entirely so it never
@@ -123,20 +133,28 @@ async function fetchFromAllSources(assetCode, issuer) {
     // source asked about even one asset it doesn't support would eventually
     // trip its circuit open for every asset it *does* support (#130).
     if (typeof source.isSupported === 'function' && !source.isSupported(assetCode, issuer)) {
-      continue;
+      return null;
     }
 
-    try {
-      const price = await source.breaker.call(() => source.fetch(assetCode, issuer));
-      if (price !== null && price > 0) {
-        results.push({ source: source.name, price });
-      }
-    } catch (err) {
-      logger.warn('Source fetch failed', { source: source.name, assetCode, error: err.message });
+    const price = await source.breaker.call(() => source.fetch(assetCode, issuer));
+    if (price !== null && price > 0) {
+      return { source: source.name, price };
     }
-  }
+    return null;
+  }));
 
-  return results;
+  return sourceResults.flatMap((result, index) => {
+    if (result.status === 'rejected') {
+      const source = SOURCES[index];
+      logger.warn('Source fetch failed', {
+        source: source.name,
+        assetCode,
+        error: result.reason.message,
+      });
+      return [];
+    }
+    return result.value ? [result.value] : [];
+  });
 }
 
 function getCircuitStates() {
@@ -152,7 +170,36 @@ function resetCircuitBreakers() {
   }
 }
 
+const QUERIED_ASSETS_KEY = 'queried_assets';
+
+async function recordQueriedAsset(assetCode, issuer = null) {
+  try {
+    if (!cache.isConnected()) return;
+    const redis = cache.getClient();
+    const key = issuer ? `${assetCode}:${issuer}` : assetCode;
+    await redis.sadd(QUERIED_ASSETS_KEY, key);
+  } catch (err) {
+    logger.warn('Failed to record queried asset', { assetCode, issuer, error: err.message });
+  }
+}
+
+async function getQueriedAssets() {
+  try {
+    if (!cache.isConnected()) return [];
+    const redis = cache.getClient();
+    const members = await redis.smembers(QUERIED_ASSETS_KEY);
+    return (members || []).map((entry) => {
+      const [code, issuer] = entry.split(':');
+      return { code, issuer: issuer || null };
+    });
+  } catch (err) {
+    logger.warn('Failed to fetch queried assets', { error: err.message });
+    return [];
+  }
+}
+
 async function getPrice(assetCode, issuer = null) {
+  recordQueriedAsset(assetCode, issuer);
   const cacheKey = buildCacheKey(assetCode, issuer);
   let redisUnavailable = false;
 
@@ -309,18 +356,17 @@ async function fetchFreshPrice(assetCode, issuer = null, redisUnavailable = fals
     return existing.promise;
   }
 
-  let resolve, reject;
-  const wrapperPromise = new Promise((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-
-  const actualPromise = doFetchFreshPrice(assetCode, issuer, redisUnavailable);
-
-  // Forward resolution/rejection to the wrapper, then clean up
-  actualPromise
-    .then(resolve, reject)
-    .finally(() => inFlight.delete(key));
+  // Wrap the promise to handle rejections cleanly: on rejection, remove from
+  // inFlight and re-throw so concurrent callers see the same error (#286).
+  const promise = doFetchFreshPrice(assetCode, issuer, redisUnavailable)
+    .catch((err) => {
+      inFlight.delete(key);
+      throw err;
+    })
+    .then((result) => {
+      inFlight.delete(key);
+      return result;
+    });
 
   inFlight.set(key, { promise: wrapperPromise, actual: actualPromise });
   return wrapperPromise;
@@ -338,7 +384,19 @@ async function refreshAllCachedPrices() {
 
   try {
     do {
-      const result = await redis.scan(cursor, 'MATCH', `${CACHE_PREFIX}*`, 'COUNT', 100);
+      // Exclude the history namespace (price:history:*) at the Redis level
+      // via bracket-class negation on the first char after the prefix — the
+      // history sub-key always starts with 'h', a live asset code never
+      // does (buildCacheKey never inserts a literal 'history' segment).
+      // Filtering client-side after a broad `price:*` MATCH still pulls
+      // every history key's bytes over the wire on every refresh cycle.
+      const result = await redis.scan(
+        cursor,
+        'MATCH',
+        `${CACHE_PREFIX}[^h]*`,
+        'COUNT',
+        100
+      );
       cursor = result[0];
       keys.push(...result[1]);
     } while (cursor !== '0');
@@ -350,7 +408,6 @@ async function refreshAllCachedPrices() {
   const freshPrices = {};
 
   const refreshPromises = keys
-    .filter((key) => !key.includes(':history:'))
     .map(async (key) => {
       const suffix = key.replace(CACHE_PREFIX, '');
       const parts = suffix.split(':');
@@ -380,6 +437,8 @@ module.exports = {
   getCircuitStates,
   resetCircuitBreakers,
   refreshAllCachedPrices,
+  getQueriedAssets,
+  recordQueriedAsset,
   // Internal helpers exported for unit testing.
   median,
   detectAnomaly,

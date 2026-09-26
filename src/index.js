@@ -181,6 +181,11 @@ app.get("/health", healthRateLimit, async (req, res) => {
       draining: subscriptionManager.isDraining,
       drain_stats: subscriptionManager.drainStats,
     },
+    websocket: {
+      healthy: wsHealth.healthy,
+      connections: wsHealth.connections,
+      error: wsHealth.error,
+    },
     jobs: {
       price_refresh: {
         healthy: priceRefreshHealth.healthy,

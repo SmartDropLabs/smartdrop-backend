@@ -5,6 +5,8 @@ const logger = require('../logger');
 const apiKeys = require('../services/apiKeys');
 const subscriptionManager = require('./PriceSubscriptionManager');
 
+let wss = null;
+
 function extractBearerToken(header) {
   if (!header || typeof header !== 'string') return null;
   const match = header.match(/^Bearer\s+(.+)$/i);
@@ -37,7 +39,7 @@ function authenticateUpgrade(info, callback) {
  * Clients connect at ws://<host>/ws
  */
 function attach(httpServer) {
-  const wss = new WebSocketServer({
+  wss = new WebSocketServer({
     server: httpServer,
     path: '/ws',
     verifyClient: authenticateUpgrade,

@@ -335,6 +335,11 @@ async function doFetchFreshPrice(assetCode, issuer = null, redisUnavailable = fa
  * Single-flight wrapper around doFetchFreshPrice. Concurrent calls for the
  * same assetCode:issuer pair while a fetch is already in-flight will await
  * the same promise instead of each independently hitting all upstream sources.
+ *
+ * Uses a wrapper promise pattern to ensure concurrent callers receive
+ * independent promise instances. This prevents the issue where a rejection
+ * from the original promise would propagate to all waiting callers, causing
+ * them to share the same rejection error.
  */
 async function fetchFreshPrice(assetCode, issuer = null, redisUnavailable = false) {
   const normalisedIssuer = issuer || null;
@@ -348,7 +353,7 @@ async function fetchFreshPrice(assetCode, issuer = null, redisUnavailable = fals
       issuer: normalisedIssuer,
       coalesced: coalescedCount,
     });
-    return existing;
+    return existing.promise;
   }
 
   // Wrap the promise to handle rejections cleanly: on rejection, remove from
@@ -363,8 +368,8 @@ async function fetchFreshPrice(assetCode, issuer = null, redisUnavailable = fals
       return result;
     });
 
-  inFlight.set(key, promise);
-  return promise;
+  inFlight.set(key, { promise: wrapperPromise, actual: actualPromise });
+  return wrapperPromise;
 }
 
 async function refreshAllCachedPrices() {

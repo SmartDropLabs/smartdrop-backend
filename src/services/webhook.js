@@ -108,25 +108,21 @@ async function probeReachability(webhookUrl, options = {}) {
 }
 
 async function deliver(webhookUrl, secret, payload) {
-  try {
-    const result = await sendSignedRequest(webhookUrl, secret, payload);
-    if (result.ok) {
-      logger.info('Webhook delivered', { alert_id: payload.alert_id, url: webhookUrl });
-      return;
-    }
-
-    logger.warn('Webhook delivery failed', {
-      alert_id: payload.alert_id,
-      url: webhookUrl,
-      status: result.status,
-    });
-  } catch (err) {
-    logger.warn('Webhook delivery failed', {
-      alert_id: payload.alert_id,
-      url: webhookUrl,
-      error: err.message,
-    });
+  const result = await sendSignedRequest(webhookUrl, secret, payload);
+  if (result.ok) {
+    logger.info('Webhook delivered', { alert_id: payload.alert_id, url: webhookUrl });
+    return;
   }
+
+  const error = new Error(`Webhook delivery failed with status ${result.status}`);
+  error.statusCode = result.status;
+  error.duration_ms = result.duration_ms;
+  logger.warn('Webhook delivery failed', {
+    alert_id: payload.alert_id,
+    url: webhookUrl,
+    status: result.status,
+  });
+  throw error;
 }
 
 module.exports = {

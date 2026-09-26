@@ -5,6 +5,8 @@ const logger = require('../logger');
 const apiKeys = require('../services/apiKeys');
 const subscriptionManager = require('./PriceSubscriptionManager');
 
+let wss = null;
+
 function extractBearerToken(header) {
   if (!header || typeof header !== 'string') return null;
   const match = header.match(/^Bearer\s+(.+)$/i);
@@ -37,7 +39,7 @@ function authenticateUpgrade(info, callback) {
  * Clients connect at ws://<host>/ws
  */
 function attach(httpServer) {
-  const wss = new WebSocketServer({
+  wss = new WebSocketServer({
     server: httpServer,
     path: '/ws',
     verifyClient: authenticateUpgrade,
@@ -58,4 +60,19 @@ function attach(httpServer) {
   return wss;
 }
 
-module.exports = { attach };
+/**
+ * Returns health information about the WebSocket server.
+ * Used by the /health endpoint to check if the WS server is accepting connections.
+ */
+function getHealth() {
+  if (!wss) {
+    return { healthy: false, connections: 0, error: 'WebSocket server not initialized' };
+  }
+  return {
+    healthy: wss.readyState === undefined || wss.readyState === 0, // 0 = CONNECTING (normal for server)
+    connections: wss.clients.size,
+    error: null,
+  };
+}
+
+module.exports = { attach, getHealth };

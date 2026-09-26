@@ -151,9 +151,13 @@ function createLeaderElection(jobName, opts = {}) {
         lockKey,
         error: err.message,
       });
-      // Don't clear leader flag on transient Redis errors — the lease may
-      // still be valid. We'll retry on the next renewal cycle.
-      return leader;
+      // Return false on Redis errors to prevent the instance from
+      // continuing to act as leader when it cannot verify its lease.
+      // The instance will attempt to re-acquire leadership on the next cycle.
+      leader = false;
+      acquiredAt = null;
+      lastRenewedAt = null;
+      return false;
     }
   }
 

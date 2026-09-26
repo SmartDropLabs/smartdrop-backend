@@ -79,6 +79,7 @@ app.get('/health', async (req, res) => {
   const webhookWorkerHealth = wrappedWebhookRetryWorker.getHealth();
   const airdropExpiryHealth = wrappedAirdropExpiryJob.getHealth();
   const database = await checkDatabase();
+  const wsHealth = priceWebSocket.getHealth();
 
   // Compute overall status:
   //   unhealthy – Redis is down, or a job is stalled past its grace period
@@ -90,11 +91,11 @@ app.get('/health', async (req, res) => {
   // work. The health check distinguishes "not leader" from "stalled" via the
   // `leader` field.
   let status = 'ok';
-  if (!redisConnected || !priceRefreshHealth.healthy || !webhookWorkerHealth.healthy || database.status === 'error') {
+  if (!redisConnected || !priceRefreshHealth.healthy || !webhookWorkerHealth.healthy || database.status === 'error' || !wsHealth.healthy) {
     const jobsDegraded =
       (!priceRefreshHealth.healthy && !priceRefreshHealth.stalled) ||
       (!webhookWorkerHealth.healthy && !webhookWorkerHealth.stalled);
-    status = (!redisConnected || priceRefreshHealth.stalled || webhookWorkerHealth.stalled || database.status === 'error')
+    status = (!redisConnected || priceRefreshHealth.stalled || webhookWorkerHealth.stalled || database.status === 'error' || !wsHealth.healthy)
       ? 'unhealthy'
       : jobsDegraded ? 'degraded' : 'unhealthy';
   }
@@ -107,6 +108,11 @@ app.get('/health', async (req, res) => {
     circuits: priceOracle.getCircuitStates(),
     redis: {
       connected: redisConnected,
+    },
+    websocket: {
+      healthy: wsHealth.healthy,
+      connections: wsHealth.connections,
+      error: wsHealth.error,
     },
     jobs: {
       price_refresh: {

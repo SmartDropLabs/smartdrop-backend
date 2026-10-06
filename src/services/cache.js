@@ -151,6 +151,40 @@ async function get(key) {
   }
 }
 
+/**
+ * Batched sibling of get() (issue #357): fetches N keys in a single MGET
+ * round trip instead of N separate GETs.
+ *
+ * Returns the parsed values in the same order as `keys`. A missing or
+ * unparsable entry is `null` — exactly what get() hands back for that key —
+ * so callers can map positions without caring which keys were hits.
+ */
+async function mget(keys) {
+  if (!Array.isArray(keys) || keys.length === 0) return [];
+  const release = await operationSemaphore.acquire(5000);
+  try {
+    _checkQueueBackpressure('mget');
+    const redis = getClient();
+    const raw = await redis.mget(...keys);
+    return raw.map((value, i) => {
+      if (!value) return null;
+      try {
+        return JSON.parse(value);
+      } catch (err) {
+        // Same contract as get(): a value that fails to parse is corrupt,
+        // not a legitimate raw string, so it's reported as a cache miss.
+        logger.warn('Cached value failed JSON.parse, treating as a cache miss', {
+          key: keys[i],
+          error: err.message,
+        });
+        return null;
+      }
+    });
+  } finally {
+    release();
+  }
+}
+
 async function set(key, value, ttlSeconds) {
   const release = await operationSemaphore.acquire(5000);
   try {
@@ -194,6 +228,6 @@ async function disconnect() {
 }
 
 module.exports = {
-  get, set, del, disconnect, getClient, isConnected,
+  get, mget, set, del, disconnect, getClient, isConnected,
   getCommandQueueLength, getConcurrencyStats,
 };

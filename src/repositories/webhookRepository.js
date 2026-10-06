@@ -172,7 +172,12 @@ async function listAll() {
   try {
     const redis = cache.getClient();
     const ids = await redis.zrevrange(IDS_KEY, 0, -1);
-    const records = await Promise.all(ids.map((id) => cache.get(key(id))));
+    if (ids.length === 0) return [];
+    // Issue #357: hydrate every record in one MGET round trip instead of one
+    // GET per webhook — the fan-out callers (routes/metrics.js) used to pay a
+    // full round trip per webhook, so listing scaled linearly with the number
+    // of registered webhooks.
+    const records = await cache.mget(ids.map(key));
     return records.filter(Boolean).map(normalize);
   } catch (err) {
     logger.error('webhookRepository.listAll Redis error', { error: err.message });
@@ -251,13 +256,19 @@ async function remove(id) {
   const redis = cache.getClient();
   const existing = await cache.get(key(id));
   if (!existing) return null;
-  // #369 — clean up per-event-type index entries before deleting the record.
-  removeEventIndexes(redis, id, existing.events);
-  await cache.del(key(id));
-  await redis.zrem(IDS_KEY, id);
+  // Issue #356: the three-step delete (record DEL, ZREM from IDS_KEY, ZREM
+  // from the per-owner zset) plus the #369 event-index SREMs all go out as
+  // one MULTI/EXEC. Dying between those round trips used to leave a phantom
+  // id behind — an index still listing a webhook that findById() could no
+  // longer return, so list()/countByOwner() reported it while every read
+  // 404'd.
+  const multi = redis.multi().del(key(id)).zrem(IDS_KEY, id);
   if (existing.owner_ip) {
-    await redis.zrem(`webhooks:owner:${existing.owner_ip}`, id);
+    multi.zrem(`webhooks:owner:${existing.owner_ip}`, id);
   }
+  // #369 — clean up per-event-type index entries in the same transaction.
+  removeEventIndexes(multi, id, existing.events);
+  await multi.exec();
   return normalize(existing);
 }
 

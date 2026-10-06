@@ -11,10 +11,32 @@ jest.mock('../src/logger', () => ({
 }));
 
 const deliveryRepo = require('../src/repositories/deliveryRepository');
+const cache = require('../src/services/cache');
 
 const RETRY_QUEUE_KEY = 'webhooks:retries';
+const WEBHOOK_ID = 'wh_1';
 
-beforeEach(() => reset());
+// create() refuses to log a delivery for a webhook that does not exist
+// (#411), so every test in this file works against one seeded fixture
+// webhook.
+async function seedWebhook(id = WEBHOOK_ID) {
+  await cache.set(`webhook:${id}`, {
+    id,
+    url: 'https://example.com/hook',
+    events: ['*'],
+    secret: 'whsec_aaaaaaaaaaaaaaaa',
+    active: true,
+    description: null,
+    filters: null,
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  });
+}
+
+beforeEach(async () => {
+  reset();
+  await seedWebhook();
+});
 
 function seedDueRetries(count, { dueAt = 1000 } = {}) {
   const ids = [];
@@ -102,9 +124,16 @@ describe('cancelRetry / scheduleRetry / listByWebhook (unchanged by the atomic f
   });
 
   test('cancelRetry removes a scheduled retry', async () => {
-    await deliveryRepo.scheduleRetry('dlv_b', 12345);
-    await deliveryRepo.cancelRetry('dlv_b');
-    expect(zsets.get(RETRY_QUEUE_KEY).has('dlv_b')).toBe(false);
+    // cancelRetry verifies the delivery exists first (#371), so the record
+    // has to be there before the queue entry is worth cancelling.
+    const delivery = await deliveryRepo.create({
+      webhook_id: WEBHOOK_ID,
+      event_id: 'evt_cancel',
+      event_type: 'x',
+    });
+    await deliveryRepo.scheduleRetry(delivery.id, 12345);
+    await deliveryRepo.cancelRetry(delivery.id);
+    expect(zsets.get(RETRY_QUEUE_KEY).has(delivery.id)).toBe(false);
   });
 
   test('listByWebhook returns all persisted deliveries for that webhook', async () => {
@@ -156,5 +185,156 @@ describe('request_id propagation onto delivery records (issue #250)', () => {
     });
 
     expect(delivery.request_id).toBeNull();
+  });
+});
+
+describe('atomic create (issue #358)', () => {
+  const ALL_INDEX = `webhook:${WEBHOOK_ID}:deliveries`;
+  const TTL = 30 * 24 * 60 * 60;
+
+  function clearWriteMocks() {
+    redis.multi.mockClear();
+    redis.set.mockClear();
+    redis.zadd.mockClear();
+    redis.zremrangebyrank.mockClear();
+    redis.expire.mockClear();
+    cache.set.mockClear();
+  }
+
+  test('commits record, index insert, index trim and TTL in one MULTI/EXEC', async () => {
+    clearWriteMocks();
+
+    const delivery = await deliveryRepo.create({
+      webhook_id: WEBHOOK_ID,
+      event_id: 'evt_atomic',
+      event_type: 'pool.assets_locked',
+    });
+
+    expect(redis.multi).toHaveBeenCalledTimes(1);
+    // …and every write queued on that transaction actually landed, rather
+    // than the transaction merely having been issued.
+    expect(await deliveryRepo.findById(delivery.id))
+      .toEqual(expect.objectContaining({ id: delivery.id, status: 'pending' }));
+    expect(zsets.get(ALL_INDEX).has(delivery.id)).toBe(true);
+    expect(zsets.get(`${ALL_INDEX}:pending`).has(delivery.id)).toBe(true);
+    // Record and both index keys carry the same 30-day TTL…
+    expect(redis.set).toHaveBeenCalledWith(`webhook_delivery:${delivery.id}`, expect.any(String), 'EX', TTL);
+    expect(redis.expire).toHaveBeenCalledWith(ALL_INDEX, TTL);
+    expect(redis.expire).toHaveBeenCalledWith(`${ALL_INDEX}:pending`, TTL);
+    // …and the index is still trimmed back to the 100 newest entries.
+    expect(redis.zremrangebyrank).toHaveBeenCalledWith(ALL_INDEX, 0, -101);
+  });
+
+  test('issues no write outside of the transaction', async () => {
+    clearWriteMocks();
+
+    await deliveryRepo.create({
+      webhook_id: WEBHOOK_ID,
+      event_id: 'evt_single_write',
+      event_type: 'pool.assets_locked',
+    });
+
+    // cache.set is the old non-atomic write path — it must not be used, and
+    // the raw commands must only ever be seen coming out of .exec().
+    expect(cache.set).not.toHaveBeenCalled();
+    expect(redis.set).toHaveBeenCalledTimes(1);
+    expect(redis.zadd).toHaveBeenCalledTimes(2);
+    expect(redis.expire).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('status-indexed listing (issue #359)', () => {
+  const ALL_INDEX = `webhook:${WEBHOOK_ID}:deliveries`;
+  const statusIndex = (status) => `${ALL_INDEX}:${status}`;
+
+  // Distinct creation timestamps, so newest-first ordering is observable.
+  async function seedDeliveries(count = 3) {
+    const ids = [];
+    for (let i = 0; i < count; i += 1) {
+      const delivery = await deliveryRepo.create({
+        webhook_id: WEBHOOK_ID,
+        event_id: `evt_${i}`,
+        event_type: 'x',
+      });
+      ids.push(delivery.id);
+      await new Promise((resolve) => { setTimeout(resolve, 3); });
+    }
+    return ids;
+  }
+
+  test('a status filter is answered from that status index alone', async () => {
+    const ids = await seedDeliveries();
+    await deliveryRepo.update(ids[1], { status: 'failed' });
+    await deliveryRepo.update(ids[2], { status: 'success' });
+
+    redis.zrevrange.mockClear();
+    redis.mget.mockClear();
+
+    const failed = await deliveryRepo.listByWebhook(WEBHOOK_ID, { limit: 10, status: 'failed' });
+
+    expect(failed.map((d) => d.id)).toEqual([ids[1]]);
+    // One read, on the status index — the unfiltered index is never opened.
+    expect(redis.zrevrange).toHaveBeenCalledTimes(1);
+    expect(redis.zrevrange).toHaveBeenCalledWith(statusIndex('failed'), 0, 9);
+    // Only ids that can be returned are hydrated: one MGET for one key.
+    expect(redis.mget).toHaveBeenCalledTimes(1);
+    expect(redis.mget.mock.calls[0]).toHaveLength(1);
+  });
+
+  test('create puts the id in the status index for its initial status', async () => {
+    const ids = await seedDeliveries();
+    await deliveryRepo.update(ids[1], { status: 'success' });
+
+    const pending = await deliveryRepo.listByWebhook(WEBHOOK_ID, { limit: 10, status: 'pending' });
+    expect(pending.map((d) => d.id).sort()).toEqual([ids[0], ids[2]].sort());
+
+    const success = await deliveryRepo.listByWebhook(WEBHOOK_ID, { limit: 10, status: 'success' });
+    expect(success.map((d) => d.id)).toEqual([ids[1]]);
+  });
+
+  test('a status change moves the id between indexes in the same transaction', async () => {
+    const ids = await seedDeliveries();
+    redis.multi.mockClear();
+
+    await deliveryRepo.update(ids[1], { status: 'failed' });
+
+    expect(redis.multi).toHaveBeenCalledTimes(1);
+    expect(zsets.get(statusIndex('pending')).has(ids[1])).toBe(false);
+    expect(zsets.get(statusIndex('failed')).has(ids[1])).toBe(true);
+    // The unfiltered recency index is untouched by a status transition.
+    expect(zsets.get(ALL_INDEX).has(ids[1])).toBe(true);
+    // Record and index agree on the new status…
+    expect((await deliveryRepo.findById(ids[1])).status).toBe('failed');
+    // …and the moved id keeps its creation timestamp as the score, so
+    // ordering within a status index still matches the recency index.
+    const stored = await deliveryRepo.findById(ids[1]);
+    expect(zsets.get(statusIndex('failed')).get(ids[1])).toBe(Date.parse(stored.created_at));
+  });
+
+  test('an unfiltered listing reads only `limit` ids from the recency index', async () => {
+    const ids = await seedDeliveries();
+    redis.zrevrange.mockClear();
+
+    const page = await deliveryRepo.listByWebhook(WEBHOOK_ID, 2);
+
+    expect(page.map((d) => d.id)).toEqual([ids[2], ids[1]]);
+    expect(redis.zrevrange).toHaveBeenCalledTimes(1);
+    expect(redis.zrevrange).toHaveBeenCalledWith(ALL_INDEX, 0, 1);
+  });
+
+  test('a zero limit reads nothing from Redis', async () => {
+    redis.zrevrange.mockClear();
+
+    await expect(deliveryRepo.listByWebhook(WEBHOOK_ID, 0)).resolves.toEqual([]);
+    expect(redis.zrevrange).not.toHaveBeenCalled();
+  });
+
+  test('an unknown status reads an empty index and returns []', async () => {
+    redis.mget.mockClear();
+
+    await expect(
+      deliveryRepo.listByWebhook(WEBHOOK_ID, { limit: 10, status: 'failed' }),
+    ).resolves.toEqual([]);
+    expect(redis.mget).not.toHaveBeenCalled();
   });
 });

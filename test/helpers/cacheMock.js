@@ -162,6 +162,13 @@ function createCacheMock() {
       const entry = getLive(key);
       return entry ? entry.value : null;
     }),
+    // Issue #357 — one MGET for N keys, mirroring real ioredis's
+    // mget(...keys): values come back in the same order as the input, with
+    // null for absent or expired keys.
+    mget: jest.fn(async (...keys) => keys.map((k) => {
+      const entry = getLive(k);
+      return entry ? entry.value : null;
+    })),
     del: jest.fn(async (key) => {
       const had = getLive(key) !== null || hashes.has(key) || sets.has(key) || zsets.has(key) || lists.has(key);
       rawStore.delete(key);
@@ -322,6 +329,19 @@ function createCacheMock() {
         return null;
       }
     }),
+    // Issue #357 — batched sibling of get(), same parsing rules as get():
+    // one MGET for the whole batch, null for misses and unparsable values.
+    mget: jest.fn(async (keys) => {
+      const raws = await redis.mget(...(Array.isArray(keys) ? keys : []));
+      return raws.map((raw) => {
+        if (raw === null || raw === undefined) return null;
+        try {
+          return JSON.parse(raw);
+        } catch {
+          return null;
+        }
+      });
+    }),
     set: jest.fn(async (key, value, ttlSeconds) => {
       const serialized = JSON.stringify(value);
       if (ttlSeconds) await redis.set(key, serialized, 'EX', ttlSeconds);
@@ -357,6 +377,7 @@ function createCacheMock() {
     rawStore.clear();
     Object.values(redis).forEach((fn) => fn.mockClear?.());
     cacheMock.get.mockClear();
+    cacheMock.mget.mockClear();
     cacheMock.set.mockClear();
     cacheMock.del.mockClear();
   }

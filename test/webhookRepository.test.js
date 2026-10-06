@@ -173,4 +173,95 @@ describe('webhookRepository', () => {
       expect(await webhookRepo.findById(w.id)).not.toBeNull();
     });
   });
+
+  describe('atomic remove (#356)', () => {
+    test('remove drops the record and every index entry in one MULTI/EXEC', async () => {
+      const w = await webhookRepo.create({
+        url: 'https://a.com',
+        events: ['pool.assets_locked'],
+        secret: 'whsec_aaaaaaaaaaaaaaaa',
+        owner_ip: '203.0.113.5',
+      });
+      mockHelper.redis.multi.mockClear();
+
+      const removed = await webhookRepo.remove(w.id);
+
+      expect(removed.id).toBe(w.id);
+      expect(mockHelper.redis.multi).toHaveBeenCalledTimes(1);
+      // The record is gone…
+      expect(await webhookRepo.findById(w.id)).toBeNull();
+      expect(await webhookRepo.listAll()).toHaveLength(0);
+      // …and so is every index it used to appear in, so no index outlives
+      // the record as a phantom entry.
+      expect(await webhookRepo.countByOwner('203.0.113.5')).toBe(0);
+      const eventIndex = mockHelper.sets.get('webhooks:event:pool.assets_locked');
+      expect([...(eventIndex || [])]).not.toContain(w.id);
+    });
+
+    test('remove keeps the surviving webhooks intact', async () => {
+      const keep = await webhookRepo.create({
+        url: 'https://keep.com',
+        events: ['pool.assets_locked'],
+        secret: 'whsec_aaaaaaaaaaaaaaaa',
+        owner_ip: '203.0.113.5',
+      });
+      const drop = await webhookRepo.create({
+        url: 'https://drop.com',
+        events: ['pool.assets_locked'],
+        secret: 'whsec_bbbbbbbbbbbbbbbb',
+        owner_ip: '203.0.113.5',
+      });
+
+      await webhookRepo.remove(drop.id);
+
+      expect((await webhookRepo.listAll()).map((entry) => entry.id)).toEqual([keep.id]);
+      expect(await webhookRepo.countByOwner('203.0.113.5')).toBe(1);
+      expect([...(mockHelper.sets.get('webhooks:event:pool.assets_locked') || [])]).toEqual([keep.id]);
+    });
+
+    test('remove of a missing webhook returns null without issuing a transaction', async () => {
+      mockHelper.redis.multi.mockClear();
+
+      expect(await webhookRepo.remove('wh_missing')).toBeNull();
+      expect(mockHelper.redis.multi).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('batched listAll (#357)', () => {
+    test('hydrates every webhook with a single MGET round trip', async () => {
+      for (const host of ['a', 'b', 'c']) {
+        await webhookRepo.create({ url: `https://${host}.com`, events: ['*'], secret: 'whsec_aaaaaaaaaaaaaaaa' });
+      }
+      mockHelper.redis.mget.mockClear();
+      mockHelper.redis.get.mockClear();
+
+      const all = await webhookRepo.listAll();
+
+      expect(all.map((entry) => entry.url).sort()).toEqual(['https://a.com', 'https://b.com', 'https://c.com']);
+      expect(mockHelper.redis.mget).toHaveBeenCalledTimes(1);
+      expect(mockHelper.redis.mget.mock.calls[0]).toHaveLength(3);
+      // No per-record GET round trips left behind.
+      expect(mockHelper.redis.get).not.toHaveBeenCalled();
+    });
+
+    test('returns [] for no webhooks without reading any record keys', async () => {
+      mockHelper.redis.mget.mockClear();
+
+      expect(await webhookRepo.listAll()).toEqual([]);
+      expect(mockHelper.redis.mget).not.toHaveBeenCalled();
+    });
+
+    test('drops index entries whose record already expired, and decrypts the rest', async () => {
+      const plaintext = 'whsec_plaintextvalue0000002';
+      const w = await webhookRepo.create({ url: 'https://a.com', events: ['*'], secret: plaintext });
+      // An index id whose backing record is gone must be skipped rather than
+      // surfaced as a null hole in the fan-out list.
+      mockHelper.redis.zrevrange.mockImplementationOnce(async () => [w.id, 'wh_expired00000000000']);
+
+      const all = await webhookRepo.listAll();
+
+      expect(all).toHaveLength(1);
+      expect(all[0].secret).toBe(plaintext);
+    });
+  });
 });

@@ -567,10 +567,24 @@ The bootstrap admin key is compared using constant-time checks over fixed-length
 GET /api/v1/keys
 POST /api/v1/keys
 DELETE /api/v1/keys/:id
+POST /api/v1/keys/:id/rotate
 
 ```
 
-`POST /api/v1/keys` returns the raw `api_key` only once. Stored keys are hashed with SHA-256 and listed with metadata only (`label`, `created_at`, `last_used_at`, `scopes`, `tier`, and `key_prefix`).
+`POST /api/v1/keys` and `POST /api/v1/keys/:id/rotate` return the raw `api_key` only once. Keys are listed with metadata only (`label`, `created_at`, `last_used_at`, `scopes`, `tier`, and `key_prefix`).
+
+#### Key storage
+
+Raw API keys are never persisted. A breach of the key store exposes only digests that cannot be used to authenticate.
+
+- Each key is 32 random bytes (64 hex characters) from `crypto.randomBytes`.
+- Only the SHA-256 digest (`key_hash`) and an 8-character display prefix (`key_prefix`) are stored. The record lives in Redis under `api_key:<id>`, with a `api_key_hash:<digest>` index for lookup.
+- On each request the presented bearer token is hashed and resolved through that index; the plaintext is never compared or stored.
+- `key_hash` is stripped from every API response, including list, revoke, and rotate.
+- The `api_key_audit_logs` table records only `key_id`, never key material.
+- Rotation issues a new key and deletes the old record and its hash index in one Redis transaction, so the old key stops working immediately.
+
+A fast unsalted hash is deliberate: keys carry 256 bits of entropy, so brute-forcing a digest is infeasible, and a slow hash such as bcrypt would add cost to every authenticated request without adding protection. A lost key cannot be recovered — rotate it instead.
 
 #### Per-key rate limit tiers
 

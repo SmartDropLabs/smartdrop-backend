@@ -84,6 +84,7 @@ let server = {
 app.use(requestIdMiddleware);
 app.use(requestLoggerMiddleware);
 app.use(requestMetricsMiddleware);
+app.use(buildRateLimit({ windowSeconds: 5, max: 10, keyPrefix: 'auth' }));
 app.use(compression({ threshold: 0 }));
 app.use(helmet());
 app.use(buildCorsMiddleware(config.corsAllowedOrigins));

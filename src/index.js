@@ -47,6 +47,7 @@ const {
   router: metricsRouter,
   requestMetricsMiddleware,
 } = require("./routes/metrics");
+const { httpsEnforcementMiddleware } = require("./middleware/httpsEnforcement");
 const healthRouter = require("./health");
 
 const priceWebSocket = require("./ws/priceWebSocket");
@@ -83,6 +84,10 @@ const wrappedAirdropExpiryJob = makeLeaderAwareJob({
 });
 
 const app = express();
+// #468 — Configure trust proxy according to trusted proxy setting.
+// Express secure-request detection (req.secure) relies on this setting.
+app.set("trust proxy", config.trustProxy);
+
 let server = {
   close(callback) {
     if (callback) callback();
@@ -93,6 +98,8 @@ app.use(headerSecurityMiddleware);
 app.use(requestIdMiddleware);
 app.use(requestLoggerMiddleware);
 app.use(requestMetricsMiddleware);
+// #468 — Enforce HTTPS early before payload parsing or route processing.
+app.use(httpsEnforcementMiddleware);
 app.use(compression());
 app.use(
   helmet({
@@ -103,6 +110,9 @@ app.use(
     referrerPolicy: { policy: "strict-origin-when-cross-origin" },
     xContentTypeOptions: true,
     xDownloadOptions: true,
+    // #468: HSTS is managed exclusively in httpsEnforcementMiddleware so it is
+    // sent ONLY on secure responses and matches configured max-age/subdomains/preload.
+    hsts: false,
   })
 );
 app.use(buildCorsMiddleware(config.corsAllowedOrigins));
@@ -449,6 +459,8 @@ function logStartupBanner() {
     indexer_enabled: config.indexer.enabled,
     instance_id: config.leaderElection.instanceId,
     log_level: process.env.LOG_LEVEL || config.nodeEnv,
+    trust_proxy: config.trustProxy,
+    https_enforced: config.https.enforce,
   });
 }
 

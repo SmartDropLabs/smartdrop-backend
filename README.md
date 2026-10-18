@@ -302,6 +302,13 @@ Each price source (`stellar_dex`, `coingecko`, `coinmarketcap`) gets one circuit
 | `API_KEY_RATELIMIT_FREE_MAX` | Requests per window for `free`-tier keys | 100 | No |
 | `API_KEY_RATELIMIT_PRO_MAX` | Requests per window for `pro`-tier keys | 1000 | No |
 | `API_KEY_RATELIMIT_ADMIN_MAX` | Requests per window for `admin`-tier keys | 10000 | No |
+| `TRUST_PROXY` | Express trust proxy setting (`true`, `false`, `loopback`, IP/subnet, or hops) | `loopback` in production, `false` otherwise | No |
+| `ENFORCE_HTTPS` | Enforce HTTPS redirects (308) and reject state-changing plain HTTP | `true` in production, `false` otherwise | No |
+| `HTTPS_HOST` | Fixed target public host for HTTPS redirection | empty | No |
+| `ALLOWED_HOSTS` | Comma-separated allowlist of valid redirection hosts | empty | No |
+| `HSTS_MAX_AGE_SECONDS` | HSTS max-age duration in seconds | 31536000 | No |
+| `HSTS_INCLUDE_SUBDOMAINS` | Include subdomains in HSTS header | true | No |
+| `HSTS_PRELOAD` | Opt-in to HSTS preloading | false | No |
 
 
 ---

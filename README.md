@@ -309,6 +309,10 @@ Each price source (`stellar_dex`, `coingecko`, `coinmarketcap`) gets one circuit
 | `HSTS_MAX_AGE_SECONDS` | HSTS max-age duration in seconds | 31536000 | No |
 | `HSTS_INCLUDE_SUBDOMAINS` | Include subdomains in HSTS header | true | No |
 | `HSTS_PRELOAD` | Opt-in to HSTS preloading | false | No |
+| `SESSION_ABSOLUTE_LIFETIME_SECONDS` | Absolute maximum session lifetime in seconds (activity cannot extend) | 86400 (24h) | No |
+| `SESSION_IDLE_TIMEOUT_SECONDS` | Inactivity timeout in seconds that activity extends | 1800 (30m) | No |
+| `SESSION_ACTIVITY_THROTTLE_SECONDS` | Minimum interval in seconds between session store activity writes | 60 | No |
+| `SESSION_CLOCK_SKEW_SECONDS` | Clock-skew leeway in seconds for expiry comparison | 60 | No |
 
 
 ---

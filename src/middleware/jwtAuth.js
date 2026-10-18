@@ -89,12 +89,17 @@ function verifyJwt(token, secret, options = {}) {
     throw new AppError('UNAUTHORIZED', 'Invalid JWT payload', 401);
   }
 
-  // Expiration check
+  // Expiration check (#469)
+  // A token that carries no expiry must be rejected, not treated as eternal.
+  const CLOCK_SKEW_LEEWAY_SECONDS = parseInt(process.env.AUTH_CLOCK_SKEW_SECONDS, 10) || 60;
   const now = Math.floor(Date.now() / 1000);
-  if (payload.exp !== undefined && typeof payload.exp === 'number') {
-    if (payload.exp < now) {
-      throw new AppError('UNAUTHORIZED', 'JWT has expired', 401);
-    }
+  if (payload.exp === undefined || typeof payload.exp !== 'number') {
+    logger.warn('JWT rejected: missing or invalid exp claim');
+    throw new AppError('UNAUTHORIZED', 'Invalid token', 401);
+  }
+  if (payload.exp + CLOCK_SKEW_LEEWAY_SECONDS < now) {
+    logger.warn('JWT rejected: token expired', { exp: payload.exp, now });
+    throw new AppError('UNAUTHORIZED', 'Invalid token', 401);
   }
 
   // Not-before check

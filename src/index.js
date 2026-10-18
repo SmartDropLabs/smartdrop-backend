@@ -34,6 +34,7 @@ const {
   auditApiKeyUsage,
 } = require("./middleware/auth");
 const { errorHandler, notFoundHandler } = require("./middleware/errorHandler");
+const { jsonReplacer } = require("./utils/serialization");
 const { checkDatabase } = require("./services/dbHealth");
 const pricesRouter = require("./routes/prices");
 const alertsRouter = require("./routes/alerts");
@@ -83,6 +84,8 @@ const wrappedAirdropExpiryJob = makeLeaderAwareJob({
 });
 
 const app = express();
+app.set("json replacer", jsonReplacer);
+app.set("json spaces", 0);
 let server = {
   close(callback) {
     if (callback) callback();

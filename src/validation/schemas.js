@@ -125,6 +125,7 @@ const keyCreateBodySchema = z.object({
 const keyRotateBodySchema = z.object({
   // Preserves label and scopes from the old key, but allows overriding tier
   tier: z.enum(Object.keys(config.apiKeyRateLimit.tiers)).optional(),
+  grace_period_seconds: z.number().int().min(0).max(86400).optional(),
 });
 
 const alertCreateBodySchema = z.object({

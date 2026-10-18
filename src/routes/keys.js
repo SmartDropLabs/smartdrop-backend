@@ -60,9 +60,12 @@ router.post(
   validate(keyRotateBodySchema),
   async (req, res, next) => {
     try {
-      const { tier } = req.validated.body;
+      const { tier, grace_period_seconds: gracePeriodSeconds } = req.validated.body;
 
-      const rotated = await apiKeys.rotateKey(req.params.id, { tier });
+      const rotated = await apiKeys.rotateKey(req.params.id, {
+        tier,
+        gracePeriodSeconds,
+      });
       if (!rotated) {
         return next(
           new AppError("API_KEY_NOT_FOUND", "API key not found", 404),

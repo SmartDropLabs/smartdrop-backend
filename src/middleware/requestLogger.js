@@ -22,6 +22,27 @@
 
 const logger = require("../logger");
 const config = require("../config");
+const { redactInfo } = require("../services/logRedaction");
+
+const MAX_LOGGED_BODY_CHARS = 4096;
+
+function requestBodyForLog(req) {
+  if (!req.body || typeof req.body !== "object") return undefined;
+  if (String(req.headers["content-type"] || "").startsWith("multipart/")) {
+    return undefined;
+  }
+
+  try {
+    const sanitized = redactInfo({ requestPayload: req.body }).requestPayload;
+    const serialized = JSON.stringify(sanitized);
+    if (serialized.length > MAX_LOGGED_BODY_CHARS) {
+      return { truncated: true, preview: serialized.slice(0, MAX_LOGGED_BODY_CHARS) };
+    }
+    return sanitized;
+  } catch {
+    return undefined;
+  }
+}
 
 function requestLoggerMiddleware(req, res, next) {
   const startedAt = process.hrtime.bigint();
@@ -34,6 +55,7 @@ function requestLoggerMiddleware(req, res, next) {
       res.statusCode >= 500 ? "error" : res.statusCode >= 400 ? "warn" : "info";
 
     const correlationId = req.id || req.correlationId;
+    const requestPayload = requestBodyForLog(req);
 
     logger[level]("HTTP request", {
       method: req.method,
@@ -46,6 +68,7 @@ function requestLoggerMiddleware(req, res, next) {
       correlation_id: correlationId,
       requestId: correlationId,
       request_id: correlationId,
+      ...(requestPayload ? { request_payload: requestPayload } : {}),
     });
 
     // Distinct, greppable/alertable warning for slow requests (issue #244),

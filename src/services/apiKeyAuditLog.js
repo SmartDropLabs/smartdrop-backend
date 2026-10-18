@@ -1,5 +1,6 @@
 const { getDb } = require('../database');
 const logger = require('../logger');
+const { nowIso } = require('../utils/dates');
 
 /**
  * Log API key usage to audit trail
@@ -25,7 +26,10 @@ async function logUsage({ keyId, endpoint, ipAddress, statusCode, responseTimeMs
       ip_address: ipAddress,
       status_code: statusCode,
       response_time_ms: responseTimeMs,
-      created_at: new Date(),
+      // Issue #494 — serialize the instant in UTC explicitly. A bare Date
+      // relies on the driver/host time zone for its text form; the shared
+      // helper always emits ISO-8601 with a Z suffix.
+      created_at: nowIso(),
     });
   } catch (err) {
     // Log the error but don't fail the request

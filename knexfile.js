@@ -28,23 +28,32 @@ function connectionFor(fallback) {
   return process.env.DATABASE_URL || fallback;
 }
 
+// Issue #494 — migrations and ad-hoc knex CLI queries must render timestamps
+// in UTC too, not in the database server's local zone. Runs per pooled
+// connection.
+function afterCreateUtcConnection(conn, done) {
+  conn.query("SET TIME ZONE 'UTC'", (err) => done(err, conn));
+}
+
 module.exports = {
   development: {
     client: 'pg',
     connection: connectionFor('postgres://localhost/smartdrop'),
+    pool: { min: 2, max: 10, afterCreate: afterCreateUtcConnection },
     migrations,
   },
 
   test: {
     client: 'pg',
     connection: connectionFor('postgres://localhost/smartdrop_test'),
+    pool: { min: 2, max: 10, afterCreate: afterCreateUtcConnection },
     migrations,
   },
 
   production: {
     client: 'pg',
     connection: connectionFor(undefined),
-    pool: { min: 2, max: 10 },
+    pool: { min: 2, max: 10, afterCreate: afterCreateUtcConnection },
     migrations,
   },
 };

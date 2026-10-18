@@ -2,10 +2,11 @@
 
 const password = require('./password');
 const authService = require('./authService');
-const session = require('./session');
+const tokenRefresh = require('./tokenRefresh');
 
 module.exports = {
   ...password,
   ...authService,
-  ...session,
+  ...tokenRefresh,
+  tokenRefresh,
 };

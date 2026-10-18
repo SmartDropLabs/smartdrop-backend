@@ -41,11 +41,29 @@ function generateCacheKey(query, params) {
  * @param {Function} options.executor - Query executor function (required)
  * @returns {Promise<*>} Query result
  */
+const { fetchWithLock } = require('../cache');
+
+/**
+ * Execute a query with caching support and cache stampede protection (#518).
+ * Returns cached result if available, otherwise executes the query under lock
+ * to prevent multiple concurrent requests from hitting the database simultaneously.
+ *
+ * @param {string} query - SQL query string
+ * @param {Array} params - Query parameters
+ * @param {Object} options - Cache options
+ * @param {number} options.ttlSeconds - Cache TTL in seconds (default: 60)
+ * @param {boolean} options.skipCache - Skip cache and force fresh query
+ * @param {boolean} options.backgroundRefresh - Refresh cache in background when expired
+ * @param {Function} options.executor - Query executor function (required)
+ * @returns {Promise<*>} Query result
+ */
 async function cachedQuery(query, params = [], options = {}) {
   const {
     ttlSeconds = DEFAULT_TTL_SECONDS,
     skipCache = false,
+    backgroundRefresh = false,
     executor,
+    ...restOptions
   } = options;
 
   if (!executor) {
@@ -54,34 +72,16 @@ async function cachedQuery(query, params = [], options = {}) {
 
   const cacheKey = generateCacheKey(query, params);
 
-  // Try cache first
-  if (!skipCache) {
-    try {
-      const cached = await cache.get(cacheKey);
-      if (cached !== null && cached !== undefined) {
-        logger.debug('Database query cache hit', { cacheKey });
-        return typeof cached === 'string' ? JSON.parse(cached) : cached;
-      }
-    } catch (err) {
-      // Cache miss or Redis unavailable — continue to query
-      logger.debug('Database query cache read failed', { cacheKey, error: err.message });
+  return fetchWithLock(
+    cacheKey,
+    () => executor(query, params),
+    {
+      ttlSeconds,
+      skipCache,
+      backgroundRefresh,
+      ...restOptions,
     }
-  }
-
-  // Execute the query
-  const result = await executor(query, params);
-
-  // Cache the result
-  if (!skipCache) {
-    try {
-      await cache.set(cacheKey, result, ttlSeconds);
-      logger.debug('Database query cached', { cacheKey, ttlSeconds });
-    } catch (err) {
-      logger.warn('Database query cache write failed', { cacheKey, error: err.message });
-    }
-  }
-
-  return result;
+  );
 }
 
 /**

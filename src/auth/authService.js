@@ -160,9 +160,19 @@ async function changePassword(userId, currentPassword, newPassword, userStore) {
   return sanitizeUser(updated);
 }
 
+const {
+  createTokenPair,
+  refreshTokens,
+  revokeRefreshToken,
+} = require('./tokenRefresh');
+
 module.exports = {
   changePassword,
   loginUser,
   registerUser,
   sanitizeUser,
+  createTokenPair,
+  refreshTokens,
+  revokeRefreshToken,
 };
+

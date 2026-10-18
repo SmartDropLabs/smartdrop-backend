@@ -1,337 +1,149 @@
 "use strict";
 
 const { z } = require("zod");
-const webhookEvents = require("../services/webhookEvents");
 const config = require("../config");
+const { ALLOWED_ALERT_FIELDS, ALLOWED_CONDITIONS } = require("../services/alerts");
+const { isValidStellarAddress } = require("../utils/stellar");
 
-const stellarPublicKeySchema = z
-  .string()
-  .regex(/^G[A-Z0-9]{55}$/, "Must be a valid Stellar public key");
+const ASSET_CODE_RE = /^[A-Z0-9]{1,12}$/;
+const ROUTE_ID_RE = /^[A-Za-z0-9:_-]{1,128}$/;
+const INDEXER_ADDRESS_RE = /^[A-Z0-9]{10,80}$/;
+const VALID_TIERS = Object.keys(config.rateLimitTiers || { free: {}, standard: {}, pro: {} });
 
-const { toStroops, sumStroops, stroopsEqual } = require("../utils/stroops");
-
-const assetCodeSchema = z
-  .string()
-  .trim()
-  .min(1, "Asset code is required")
-  .max(12, "Asset code must be 12 characters or fewer")
-  .regex(/^[A-Za-z0-9]+$/, "Asset code must be alphanumeric")
-  .transform((value) => value.toUpperCase());
-
-const optionalIssuerSchema = z.preprocess(
-  (value) => (value === "" ? undefined : value),
-  stellarPublicKeySchema.optional(),
-);
-
-const paginationQuerySchema = z.object({
-  page: z.coerce.number().int().min(1).default(1),
-  limit: z.coerce.number().int().min(1).max(100).default(20),
-});
-
-const routeIdParamsSchema = z.object({
-  id: z
-    .string()
-    .trim()
-    .min(1)
-    .max(128)
-    .regex(
-      /^[A-Za-z0-9_-]+$/,
-      "ID can contain only letters, numbers, underscores, and hyphens",
-    ),
-});
-
-// Ranges that must never be reachable from an operator-supplied URL — hitting
-// them lets an attacker use this server as a relay into the internal network.
-const PRIVATE_HOSTNAME_RE = /^(localhost|.*\.local)(:\d+)?$/i;
-
-const PRIVATE_IP_RE = new RegExp(
-  "^(" +
-    "127\\." + // loopback
-    "|10\\." + // RFC-1918 /8
-    "|172\\.(1[6-9]|2\\d|3[01])\\." + // RFC-1918 /12
-    "|192\\.168\\." + // RFC-1918 /16
-    "|169\\.254\\." + // link-local (IPv4)
-    "|0\\.0\\.0\\.0" + // unspecified
-    "|::1" + // IPv6 loopback
-    "|fc[0-9a-f]{2}:" + // IPv6 ULA (fc00::/7)
-    "|fd[0-9a-f]{2}:" + // IPv6 ULA (fd00::/8)
-    "|fe[89ab][0-9a-f]:" + // IPv6 link-local (fe80::/10)
-    "|::ffff:0:" + // IPv4-mapped IPv6
-    "|::ffff:127\\." + // IPv4 loopback as IPv6
-    "|::ffff:10\\." + // RFC-1918 as IPv6
-    "|::ffff:172\\.(1[6-9]|2\\d|3[01])\\." + // RFC-1918 as IPv6
-    "|::ffff:192\\.168\\." + // RFC-1918 as IPv6
-    "|::ffff:169\\.254\\." + // link-local as IPv6
-    "|0:0:0:0:0:ffff:" + // IPv4-mapped (alternate notation)
-    "|0:0:0:0:0:0:0:0" + // unspecified (all zeros)
-    ")",
-);
-
-function isPrivateTarget(hostname) {
-  return PRIVATE_HOSTNAME_RE.test(hostname) || PRIVATE_IP_RE.test(hostname);
-}
-
-const CONTROL_CHAR_RE = /[\x00-\x08\x0E-\x1F\x7F]/;
-
-const httpUrlSchema = z
-  .string()
-  .trim()
-  .refine((value) => !CONTROL_CHAR_RE.test(value), {
-    message: "URL must not contain control characters",
-  })
-  .refine(
-    (value) => {
-      try {
-        const url = new URL(value);
-        return ["http:", "https:"].includes(url.protocol);
-      } catch {
-        return false;
-      }
-    },
-    {
-      message: "Must be an http(s) URL",
-    },
-  )
-  .refine(
-    (value) => {
-      try {
-        const { hostname } = new URL(value);
-        return !isPrivateTarget(hostname);
-      } catch {
-        return false;
-      }
-    },
-    {
-      message: "URL must not target a private or internal network address",
-    },
-  );
-
-const priceParamsSchema = z.object({
-  asset_code: assetCodeSchema,
-});
-
-const priceQuerySchema = z.object({
-  issuer: optionalIssuerSchema,
-});
-
-const keyCreateBodySchema = z.object({
-  label: z.string().trim().min(1).max(80),
-  scopes: z.array(z.string().trim().min(1)).nonempty().optional(),
-  // Sizes the key's own rate limit bucket (issue #251). Enumerated from
-  // configuration so adding a tier does not require touching validation.
-  tier: z.enum(Object.keys(config.apiKeyRateLimit.tiers)).optional(),
-});
-
-const keyRotateBodySchema = z.object({
-  // Preserves label and scopes from the old key, but allows overriding tier
-  tier: z.enum(Object.keys(config.apiKeyRateLimit.tiers)).optional(),
-  grace_period_seconds: z.number().int().min(0).max(86400).optional(),
-});
-
-const alertCreateBodySchema = z.object({
-  asset: assetCodeSchema.refine(
-    (code) =>
-      config.watchedAssets.length === 0 || config.watchedAssets.includes(code),
-    { message: "Asset code is not in the list of watched Stellar assets" },
-  ),
-  type: z.enum(["above", "below", "change_pct"]),
-  threshold_usd: z.number().positive(),
-  webhook_url: httpUrlSchema,
-  webhook_secret: z.string().min(8),
-  repeat: z.boolean().optional(),
-});
-
-const webhookSubscriptionSchema = z
-  .array(z.string().trim())
-  .nonempty()
-  .refine((value) => webhookEvents.isValidSubscription(value))
-  .superRefine((events, ctx) => {
-    if (events.length === 1 && events[0] === webhookEvents.WILDCARD) {
-      return;
-    }
-    if (events.includes(webhookEvents.WILDCARD)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `Wildcard "${webhookEvents.WILDCARD}" cannot be mixed with explicit event types`,
-      });
-      return;
-    }
-    if (events.length > webhookEvents.MAX_EXPLICIT_SUBSCRIPTIONS) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `Too many explicit subscriptions (max ${webhookEvents.MAX_EXPLICIT_SUBSCRIPTIONS})`,
-      });
-      return;
-    }
-    const invalidEvents = events.filter((e) => !webhookEvents.isKnownEvent(e));
-    if (invalidEvents.length > 0) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `Unknown event type(s): ${invalidEvents.join(", ")}. Valid events are: ${webhookEvents.ALL_EVENTS.join(", ")}`,
-      });
-    }
-  });
-
-const webhookFiltersSchema = z
+const routeIdParamsSchema = z
   .object({
-    asset: z
+    id: z.string().trim().min(1, "id is required"),
+  })
+  .strict();
+
+const indexerAirdropParamsSchema = z
+  .object({
+    id: z.string().regex(ROUTE_ID_RE, "Invalid airdrop id"),
+  })
+  .strict();
+
+const indexerRecipientParamsSchema = z
+  .object({
+    address: z.string().regex(INDEXER_ADDRESS_RE, "Invalid recipient address"),
+  })
+  .strict();
+
+const paginationQuerySchema = z
+  .object({
+    page: z.coerce.number().int().min(1).optional(),
+    limit: z.coerce.number().int().min(1).max(1000).optional(),
+  })
+  .strict();
+
+const priceParamsSchema = z
+  .object({
+    asset_code: z
       .string()
       .trim()
-      .min(1)
-      .max(12)
-      .regex(/^[A-Za-z0-9]+$/, "Asset filter must be alphanumeric")
       .transform((value) => value.toUpperCase())
+      .refine((value) => ASSET_CODE_RE.test(value), {
+        message: "Asset code must be 1-12 uppercase alphanumeric characters",
+      }),
+  })
+  .strict();
+
+const priceQuerySchema = z
+  .object({
+    issuer: z.string().trim().min(1, "issuer cannot be empty").optional(),
+  })
+  .strict();
+
+const alertCreateBodySchema = z
+  .object({
+    asset_code: z.string().trim().regex(/^[A-Za-z0-9]{1,12}$/, "Invalid asset_code"),
+    field: z.enum(ALLOWED_ALERT_FIELDS),
+    condition: z.enum(ALLOWED_CONDITIONS),
+    threshold: z.number().finite(),
+    webhook_url: z.string().trim().url().optional(),
+  })
+  .strict();
+
+const keyCreateBodySchema = z
+  .object({
+    label: z.string().trim().min(1).max(255).optional(),
+    scopes: z.array(z.string().trim().min(1)).nonempty().optional(),
+    tier: z.enum(VALID_TIERS).optional(),
+  })
+  .strict();
+
+const keyRotateBodySchema = z
+  .object({
+    tier: z.enum(VALID_TIERS).optional(),
+    grace_period_seconds: z.number().int().min(0).optional(),
+  })
+  .strict();
+
+const recipientInputSchema = z
+  .object({
+    address: z.string().trim().refine((val) => isValidStellarAddress(val), {
+      message: "Invalid Stellar public key",
+    }),
+    amount: z
+      .union([z.number(), z.string()])
+      .refine((value) => Number.isFinite(Number(value)) && Number(value) > 0, {
+        message: "Amount must be a positive number",
+      }),
+  })
+  .strict();
+
+const airdropCreateBodySchema = z
+  .object({
+    title: z.string().trim().max(255).optional(),
+    asset_code: z.string().trim().regex(/^[A-Za-z0-9]{1,12}$/, "Invalid asset_code").optional(),
+    asset_issuer: z
+      .string()
+      .trim()
+      .refine((value) => isValidStellarAddress(value), {
+        message: "Invalid Stellar public key for asset_issuer",
+      })
       .optional(),
-    pool_id: z.string().trim().min(1).max(128).optional(),
+    total_amount: z
+      .union([z.number(), z.string()])
+      .refine((value) => Number.isFinite(Number(value)) && Number(value) > 0, {
+        message: "total_amount must be a positive number",
+      }),
+    recipients: z
+      .array(recipientInputSchema)
+      .nonempty()
+      .max(config.limits.maxRecipientsPerAirdrop),
+    criteria: z.record(z.any()).optional(),
+    start_at: z.string().datetime({ offset: true }).optional(),
+    end_at: z.string().datetime({ offset: true }).optional(),
   })
   .strict()
-  .refine((value) => value.asset !== undefined || value.pool_id !== undefined, {
-    message: "At least one filter must be provided",
-  });
-
-const webhookCreateBodySchema = z.object({
-  url: httpUrlSchema,
-  events: webhookSubscriptionSchema,
-  secret: z.string().min(16).optional(),
-  description: z.string().optional(),
-  filters: webhookFiltersSchema.optional(),
-});
-
-const webhookPatchBodySchema = z.object({
-  url: httpUrlSchema.optional(),
-  events: webhookSubscriptionSchema.optional(),
-  secret: z.string().min(16).optional(),
-  active: z.boolean().optional(),
-  description: z.string().optional(),
-  filters: webhookFiltersSchema.optional(),
-});
-
-const webhookDeliveriesQuerySchema = z.object({
-  limit: z.coerce.number().int().min(1).max(100).default(50),
-  status: z.enum(["pending", "success", "failed"]).optional(),
-});
-
-// Stellar Int64 max in stroops, divided by 10_000_000 to get max in whole units
-// that can be safely represented as a JS number
-const MAX_AMOUNT_UNITS = Number(9223372036854775807n / 10000000n);
-
-const recipientSchema = z.object({
-  address: stellarPublicKeySchema,
-  amount: z
-    .number()
-    .positive()
-    .max(MAX_AMOUNT_UNITS, "amount exceeds Stellar Int64 ceiling")
-    .refine((v) => Number.isFinite(v), "amount must be a finite number")
-    .refine((v) => {
-      const str = String(v);
-      const dotIndex = str.indexOf(".");
-      return dotIndex === -1 || str.length - dotIndex - 1 <= 7;
-    }, "amount must have at most 7 decimal places"),
-});
-
-const recipientsSchema = z
-  .array(recipientSchema)
-  .max(10000, "recipients cannot exceed 10,000")
-  .superRefine((recipients, ctx) => {
-    const seen = new Set();
-    recipients.forEach((recipient, index) => {
-      if (seen.has(recipient.address)) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: [index, "address"],
-          message: `recipient ${index}: duplicate address ${recipient.address}`,
-        });
-      }
-      seen.add(recipient.address);
-    });
-  });
-
-function expiryLedgerSchema(currentLedger) {
-  return z
-    .number()
-    .int()
-    .gt(
-      currentLedger,
-      `expiry_ledger must be greater than current ledger (${currentLedger})`,
-    );
-}
-
-function airdropCreateBodySchema(currentLedger) {
-  return z
-    .object({
-      name: z.string().trim().min(1),
-      description: z.string().optional(),
-      asset: assetCodeSchema,
-      asset_issuer: stellarPublicKeySchema,
-      total_amount: z
-        .number()
-        .positive()
-        .max(MAX_AMOUNT_UNITS, `total_amount exceeds Stellar Int64 ceiling`),
-      expiry_ledger: expiryLedgerSchema(currentLedger),
-      recipients: recipientsSchema.optional().default([]),
-    })
-    .superRefine((body, ctx) => {
-      if (body.recipients.length === 0) return;
-
-      try {
-        const totalStroops = sumStroops(body.recipients);
-        const expectedStroops = toStroops(body.total_amount);
-        if (totalStroops !== expectedStroops) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ["recipients"],
-            message: `sum of recipient amounts must equal total_amount (${body.total_amount})`,
-          });
-        }
-      } catch (err) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["recipients"],
-          message: err.message,
-        });
-      }
-    });
-}
-
-function airdropUpdateBodySchema(currentLedger) {
-  return z.object({
-    name: z.string().trim().min(1).optional(),
-    description: z.string().optional(),
-    expiry_ledger: expiryLedgerSchema(currentLedger).optional(),
-  });
-}
-
-const airdropRecipientsBodySchema = z.object({
-  recipients: z.preprocess((value) => {
-    if (typeof value !== "string") return value;
-
-    try {
-      return JSON.parse(value);
-    } catch {
-      return value;
+  .superRefine((data, ctx) => {
+    const normalizedAsset = (data.asset_code || "XLM").toUpperCase();
+    if (normalizedAsset !== "XLM" && !data.asset_issuer) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["asset_issuer"],
+        message: "asset_issuer is required for non-XLM assets",
+      });
     }
-  }, recipientsSchema.optional()),
-});
+    if (data.start_at && data.end_at && new Date(data.start_at) >= new Date(data.end_at)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["end_at"],
+        message: "end_at must be after start_at",
+      });
+    }
+  });
 
 module.exports = {
-  airdropCreateBodySchema,
-  airdropRecipientsBodySchema,
-  airdropUpdateBodySchema,
-  alertCreateBodySchema,
-  assetCodeSchema,
-  httpUrlSchema,
-  isPrivateTarget,
-  keyCreateBodySchema,
-  keyRotateBodySchema,
-  optionalIssuerSchema,
+  routeIdParamsSchema,
+  indexerAirdropParamsSchema,
+  indexerRecipientParamsSchema,
   paginationQuerySchema,
   priceParamsSchema,
   priceQuerySchema,
-  recipientsSchema,
-  routeIdParamsSchema,
-  stellarPublicKeySchema,
-  webhookCreateBodySchema,
-  webhookDeliveriesQuerySchema,
-  webhookPatchBodySchema,
-  webhookSubscriptionSchema,
+  alertCreateBodySchema,
+  keyCreateBodySchema,
+  keyRotateBodySchema,
+  airdropCreateBodySchema,
+  recipientInputSchema,
 };

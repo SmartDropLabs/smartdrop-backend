@@ -249,6 +249,7 @@ The application reads configurations from the `.env` file at the root.
 | `PRICE_STALE_THRESHOLD` | Stale threshold in minutes | 5 | No |
 | `PRICE_ANOMALY_THRESHOLD` | Anomaly detection threshold % | 10 | No |
 | `ADMIN_API_KEY` | Bootstrap admin bearer token for API key management | undefined | Yes, for protected endpoints |
+| `API_KEY_ROTATION_GRACE_SECONDS` | How long the previous key stays valid after rotation | 0 | No |
 | `LOG_LEVEL` | Logging level | info | No |
 | `API_DOCS_ENABLED` | Serve the OpenAPI specification and Swagger UI at `/api-docs` | true | No |
 | `STATIC_ASSETS_DIR` | Directory served at `/static` when no CDN is configured | public | No |
@@ -286,6 +287,7 @@ The application reads configurations from the `.env` file at the root.
 
 Each price source (`stellar_dex`, `coingecko`, `coinmarketcap`) gets one circuit breaker shared across every watched asset. `CIRCUIT_BREAKER_FAILURE_THRESHOLD` only counts genuine failures for an asset a source is supposed to support (network errors, unexpected empty responses) — a source being asked about an asset it doesn't support at all (e.g. CoinGecko has no mapping for anything but XLM) is filtered out before it ever reaches the breaker, so it can't trip that source offline for the other assets it does support.
 | `ADMIN_API_KEY` | Bootstrap admin bearer token for API key management | empty | Yes, for protected endpoints |
+| `API_KEY_ROTATION_GRACE_SECONDS` | How long the previous key stays valid after rotation | 0 | No |
 | `AIRDROP_CSV_MAX_BYTES` | Maximum recipient CSV upload size in bytes | 5242880 (5 MiB) | No |
 | `AIRDROP_JSON_MAX_BYTES` | Maximum JSON request body size; 2 MiB accommodates 10,000 inline recipients | 2097152 (2 MiB) | No |
 | `AIRDROP_RATELIMIT_WINDOW` | Per-IP airdrop mutation rate-limit window in seconds | 60 | No |
@@ -305,6 +307,35 @@ Each price source (`stellar_dex`, `coingecko`, `coinmarketcap`) gets one circuit
 
 
 ---
+
+## Load Balancing
+
+`deploy/docker-compose.prod.yml` runs API replicas behind an nginx load
+balancer using `least_conn`, with WebSocket upgrade headers preserved. Start
+the stack from the repository root:
+
+```sh
+docker compose -f deploy/docker-compose.prod.yml up --build --scale api=3
+```
+
+All replicas share Redis and PostgreSQL, so leader election keeps scheduled
+jobs on a single instance while HTTP traffic is spread across the pool.
+
+## Request Body Logging
+
+Request logs include a sanitized `request_payload` for JSON requests.
+Passwords, tokens, API keys, authorization headers, cookies, and webhook
+secrets are redacted before logging, multipart uploads are skipped, and
+payloads are truncated to 4096 characters.
+
+## API Key Rotation
+
+`POST /api/v1/keys/:id/rotate` issues a replacement key and retires the old
+one. By default the previous key is revoked immediately; set
+`API_KEY_ROTATION_GRACE_SECONDS` to keep it valid for a bounded overlap so
+clients can deploy the replacement without downtime. Pass
+`grace_period_seconds` in the request body to override the window for a
+single rotation.
 
 ## Observability
 

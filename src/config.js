@@ -92,6 +92,7 @@ const env = cleanEnv(rawEnv, {
   LEASE_RENEW_INTERVAL_MS: positiveInteger({ default: 5000 }),
   ADMIN_API_KEY: str({ default: '' }),
   BCRYPT_ROUNDS: positiveInteger({ default: 12 }),
+  API_KEY_ROTATION_GRACE_SECONDS: num({ default: 0 }),
   // 32-byte AES-256 key for encrypting webhook secrets at rest (issue #145),
   // hex or base64 encoded. Empty in dev — webhookEncryption falls back to an
   // insecure fixed key and logs a warning; production must set this.
@@ -243,6 +244,7 @@ const config = module.exports = {
   auth: {
     adminApiKey: env.ADMIN_API_KEY,
     bcryptRounds: env.BCRYPT_ROUNDS,
+    apiKeyRotationGraceSeconds: env.API_KEY_ROTATION_GRACE_SECONDS,
   },
   apiKeyRateLimit: {
     windowSeconds: env.API_KEY_RATELIMIT_WINDOW_SECONDS,
@@ -367,6 +369,7 @@ function reload() {
     API_KEY_RATELIMIT_PRO_MAX: positiveInteger({ default: 1000 }),
     API_KEY_RATELIMIT_ADMIN_MAX: positiveInteger({ default: 10000 }),
     BCRYPT_ROUNDS: positiveInteger({ default: 12 }),
+  API_KEY_ROTATION_GRACE_SECONDS: num({ default: 0 }),
   });
 
   const reloadedUsdcIssuer = reloaded.USDC_ISSUER;
@@ -396,6 +399,7 @@ function reload() {
     auth: {
       adminApiKey: reloaded.ADMIN_API_KEY,
       bcryptRounds: reloaded.BCRYPT_ROUNDS,
+      apiKeyRotationGraceSeconds: reloaded.API_KEY_ROTATION_GRACE_SECONDS,
     },
     // Issue #373: reload() already re-validated COINMARKETCAP_API_KEY above
     // (it's in the env schema passed to validateEnv) but never applied it —

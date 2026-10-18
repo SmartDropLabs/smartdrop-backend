@@ -35,6 +35,14 @@ const logger = require('../logger');
 
 const SESSION_TTL_SECONDS =
   parseInt(process.env.ADMIN_SESSION_TTL_SECONDS, 10) || 12 * 60 * 60;
+const SESSION_ABSOLUTE_LIFETIME_SECONDS =
+  parseInt(process.env.SESSION_ABSOLUTE_LIFETIME_SECONDS || process.env.ADMIN_SESSION_TTL_SECONDS, 10) || 12 * 60 * 60;
+const SESSION_IDLE_TIMEOUT_SECONDS =
+  parseInt(process.env.SESSION_IDLE_TIMEOUT_SECONDS, 10) || 30 * 60;
+const SESSION_ACTIVITY_THROTTLE_SECONDS =
+  parseInt(process.env.SESSION_ACTIVITY_THROTTLE_SECONDS, 10) || 60;
+const CLOCK_SKEW_SECONDS =
+  parseInt(process.env.SESSION_CLOCK_SKEW_SECONDS, 10) || 60;
 const ACTIVE_INDEX_KEY = 'admin_sessions:active';
 const ADMISNS_KEY = 'admins:ids';
 // Bound a single cleanup pass so a huge backlog of expired sessions cannot
@@ -67,14 +75,33 @@ function sanitize(record) {
 function isExpired(record, nowMs = Date.now()) {
   if (!record) return true;
   if (record.active === false) return true;
-  const expiresAt = Date.parse(record.expires_at);
-  return Number.isNaN(expiresAt) || expiresAt <= nowMs;
+
+  const createdAtMs = Date.parse(record.created_at) || nowMs;
+  const lastActivityMs = Date.parse(record.last_activity_at || record.last_validated_at) || createdAtMs;
+
+  const absoluteExpiresAtMs = record.absolute_expires_at
+    ? Date.parse(record.absolute_expires_at)
+    : (record.expires_at ? Date.parse(record.expires_at) : createdAtMs + SESSION_ABSOLUTE_LIFETIME_SECONDS * 1000);
+
+  const idleExpiresAtMs = record.idle_expires_at
+    ? Date.parse(record.idle_expires_at)
+    : lastActivityMs + SESSION_IDLE_TIMEOUT_SECONDS * 1000;
+
+  const leewayMs = CLOCK_SKEW_SECONDS * 1000;
+  if (Number.isNaN(absoluteExpiresAtMs) || nowMs > absoluteExpiresAtMs + leewayMs) {
+    return true;
+  }
+  if (nowMs > idleExpiresAtMs + leewayMs) {
+    return true;
+  }
+  return false;
 }
 
 /**
  * #429 — the session record is written with a TTL (SETEX via cache.set) and
  * both index keys get an EXPIRE as well, so session data evicts itself even
  * if it is never accessed again.
+ * #469 — enforces dual-window expiry (absolute lifetime + idle timeout).
  */
 async function createSession(adminId, options = {}) {
   if (!adminId || typeof adminId !== 'string') {
@@ -82,28 +109,33 @@ async function createSession(adminId, options = {}) {
   }
   const now = new Date();
   const nowMs = now.getTime();
-  const expiresAtMs = nowMs + SESSION_TTL_SECONDS * 1000;
+  const absoluteExpiresAtMs = nowMs + SESSION_ABSOLUTE_LIFETIME_SECONDS * 1000;
+  const idleExpiresAtMs = nowMs + SESSION_IDLE_TIMEOUT_SECONDS * 1000;
+  const effectiveExpiryMs = Math.min(absoluteExpiresAtMs, idleExpiresAtMs);
+  const ttlSeconds = Math.max(1, Math.ceil((absoluteExpiresAtMs - nowMs) / 1000));
+
   const record = {
     id: generateSessionId(),
     admin_id: adminId,
     active: true,
     created_at: now.toISOString(),
-    expires_at: new Date(expiresAtMs).toISOString(),
+    expires_at: new Date(absoluteExpiresAtMs).toISOString(),
+    absolute_expires_at: new Date(absoluteExpiresAtMs).toISOString(),
+    idle_expires_at: new Date(idleExpiresAtMs).toISOString(),
     last_validated_at: now.toISOString(),
+    last_activity_at: now.toISOString(),
     ip_address: options.ipAddress || null,
     user_agent: options.userAgent || null,
     audit_history: [],
   };
 
   const redis = cache.getClient();
-  // Session record carries the TTL; the per-admin list and global index are
-  // only pointers, so they get the same TTL to avoid outliving the data.
-  await cache.set(sessionKey(record.id), record, SESSION_TTL_SECONDS);
+  await cache.set(sessionKey(record.id), record, ttlSeconds);
   const multi = redis.multi();
-  multi.zadd(adminSessionsKey(adminId), expiresAtMs, record.id);
-  multi.expire(adminSessionsKey(adminId), SESSION_TTL_SECONDS);
-  multi.zadd(ACTIVE_INDEX_KEY, expiresAtMs, record.id);
-  multi.expire(ACTIVE_INDEX_KEY, SESSION_TTL_SECONDS);
+  multi.zadd(adminSessionsKey(adminId), effectiveExpiryMs, record.id);
+  multi.expire(adminSessionsKey(adminId), ttlSeconds);
+  multi.zadd(ACTIVE_INDEX_KEY, effectiveExpiryMs, record.id);
+  multi.expire(ACTIVE_INDEX_KEY, ttlSeconds);
   multi.sadd(ADMINS_KEY, adminId);
   await multi.exec();
 
@@ -251,13 +283,30 @@ async function validateSession(sessionId) {
     return null;
   }
 
-  // Refresh in place and bump the TTL so active sessions don't expire while
-  // in use (#429). Single write, no re-read.
+  const createdAtMs = Date.parse(record.created_at) || nowMs;
+  const lastActivityMs = Date.parse(record.last_activity_at || record.last_validated_at) || createdAtMs;
+  const absoluteExpiresAtMs = record.absolute_expires_at
+    ? Date.parse(record.absolute_expires_at)
+    : (record.expires_at ? Date.parse(record.expires_at) : createdAtMs + SESSION_ABSOLUTE_LIFETIME_SECONDS * 1000);
+
+  // Throttled write: only write to store if interval elapsed
+  const throttleMs = SESSION_ACTIVITY_THROTTLE_SECONDS * 1000;
+  if (nowMs - lastActivityMs < throttleMs) {
+    return sanitize(record);
+  }
+
+  // Extend idle window, bounded by absolute lifetime
+  const newIdleExpiresAtMs = Math.min(nowMs + SESSION_IDLE_TIMEOUT_SECONDS * 1000, absoluteExpiresAtMs);
+  const remainingTtlSeconds = Math.max(1, Math.ceil((newIdleExpiresAtMs - nowMs) / 1000));
+
   const refreshed = {
     ...record,
     last_validated_at: new Date(nowMs).toISOString(),
+    last_activity_at: new Date(nowMs).toISOString(),
+    idle_expires_at: new Date(newIdleExpiresAtMs).toISOString(),
+    absolute_expires_at: record.absolute_expires_at || new Date(absoluteExpiresAtMs).toISOString(),
   };
-  await cache.set(sessionKey(sessionId), refreshed, SESSION_TTL_SECONDS);
+  await cache.set(sessionKey(sessionId), refreshed, remainingTtlSeconds);
   return sanitize(refreshed);
 }
 

@@ -42,6 +42,10 @@ const {
   attachApiKey,
   auditApiKeyUsage,
 } = require("./middleware/auth");
+const {
+  csrfProtectionMiddleware,
+  csrfTokenHandler,
+} = require("./middleware/csrf");
 const { errorHandler, notFoundHandler } = require("./middleware/errorHandler");
 const { jsonReplacer } = require("./utils/serialization");
 const { checkDatabase } = require("./services/dbHealth");
@@ -57,6 +61,7 @@ const {
   router: metricsRouter,
   requestMetricsMiddleware,
 } = require("./routes/metrics");
+const { httpsEnforcementMiddleware } = require("./middleware/httpsEnforcement");
 const healthRouter = require("./health");
 
 const priceWebSocket = require("./ws/priceWebSocket");
@@ -111,6 +116,8 @@ app.use(headerSecurityMiddleware);
 app.use(requestIdMiddleware);
 app.use(requestLoggerMiddleware);
 app.use(requestMetricsMiddleware);
+// #468 — Enforce HTTPS early before payload parsing or route processing.
+app.use(httpsEnforcementMiddleware);
 app.use(compression());
 app.use(
   helmet({
@@ -121,6 +128,9 @@ app.use(
     referrerPolicy: { policy: "strict-origin-when-cross-origin" },
     xContentTypeOptions: true,
     xDownloadOptions: true,
+    // #468: HSTS is managed exclusively in httpsEnforcementMiddleware so it is
+    // sent ONLY on secure responses and matches configured max-age/subdomains/preload.
+    hsts: false,
   })
 );
 app.use(buildCorsMiddleware(config.corsAllowedOrigins));
@@ -306,9 +316,14 @@ app.use(globalRateLimit);
 app.use(requestValidationMiddleware);
 app.use("/static", createStaticAssetsMiddleware(config.staticAssets));
 
+// #465 — Global CSRF protection for state-changing requests and CSRF token endpoint
+app.get("/csrf-token", csrfTokenHandler);
+app.use(csrfProtectionMiddleware);
+
 // ==================== API ROUTING & VERSIONING (#460) ====================
 // Build the core v1 API router.
 const apiV1Router = express.Router();
+apiV1Router.get("/csrf-token", csrfTokenHandler);
 apiV1Router.use(attachApiKey());
 apiV1Router.use(auditApiKeyUsage());
 apiV1Router.use(apiKeyLimit);

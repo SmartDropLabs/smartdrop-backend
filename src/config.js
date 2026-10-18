@@ -67,6 +67,18 @@ const databaseDevDefault =
     ? 'postgres://localhost/smartdrop_test'
     : 'postgres://localhost/smartdrop';
 
+function parseTrustProxy(value, nodeEnv) {
+  if (value === undefined || value === '') {
+    return nodeEnv === 'production' ? 'loopback' : false;
+  }
+  const trimmed = String(value).trim().toLowerCase();
+  if (trimmed === 'true') return true;
+  if (trimmed === 'false') return false;
+  const numVal = Number(trimmed);
+  if (!Number.isNaN(numVal)) return numVal;
+  return value;
+}
+
 const rawEnv = {
   ...process.env,
   NODE_ENV: process.env.NODE_ENV || 'development',
@@ -269,6 +281,21 @@ const config = module.exports = {
   sentryDsn: env.SENTRY_DSN,
   slowRequestThresholdMs: env.SLOW_REQUEST_THRESHOLD_MS,
   routeTimeoutMs: env.ROUTE_TIMEOUT_MS,
+  trustProxy: parseTrustProxy(process.env.TRUST_PROXY, env.NODE_ENV),
+  https: {
+    enforce: process.env.ENFORCE_HTTPS !== undefined && process.env.ENFORCE_HTTPS !== ''
+      ? process.env.ENFORCE_HTTPS === 'true'
+      : env.NODE_ENV === 'production',
+    host: process.env.HTTPS_HOST || process.env.PUBLIC_HOSTNAME || '',
+    allowedHosts: (process.env.ALLOWED_HOSTS || '')
+      .split(',')
+      .map((h) => h.trim())
+      .filter(Boolean),
+    hstsMaxAge: parseInt(process.env.HSTS_MAX_AGE_SECONDS, 10) || 31536000,
+    hstsIncludeSubDomains: process.env.HSTS_INCLUDE_SUBDOMAINS !== 'false',
+    // Preload is strictly opt-in because removal from browser preload lists takes months.
+    hstsPreload: process.env.HSTS_PRELOAD === 'true',
+  },
   webhookSecretEncryptionKey: env.WEBHOOK_SECRET_ENCRYPTION_KEY,
   databaseEncryptionKey: env.DB_ENCRYPTION_KEY,
   dbEncryptionKey: env.DB_ENCRYPTION_KEY,
@@ -451,6 +478,20 @@ function reload() {
     sentryDsn: reloaded.SENTRY_DSN,
     slowRequestThresholdMs: reloaded.SLOW_REQUEST_THRESHOLD_MS,
     routeTimeoutMs: reloaded.ROUTE_TIMEOUT_MS,
+    trustProxy: parseTrustProxy(process.env.TRUST_PROXY, reloaded.NODE_ENV),
+    https: {
+      enforce: process.env.ENFORCE_HTTPS !== undefined && process.env.ENFORCE_HTTPS !== ''
+        ? process.env.ENFORCE_HTTPS === 'true'
+        : reloaded.NODE_ENV === 'production',
+      host: process.env.HTTPS_HOST || process.env.PUBLIC_HOSTNAME || '',
+      allowedHosts: (process.env.ALLOWED_HOSTS || '')
+        .split(',')
+        .map((h) => h.trim())
+        .filter(Boolean),
+      hstsMaxAge: parseInt(process.env.HSTS_MAX_AGE_SECONDS, 10) || 31536000,
+      hstsIncludeSubDomains: process.env.HSTS_INCLUDE_SUBDOMAINS !== 'false',
+      hstsPreload: process.env.HSTS_PRELOAD === 'true',
+    },
     webhookSecretEncryptionKey: reloaded.WEBHOOK_SECRET_ENCRYPTION_KEY,
     databaseEncryptionKey: reloaded.DB_ENCRYPTION_KEY,
     dbEncryptionKey: reloaded.DB_ENCRYPTION_KEY,

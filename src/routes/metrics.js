@@ -1,5 +1,10 @@
 'use strict';
 
+/**
+ * Metrics Router (#467).
+ * Connects Express router with the Prometheus text exporter in src/metrics/.
+ */
+
 const express = require('express');
 const cache = require('../services/cache');
 const eventStore = require('../indexer/eventStore');
@@ -108,8 +113,15 @@ async function metricsHandler(_req, res) {
   } catch (err) {
     res.status(500).send('# Error generating metrics\n');
   }
-}
+);
 
 router.get('/metrics', metricsHandler);
 
-module.exports = { router, requestMetricsMiddleware, incCounter, counters };
+module.exports = {
+  router,
+  metricsHandler,
+  requestMetricsMiddleware,
+  incCounter,
+  counters,
+  registry,
+};

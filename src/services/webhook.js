@@ -22,6 +22,15 @@ function buildSignatureHeaders(secret, payload) {
   };
 }
 
+const { CircuitBreaker } = require('../utils/circuitBreaker');
+
+const webhookBreaker = new CircuitBreaker('webhook-delivery', {
+  failureThreshold: 5,
+  timeoutMs: 30000,
+  requestTimeoutMs: DEFAULT_TIMEOUT_MS,
+  windowMs: 60000,
+});
+
 async function sendSignedRequest(webhookUrl, secret, payload, options = {}) {
   const headers = {
     ...buildSignatureHeaders(secret, payload),
@@ -30,11 +39,22 @@ async function sendSignedRequest(webhookUrl, secret, payload, options = {}) {
   const startedAt = Date.now();
 
   try {
-    const response = await axios.post(webhookUrl, payload, {
-      headers,
-      timeout: options.timeoutMs || DEFAULT_TIMEOUT_MS,
-      validateStatus: () => true,
+    const response = await webhookBreaker.call(async () => {
+      return axios.post(webhookUrl, payload, {
+        headers,
+        timeout: options.timeoutMs || DEFAULT_TIMEOUT_MS,
+        validateStatus: () => true,
+      });
     });
+
+    if (!response) {
+      return {
+        ok: false,
+        status: 503,
+        duration_ms: Date.now() - startedAt,
+        error: 'Circuit breaker open',
+      };
+    }
 
     return {
       ok: response.status >= 200 && response.status < 300,

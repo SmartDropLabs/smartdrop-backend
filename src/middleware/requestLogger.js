@@ -33,11 +33,19 @@ function requestLoggerMiddleware(req, res, next) {
     const level =
       res.statusCode >= 500 ? "error" : res.statusCode >= 400 ? "warn" : "info";
 
+    const correlationId = req.id || req.correlationId;
+
     logger[level]("HTTP request", {
       method: req.method,
       path: requestPath,
       statusCode: res.statusCode,
+      status: res.statusCode,
       durationMs: roundedDurationMs,
+      duration: roundedDurationMs,
+      correlationId,
+      correlation_id: correlationId,
+      requestId: correlationId,
+      request_id: correlationId,
     });
 
     // Distinct, greppable/alertable warning for slow requests (issue #244),
@@ -49,8 +57,14 @@ function requestLoggerMiddleware(req, res, next) {
         method: req.method,
         path: requestPath,
         statusCode: res.statusCode,
+        status: res.statusCode,
         durationMs: roundedDurationMs,
+        duration: roundedDurationMs,
         thresholdMs: config.slowRequestThresholdMs,
+        correlationId,
+        correlation_id: correlationId,
+        requestId: correlationId,
+        request_id: correlationId,
       });
     }
   });

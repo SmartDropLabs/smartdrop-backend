@@ -24,15 +24,46 @@ const winston = require('winston');
  * objects with sensitive keys.
  */
 
-const SENSITIVE_KEYS = ['apikey', 'privatekey', 'secret', 'token', 'authorization'];
+const SENSITIVE_KEYS = [
+  'apikey',
+  'privatekey',
+  'secret',
+  'token',
+  'authorization',
+  'password',
+  'passwd',
+  'cookie',
+  'cookies',
+  'setcookie',
+  'body',
+  'reqbody',
+  'requestbody',
+  'credential',
+  'credentials',
+  'jwt',
+  'session',
+  'bearer',
+];
+
+const ENTIRELY_REDACTED_KEYS = [
+  'body',
+  'reqbody',
+  'requestbody',
+  'authorization',
+  'cookie',
+  'cookies',
+  'setcookie',
+  'password',
+  'passwd',
+];
 
 // Matches webhook secrets (whsec_ + hex). Safe to match broadly: the prefix is
 // distinctive and only ever precedes a secret in this codebase.
 const WHSEC_RE = /whsec_[0-9a-f]+/gi;
 
-// Matches token=/secret=/key= query parameters embedded in any string value,
+// Matches token=/secret=/key=/password= query parameters embedded in any string value,
 // capturing the parameter name so we can preserve it and only redact the value.
-const QUERY_SECRET_RE = /([?&](?:token|secret|key)=)([^&#\s]+)/gi;
+const QUERY_SECRET_RE = /([?&](?:token|secret|key|api_key|password|auth|sig|signature|access_token|credential|session)=)([^&#\s]+)/gi;
 
 // Normalize a key for matching: treat `_`/`-` as nothing so `api_key`,
 // `ApiKey`, `PRIVATE_KEY` all match their tokens.
@@ -45,6 +76,11 @@ function isSensitiveKey(key) {
   return SENSITIVE_KEYS.some((k) => n.includes(k));
 }
 
+function isEntirelyRedactedKey(key) {
+  const n = normKey(key);
+  return ENTIRELY_REDACTED_KEYS.some((k) => n === k || n.includes(k));
+}
+
 function redactWhsec(value) {
   return value.replace(WHSEC_RE, 'whsec_****');
 }
@@ -53,10 +89,12 @@ function redactQuerySecrets(value) {
   return value.replace(QUERY_SECRET_RE, '$1[REDACTED]');
 }
 
-// Scan a string value for secret *shapes* regardless of the key it sits under.
+// Scan a string value for secret *shapes* regardless of the key it sits under,
+// and escape CR and LF to prevent log injection / log splitting (Issue #499).
 function scanString(value) {
   let out = redactWhsec(value);
   out = redactQuerySecrets(out);
+  out = out.replace(/\r/g, '\\r').replace(/\n/g, '\\n');
   return out;
 }
 
@@ -72,7 +110,9 @@ function redactValue(value, key) {
 // is an array of secret-shaped strings). Recurse into it so each leaf is
 // redacted by shape/key rather than blanket-replacing the whole structure with
 // `[REDACTED]` — which would also lose the `whsec_****` partial reveal.
+// Bodies, cookies, passwords, and authorization headers are always redacted entirely.
 function redactSensitiveValue(value, key, seen) {
+  if (isEntirelyRedactedKey(key)) return '[REDACTED]';
   if (typeof value === 'string') return redactValue(value, key);
   if (Array.isArray(value)) {
     return value.map((el) => {

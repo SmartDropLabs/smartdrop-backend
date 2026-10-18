@@ -45,7 +45,8 @@ async function getKey(id) {
 async function listKeys() {
   const redis = cache.getClient();
   const ids = await redis.zrevrange(IDS_KEY, 0, -1);
-  const records = await Promise.all(ids.map((id) => getKey(id)));
+  if (ids.length === 0) return [];
+  const records = await cache.mget(ids.map(keyPath));
   return records.filter(Boolean).map(sanitize);
 }
 

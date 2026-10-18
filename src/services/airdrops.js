@@ -35,8 +35,14 @@ const horizon = addRequestIdHeaderInterceptor(
 // airdrop per cycle; cache the result briefly so bursts of calls within the
 // same window reuse one ledger read instead of hammering Horizon, the same
 // rate-limit concern already applied to CoinGecko/CoinMarketCap elsewhere.
-let cachedLedger = null;
-let cachedLedgerAt = 0;
+const { CircuitBreaker } = require('../utils/circuitBreaker');
+
+const horizonBreaker = new CircuitBreaker('stellar-horizon', {
+  failureThreshold: 3,
+  timeoutMs: 30000,
+  requestTimeoutMs: 10000,
+  windowMs: 60000,
+});
 
 async function getCurrentLedger() {
   const now = Date.now();
@@ -44,7 +50,9 @@ async function getCurrentLedger() {
     return cachedLedger;
   }
 
-  const ledger = await horizon.ledgers().order('desc').limit(1).call();
+  const ledger = await horizonBreaker.execute(() =>
+    horizon.ledgers().order('desc').limit(1).call()
+  );
   cachedLedger = ledger.records[0].sequence;
   cachedLedgerAt = now;
   return cachedLedger;
@@ -180,7 +188,10 @@ async function list(page = 1, limit = 20) {
   const start = (page - 1) * limit;
   const end = start + limit - 1;
   const paginatedIds = await redis.zrevrange(IDS_KEY, start, end);
-  const airdrops = await Promise.all(paginatedIds.map((id) => cache.get(airdropKey(id))));
+  if (paginatedIds.length === 0) {
+    return { airdrops: [], total };
+  }
+  const airdrops = await cache.mget(paginatedIds.map(airdropKey));
 
   return { airdrops: airdrops.filter(Boolean), total };
 }

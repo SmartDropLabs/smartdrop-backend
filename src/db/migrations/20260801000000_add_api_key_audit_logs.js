@@ -11,7 +11,7 @@
  */
 exports.up = async function (knex) {
   await knex.raw(`
-    CREATE TABLE api_key_audit_logs (
+    CREATE TABLE IF NOT EXISTS api_key_audit_logs (
       id                SERIAL PRIMARY KEY,
       key_id            TEXT NOT NULL,
       endpoint          TEXT NOT NULL,
@@ -21,8 +21,8 @@ exports.up = async function (knex) {
       created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
-    CREATE INDEX idx_api_key_audit_logs_key_id ON api_key_audit_logs (key_id);
-    CREATE INDEX idx_api_key_audit_logs_key_id_created_at ON api_key_audit_logs (key_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_api_key_audit_logs_key_id ON api_key_audit_logs (key_id);
+    CREATE INDEX IF NOT EXISTS idx_api_key_audit_logs_key_id_created_at ON api_key_audit_logs (key_id, created_at);
   `);
 };
 

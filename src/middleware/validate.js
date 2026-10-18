@@ -11,9 +11,23 @@ function flattenZodIssues(error) {
   }, {});
 }
 
-function validate(schema, source = "body") {
+function enforceStrictSchema(schema) {
+  if (schema && typeof schema.strict === "function") {
+    try {
+      return schema.strict();
+    } catch {
+      return schema;
+    }
+  }
+  return schema;
+}
+
+function validate(schema, source = "body", options = { strict: true }) {
+  const effectiveSchema = options.strict !== false ? enforceStrictSchema(schema) : schema;
+
   return (req, _res, next) => {
-    const result = schema.safeParse(req[source] ?? {});
+    const rawInput = req[source] ?? {};
+    const result = effectiveSchema.safeParse(rawInput);
     if (!result.success) {
       return next(
         new AppError("VALIDATION_ERROR", "Validation failed", 400, {
@@ -33,4 +47,5 @@ function validate(schema, source = "body") {
 module.exports = {
   flattenZodIssues,
   validate,
+  enforceStrictSchema,
 };

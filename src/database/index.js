@@ -102,4 +102,7 @@ module.exports = {
   getPoolStats,
   withTransaction,
   transaction,
+  sortIds,
+  lockRows,
+  isDeadlockOrSerializationError,
 };

@@ -394,3 +394,214 @@ describe("circuit breaker", () => {
     expect(mockLogger.error).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("Circuit Breaker for External Service Calls (#498)", () => {
+  const { CircuitBreakerOpenError, isDependencyFailure } = require("../src/utils/circuitBreaker");
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  test("opens after reaching the failure threshold within rolling window", async () => {
+    const breaker = new CircuitBreaker("external-api", {
+      failureThreshold: 3,
+      windowMs: 60000,
+      cooldownMs: 30000,
+      throwOnOpen: true,
+    });
+
+    const networkError = new Error("ECONNRESET");
+    networkError.code = "ECONNRESET";
+
+    // 2 failures: still closed
+    for (let i = 0; i < 2; i++) {
+      await expect(breaker.execute(async () => { throw networkError; })).rejects.toThrow("ECONNRESET");
+      expect(breaker.isOpen()).toBe(false);
+      expect(breaker.getState()).toBe("closed");
+    }
+
+    // 3rd failure trips the breaker OPEN
+    await expect(breaker.execute(async () => { throw networkError; })).rejects.toThrow("ECONNRESET");
+    expect(breaker.isOpen()).toBe(true);
+    expect(breaker.getState()).toBe("open");
+  });
+
+  test("fails fast with typed CircuitBreakerOpenError mapping to 503 and Retry-After header while OPEN", async () => {
+    const breaker = new CircuitBreaker("payment-gw", {
+      failureThreshold: 2,
+      cooldownMs: 30000,
+      throwOnOpen: true,
+    });
+
+    const serverError = new Error("Bad Gateway");
+    serverError.status = 502;
+
+    await expect(breaker.execute(async () => { throw serverError; })).rejects.toThrow("Bad Gateway");
+    await expect(breaker.execute(async () => { throw serverError; })).rejects.toThrow("Bad Gateway");
+
+    expect(breaker.isOpen()).toBe(true);
+
+    // Call while OPEN must fail fast without executing the fn
+    const actionMock = jest.fn();
+    try {
+      await breaker.execute(actionMock);
+      throw new Error("Should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(CircuitBreakerOpenError);
+      expect(err.statusCode).toBe(503);
+      expect(err.code).toBe("SERVICE_UNAVAILABLE");
+      expect(err.retryAfter).toBeGreaterThan(0);
+      expect(err.retryAfter).toBeLessThanOrEqual(30);
+      expect(err.message).toContain("payment-gw");
+      expect(actionMock).not.toHaveBeenCalled();
+    }
+  });
+
+  test("moves to half-open after cooldownMs elapses", async () => {
+    const breaker = new CircuitBreaker("stellar-horizon", {
+      failureThreshold: 1,
+      cooldownMs: 15000,
+      throwOnOpen: true,
+    });
+
+    const err = new Error("Timeout");
+    err.code = "ETIMEDOUT";
+
+    await expect(breaker.execute(async () => { throw err; })).rejects.toThrow("Timeout");
+    expect(breaker.getState()).toBe("open");
+
+    // Advance 14.99 seconds: still open
+    jest.advanceTimersByTime(14999);
+    expect(breaker.getState()).toBe("open");
+
+    // Advance past cooldown: transitions to half-open
+    jest.advanceTimersByTime(2);
+    expect(breaker.getState()).toBe("half-open");
+  });
+
+  test("closes after a successful trial call in half-open", async () => {
+    const breaker = new CircuitBreaker("rates-api", {
+      failureThreshold: 1,
+      cooldownMs: 10000,
+      trialCount: 1,
+      successThreshold: 1,
+      throwOnOpen: true,
+    });
+
+    const err = new Error("Gateway timeout");
+    err.status = 504;
+
+    await expect(breaker.execute(async () => { throw err; })).rejects.toThrow("Gateway timeout");
+    expect(breaker.getState()).toBe("open");
+
+    jest.advanceTimersByTime(10001);
+    expect(breaker.getState()).toBe("half-open");
+
+    // Trial call succeeds
+    const result = await breaker.execute(async () => ({ rate: 1.25 }));
+    expect(result).toEqual({ rate: 1.25 });
+
+    // Should now be closed
+    expect(breaker.getState()).toBe("closed");
+    expect(breaker.isOpen()).toBe(false);
+  });
+
+  test("reopens when a trial call in half-open fails", async () => {
+    const breaker = new CircuitBreaker("remote-service", {
+      failureThreshold: 1,
+      cooldownMs: 20000,
+      throwOnOpen: true,
+    });
+
+    const err500 = new Error("Internal Server Error");
+    err500.status = 500;
+
+    await expect(breaker.execute(async () => { throw err500; })).rejects.toThrow("Internal Server Error");
+    expect(breaker.getState()).toBe("open");
+
+    jest.advanceTimersByTime(20001);
+    expect(breaker.getState()).toBe("half-open");
+
+    // Trial call fails with dependency error
+    await expect(breaker.execute(async () => { throw err500; })).rejects.toThrow("Internal Server Error");
+
+    // Circuit reopens immediately
+    expect(breaker.getState()).toBe("open");
+    expect(breaker.isOpen()).toBe(true);
+  });
+
+  test("ignores 4xx client errors (400, 401, 404, 422) and only counts 5xx, 429, and network failures", async () => {
+    const breaker = new CircuitBreaker("auth-guarded-api", {
+      failureThreshold: 2,
+      throwOnOpen: true,
+    });
+
+    // 400 Bad Request
+    const badRequest = new Error("Bad Request");
+    badRequest.status = 400;
+
+    // 401 Unauthorized
+    const unauth = new Error("Unauthorized");
+    unauth.status = 401;
+
+    // 404 Not Found
+    const notFound = new Error("Not Found");
+    notFound.status = 404;
+
+    // 422 Unprocessable
+    const unproc = new Error("Unprocessable");
+    unproc.status = 422;
+
+    for (const clientErr of [badRequest, unauth, notFound, unproc]) {
+      await expect(breaker.execute(async () => { throw clientErr; })).rejects.toThrow(clientErr.message);
+      expect(breaker.isOpen()).toBe(false);
+      expect(breaker.getFailureCount()).toBe(0);
+    }
+
+    // Now send 429 (Too Many Requests - genuine dependency failure)
+    const rateLimited = new Error("Too Many Requests");
+    rateLimited.status = 429;
+    await expect(breaker.execute(async () => { throw rateLimited; })).rejects.toThrow("Too Many Requests");
+    expect(breaker.getFailureCount()).toBe(1);
+
+    // And send 503 (Service Unavailable - genuine dependency failure)
+    const unavailable = new Error("Service Unavailable");
+    unavailable.status = 503;
+    await expect(breaker.execute(async () => { throw unavailable; })).rejects.toThrow("Service Unavailable");
+
+    // Reached failureThreshold (2) of genuine failures -> OPEN!
+    expect(breaker.isOpen()).toBe(true);
+  });
+
+  test("rolling window expires old failures so transient blips do not trip breaker", async () => {
+    const breaker = new CircuitBreaker("windowed-client", {
+      failureThreshold: 3,
+      windowMs: 10000, // 10s window
+      throwOnOpen: true,
+    });
+
+    const netErr = new Error("ECONNREFUSED");
+    netErr.code = "ECONNREFUSED";
+
+    // 2 failures at t=0
+    await expect(breaker.execute(async () => { throw netErr; })).rejects.toThrow();
+    await expect(breaker.execute(async () => { throw netErr; })).rejects.toThrow();
+    expect(breaker.getFailureCount()).toBe(2);
+
+    // Advance 11 seconds (past the 10s window)
+    jest.advanceTimersByTime(11000);
+
+    // Old failures expired from the window
+    expect(breaker.getFailureCount()).toBe(0);
+
+    // 1 failure at t=11s
+    await expect(breaker.execute(async () => { throw netErr; })).rejects.toThrow();
+    expect(breaker.getFailureCount()).toBe(1);
+    expect(breaker.isOpen()).toBe(false);
+  });
+});
+

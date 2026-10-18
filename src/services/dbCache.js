@@ -60,7 +60,7 @@ async function cachedQuery(query, params = [], options = {}) {
       const cached = await cache.get(cacheKey);
       if (cached !== null && cached !== undefined) {
         logger.debug('Database query cache hit', { cacheKey });
-        return JSON.parse(cached);
+        return typeof cached === 'string' ? JSON.parse(cached) : cached;
       }
     } catch (err) {
       // Cache miss or Redis unavailable — continue to query
@@ -74,7 +74,7 @@ async function cachedQuery(query, params = [], options = {}) {
   // Cache the result
   if (!skipCache) {
     try {
-      await cache.set(cacheKey, JSON.stringify(result), ttlSeconds);
+      await cache.set(cacheKey, result, ttlSeconds);
       logger.debug('Database query cached', { cacheKey, ttlSeconds });
     } catch (err) {
       logger.warn('Database query cache write failed', { cacheKey, error: err.message });

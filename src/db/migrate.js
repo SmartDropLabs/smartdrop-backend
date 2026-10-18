@@ -132,6 +132,15 @@ async function run() {
     const destructiveOps = inspected
       .flatMap((entry) => entry.destructive.map((d) => d.operation));
 
+    const MIGRATION_ADVISORY_LOCK_ID = 736284628;
+    let lockAcquired = false;
+    try {
+      await knex.raw('SELECT pg_advisory_lock(?)', [MIGRATION_ADVISORY_LOCK_ID]);
+      lockAcquired = true;
+    } catch (_) {
+      // If advisory locks not supported by database/driver, proceed with knex's default lock
+    }
+
     try {
       const [batch, applied] = direction === 'down'
         ? await knex.migrate.down()
@@ -163,6 +172,12 @@ async function run() {
         error: err.message,
       });
       throw err;
+    } finally {
+      if (lockAcquired) {
+        try {
+          await knex.raw('SELECT pg_advisory_unlock(?)', [MIGRATION_ADVISORY_LOCK_ID]);
+        } catch (_) {}
+      }
     }
   } catch (err) {
     process.stderr.write(`${err.message}\n`);

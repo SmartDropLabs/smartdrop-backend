@@ -205,7 +205,8 @@ async function list(page = 1, limit = 20) {
     const start = (page - 1) * limit;
     const end = start + limit - 1;
     const ids = await redis.zrevrange(IDS_KEY, start, end);
-    const records = await Promise.all(ids.map((id) => cache.get(key(id))));
+    if (ids.length === 0) return { webhooks: [], total };
+    const records = await cache.mget(ids.map(key));
     return { webhooks: records.filter(Boolean).map(normalize), total };
   } catch (err) {
     logger.error('webhookRepository.list Redis error', { error: err.message });
@@ -220,7 +221,7 @@ async function listActiveForEvent(eventType, matcher) {
     const redis = cache.getClient();
     const ids = await redis.smembers(eventIndexKey(eventType));
     if (ids.length === 0) return [];
-    const records = await Promise.all(ids.map((id) => cache.get(key(id))));
+    const records = await cache.mget(ids.map(key));
     return records.filter(Boolean).map(normalize).filter((w) => w.active && matcher(w.events, eventType));
   } catch (err) {
     logger.error('webhookRepository.listActiveForEvent Redis error', { eventType, error: err.message });

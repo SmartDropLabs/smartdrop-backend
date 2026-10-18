@@ -21,6 +21,7 @@ const path = require('path');
 const migrations = {
   directory: path.join(__dirname, 'src', 'db', 'migrations'),
   extension: 'js',
+  disableTransactions: false,
 };
 
 function connectionFor(fallback) {

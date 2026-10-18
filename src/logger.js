@@ -22,12 +22,15 @@ const useJsonFormat = logFormat === 'json';
 
 // ==================== REQUEST CONTEXT ====================
 const requestIdFormat = winston.format((info) => {
-  const requestId = requestContext.getStore()?.requestId ?? 'system';
+  const store = requestContext.getStore();
+  const requestId = store?.requestId || store?.correlationId || 'system';
   info.requestId = requestId;
   // snake_case alias so structured log output matches the request_id field
   // name used on delivery records and in API responses (issue #250).
   // `requestId` is kept for existing dashboards and queries.
   if (info.request_id === undefined) info.request_id = requestId;
+  if (info.correlationId === undefined) info.correlationId = requestId;
+  if (info.correlation_id === undefined) info.correlation_id = requestId;
   return info;
 });
 

@@ -66,11 +66,15 @@ function idempotencyMiddleware(resourceType = 'resource') {
 
     // Validate idempotency key format before processing
     if (idempotencyKey && typeof idempotencyKey !== 'string') {
-      return res.status(400).json({ error: 'Invalid Idempotency-Key header' });
+      return res.status(400).json({
+        error: { code: 'IDEMPOTENCY_KEY_INVALID', message: 'Invalid Idempotency-Key header', request_id: req.id },
+      });
     }
 
     if (idempotencyKey && idempotencyKey.length === 0) {
-      return res.status(400).json({ error: 'Idempotency-Key header cannot be empty' });
+      return res.status(400).json({
+        error: { code: 'IDEMPOTENCY_KEY_EMPTY', message: 'Idempotency-Key header cannot be empty', request_id: req.id },
+      });
     }
 
     // Check if this idempotency key was already processed before any other processing

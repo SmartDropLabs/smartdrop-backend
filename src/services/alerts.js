@@ -82,7 +82,8 @@ async function create(data) {
 async function list() {
   const redis = cache.getClient();
   const ids = await redis.zrevrange(IDS_KEY, 0, -1);
-  const alerts = await Promise.all(ids.map((id) => cache.get(alertKey(id))));
+  if (ids.length === 0) return [];
+  const alerts = await cache.mget(ids.map(alertKey));
   return alerts.filter(Boolean);
 }
 
@@ -90,12 +91,16 @@ async function listPaginated({ offset = 0, limit = 20 } = {}) {
   const redis = cache.getClient();
   const total = await redis.zcard(IDS_KEY);
   const paginatedIds = await redis.zrevrange(IDS_KEY, offset, offset + limit - 1);
-  const alerts = await Promise.all(
-    paginatedIds.map((id) => cache.get(alertKey(id)))
-  );
+  if (paginatedIds.length === 0) {
+    return {
+      alerts: [],
+      total,
+    };
+  }
+  const alerts = await cache.mget(paginatedIds.map(alertKey));
   return {
     alerts: alerts.filter(Boolean),
-    total
+    total,
   };
 }
 

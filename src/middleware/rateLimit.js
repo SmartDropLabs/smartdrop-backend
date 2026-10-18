@@ -25,6 +25,20 @@ setInterval(() => {
   }
 }, CLEANUP_INTERVAL_MS).unref();
 
+/**
+ * Global IP-based rate limiter (#493).
+ *
+ * Applies a per-IP request limit to ALL requests, including unauthenticated
+ * ones, to prevent distributed abuse and DoS attacks. Uses a more generous
+ * limit than per-route limiters since it covers every endpoint.
+ *
+ * Mount as early as possible in the middleware chain so abusive IPs are
+ * rejected before any expensive processing.
+ */
+function buildIpRateLimit({ windowSeconds = 60, max = 300, keyPrefix = 'ip-global' } = {}) {
+  return buildRateLimit({ windowSeconds, max, keyPrefix });
+}
+
 function buildRateLimit({ windowSeconds, max, keyPrefix }) {
   if (!Number.isFinite(windowSeconds) || windowSeconds <= 0) {
     throw new Error('windowSeconds must be a positive number');
@@ -196,5 +210,6 @@ function buildApiKeyRateLimit({ keyPrefix = 'apikey' } = {}) {
 
 module.exports = buildRateLimit;
 module.exports.buildRateLimit = buildRateLimit;
+module.exports.buildIpRateLimit = buildIpRateLimit;
 module.exports.buildApiKeyRateLimit = buildApiKeyRateLimit;
 module.exports.resolveTier = resolveTier;

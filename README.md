@@ -6,12 +6,14 @@ HTTP APIs, webhooks, and **indexing** for SmartDrop. This repository contains No
 
 ## API Versioning
 
-The public HTTP API uses path-based versioning under `/api/v1`.
+The public HTTP API uses path-based versioning under `/v1` (with `/api/v1` supported as an alias).
 
-- Backward-compatible additions stay in the existing version.
-- Breaking changes ship under a new path, such as `/api/v2`.
-- Deprecated endpoints should include deprecation guidance in the changelog and OpenAPI docs, and may add `Deprecation` / `Sunset` headers when an endpoint is scheduled for removal.
-- Consumers should treat `/api/v1` as stable until a newer version is explicitly documented.
+- **Current Version**: `v1` (endpoints mounted under `/v1` and `/api/v1`).
+- **Backward Compatibility**: Existing unversioned URLs (e.g. `/api/...` and resource routes) continue to function identically with no breaking changes.
+- **Deprecation Policy**: Legacy unversioned paths return standard `Deprecation: true` and `Sunset: Fri, 01 Jan 2027 00:00:00 GMT` HTTP response headers and emit a deprecation warning log line.
+- **Unsupported Versions**: Requests to unknown API versions (such as `/v99/...` or `/api/v99/...`) return a 404 `NOT_FOUND` error response.
+- **Breaking Changes**: Backward-compatible changes stay in `v1`. Any future breaking changes will ship under a new path (such as `/v2`), never altering existing versioned routes.
+- **Infrastructure Endpoints**: Health checks (`/health`, `/health/live`, `/health/ready`) and documentation (`/api-docs`) remain at their stable unversioned base paths.
 
 ## Related repositories
 

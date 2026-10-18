@@ -6,6 +6,7 @@ const eventStore = require('../indexer/eventStore');
 const indexerPoller = require('../indexer/runtime');
 const webhookRepo = require('../repositories/webhookRepository');
 const deliveryRepo = require('../repositories/deliveryRepository');
+const { defaultPoolMonitor } = require('../database');
 
 const router = express.Router();
 
@@ -95,6 +96,12 @@ async function metricsHandler(_req, res) {
     lines.push('# HELP redis_connected Whether Redis is connected');
     lines.push('# TYPE redis_connected gauge');
     lines.push(`redis_connected ${redisConnected ? 1 : 0}`);
+
+    // Database connection pool metrics (#520)
+    const poolProm = defaultPoolMonitor.toPrometheusMetrics();
+    if (poolProm) {
+      lines.push(poolProm.trim());
+    }
 
     res.setHeader('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
     res.send(lines.join('\n') + '\n');

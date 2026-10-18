@@ -3,6 +3,7 @@ const DailyRotateFile = require('winston-daily-rotate-file');
 const { name: serviceName, version } = require('../package.json');
 const { requestContext } = require('./middleware/requestId');
 const { redactFormat } = require('./services/logRedaction');
+const { nowIso } = require('./utils/dates');
 
 // ==================== LOG LEVEL ====================
 const getLogLevel = () => {
@@ -45,7 +46,7 @@ const errorTrackerFormat = winston.format((info) => {
 
 // ==================== BASE FORMATS ====================
 const baseFormats = [
-  winston.format.timestamp({ format: () => new Date().toISOString() }),
+  winston.format.timestamp({ format: () => nowIso() }),
   winston.format.errors({ stack: true }),
   requestIdFormat(),
   redactFormat(),
@@ -87,6 +88,11 @@ if (process.env.LOG_FILE_PATH) {
     new DailyRotateFile({
       filename: `${process.env.LOG_FILE_PATH}/application-%DATE%.log`,
       datePattern: 'YYYY-MM-DD',
+      // Issue #494 — winston-daily-rotate-file resolves %DATE% from the host
+      // wall clock by default, so two servers in different time zones named
+      // (and rotated) the same UTC log window differently. utc: true pins the
+      // filename/rotation date to UTC.
+      utc: true,
       zippedArchive: true,
       maxSize: '20m',
       maxFiles: '14d',

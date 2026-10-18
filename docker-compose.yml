@@ -7,6 +7,8 @@ services:
       - "4000:4000"
     environment:
       - PORT=4000
+      # Issue #494 — UTC process default; all instants are stored/serialized in UTC.
+      - TZ=UTC
       - REDIS_URL=redis://redis:6379
       - REDIS_HOST=redis
       - REDIS_PORT=6379

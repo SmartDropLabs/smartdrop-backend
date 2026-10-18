@@ -169,7 +169,10 @@ function makeLeaderAwareJob({ job, jobName, leaderElection, logger }) {
     await trueStopRenewLoop();
 
     if (underlyingStarted) {
-      job.stop();
+      const result = job.stop();
+      if (result && typeof result.then === 'function') {
+        await result;
+      }
       underlyingStarted = false;
     }
 

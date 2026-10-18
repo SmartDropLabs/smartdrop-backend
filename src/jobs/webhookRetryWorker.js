@@ -63,13 +63,14 @@ function start() {
   logger.info('Webhook retry worker started', { intervalMs: interval });
 }
 
-function stop() {
+async function stop({ drainMs = config.webhooks.shutdownDrainMs || 2000 } = {}) {
   if (timer) {
     clearInterval(timer);
     timer = null;
     health.startedAt = null;
     logger.info('Webhook retry worker stopped');
   }
+  return Promise.resolve();
 }
 
 /**

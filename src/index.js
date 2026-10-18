@@ -84,7 +84,7 @@ let server = {
 app.use(requestIdMiddleware);
 app.use(requestLoggerMiddleware);
 app.use(requestMetricsMiddleware);
-app.use(compression());
+app.use(compression({ threshold: 0 }));
 app.use(helmet());
 app.use(buildCorsMiddleware(config.corsAllowedOrigins));
 // Apply a global body size limit to protect all routes from oversized payloads.

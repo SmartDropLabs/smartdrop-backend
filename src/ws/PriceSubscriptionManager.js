@@ -122,6 +122,10 @@ class PriceSubscriptionManager {
     } else {
       this._connectionsByIp.set(clientIp, nextCount);
     }
+    // Remove all listeners to prevent memory leaks
+    if (typeof ws.removeAllListeners === 'function') {
+      ws.removeAllListeners();
+    }
     updateGauge(-1);
     logger.info('WS client disconnected', { ip: clientIp, total: this._clients.size });
   }

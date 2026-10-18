@@ -1,169 +1,153 @@
-'use strict';
-
-const knexFactory = require('knex');
-const config = require('../config');
+const knex = require("knex");
+const path = require("path");
+const fs = require("fs");
+const config = require("../config");
+const logger = require("../logger");
 const {
-  withTransaction,
-  sortIds,
-  lockRows,
-  isDeadlockOrSerializationError,
-} = require('./transaction');
-const encryption = require('./encryption');
-const { PoolMonitor, defaultPoolMonitor } = require('./poolMonitor');
-const logger = require('../logger');
+  MIN_TLS_VERSION,
+  buildDatabaseSslConfig,
+  buildSecureConnectionConfig,
+} = require("./tlsConfig");
 
-let db = null;
+let instance = null;
 
-/**
- * Get or initialize the shared Knex database singleton.
- *
- * @param {Object} [overrideConfig] - Optional configuration overrides (useful for testing)
- * @returns {import('knex').Knex}
- */
-// Issue #494 — every timestamp column is TIMESTAMPTZ, and all application
-// code stores/compares UTC. Pinning the session TimeZone to UTC as well means
-// anything the database renders itself in a text form (to_char, ::date,
-// CURRENT_TIMESTAMP without a zone, a query typed by hand) is UTC too, rather
-// than following the server's local zone. A pool `afterCreate` hook runs for
-// every pooled connection, not just the first.
-function afterCreateUtcConnection(conn, done) {
-  conn.query("SET TIME ZONE 'UTC'", (err) => done(err, conn));
+const MIGRATIONS_DIR = path.join(__dirname, "migrations");
+
+function getDb() {
+  if (instance) return instance;
+
+  if (!config.database.url) {
+    throw new Error("DATABASE_URL is not configured");
+  }
+
+  const connection = buildSecureConnectionConfig(config.database, process.env);
+
+  instance = knex({
+    client: "pg",
+    connection,
+    pool: {
+      min: config.database.pool.min,
+      max: config.database.pool.max,
+    },
+  });
+
+  return instance;
 }
 
-function getDb(overrideConfig = {}) {
-  if (!db) {
-    const pool = { min: 2, max: 10, afterCreate: afterCreateUtcConnection, ...(overrideConfig.pool || {}) };
-    db = knexFactory({
-      client: 'pg',
-      connection: overrideConfig.connection || config.databaseUrl,
-      ...overrideConfig,
-      pool,
+async function ensureTrackingTable(db) {
+  const exists = await db.schema.hasTable("schema_migrations");
+  if (!exists) {
+    await db.schema.createTable("schema_migrations", (table) => {
+      table.string("version").primary();
+      table.timestamp("applied_at").defaultTo(db.fn.now()).notNullable();
     });
-    defaultPoolMonitor.attach(db);
-  }
-  return db;
-}
-
-/**
- * Set the shared Knex instance (primarily for tests).
- *
- * @param {import('knex').Knex|null} instance
- */
-function setDb(instance) {
-  db = instance;
-  if (db) {
-    defaultPoolMonitor.attach(db);
-  } else {
-    defaultPoolMonitor.detach();
   }
 }
 
-/**
- * Close and destroy the database connection pool.
- */
+function loadMigrations() {
+  if (!fs.existsSync(MIGRATIONS_DIR)) return [];
+
+  return fs
+    .readdirSync(MIGRATIONS_DIR)
+    .filter((f) => f.endsWith(".js"))
+    .sort()
+    .map((file) => {
+      const version = path.basename(file, ".js");
+      const migration = require(path.join(MIGRATIONS_DIR, file));
+      return { version, ...migration };
+    });
+}
+
+async function migrateUp() {
+  const db = getDb();
+  await ensureTrackingTable(db);
+
+  const applied = await db("schema_migrations").select("version");
+  const appliedSet = new Set(applied.map((r) => r.version));
+
+  const migrations = loadMigrations();
+  const executed = [];
+
+  for (const m of migrations) {
+    if (appliedSet.has(m.version)) continue;
+
+    logger.info(`Running migration ${m.version}`);
+    await db.transaction(async (trx) => {
+      await m.up(trx);
+      await trx("schema_migrations").insert({ version: m.version });
+    });
+    executed.push(m.version);
+    logger.info(`Completed migration ${m.version}`);
+  }
+
+  return executed;
+}
+
+async function migrateDown() {
+  const db = getDb();
+  await ensureTrackingTable(db);
+
+  const last = await db("schema_migrations")
+    .orderBy("version", "desc")
+    .first();
+
+  if (!last) {
+    logger.info("No migrations to roll back");
+    return null;
+  }
+
+  const migrations = loadMigrations();
+  const target = migrations.find((m) => m.version === last.version);
+
+  if (!target) {
+    throw new Error(`Migration file not found for version ${last.version}`);
+  }
+
+  logger.info(`Rolling back migration ${target.version}`);
+  await db.transaction(async (trx) => {
+    await target.down(trx);
+    await trx("schema_migrations").where({ version: target.version }).del();
+  });
+  logger.info(`Rolled back migration ${target.version}`);
+
+  return target.version;
+}
+
+async function getMigrationStatus() {
+  const db = getDb();
+  await ensureTrackingTable(db);
+
+  const applied = await db("schema_migrations").orderBy("version", "asc");
+  const appliedMap = new Map(applied.map((r) => [r.version, r.applied_at]));
+
+  const migrations = loadMigrations();
+  return migrations.map((m) => ({
+    version: m.version,
+    status: appliedMap.has(m.version) ? "applied" : "pending",
+    applied_at: appliedMap.get(m.version) || null,
+  }));
+}
+
 async function closeDb() {
-  if (db) {
-    defaultPoolMonitor.detach();
-    await db.destroy();
-    db = null;
+  if (instance) {
+    await instance.destroy();
+    instance = null;
   }
 }
 
-/**
- * Execute a callback with a dedicated database connection, guaranteeing
- * release back to the pool even on error (#488).
- *
- * Use this for raw queries or multi-statement operations that need a
- * pinned connection. For single queries, Knex's query builder auto-releases.
- *
- * @param {Function} callback - Async function receiving (conn) to execute queries
- * @returns {Promise<*>} The result of the callback
- */
-async function withConnection(callback) {
-  const currentDb = getDb();
-  const conn = await currentDb.client.acquireConnection();
-  try {
-    return await callback(conn);
-  } finally {
-    currentDb.client.releaseConnection(conn);
-  }
-}
-
-/**
- * Get current pool statistics for monitoring connection usage (#488, #520).
- *
- * @returns {Object} Pool stats with utilization metrics
- */
-function getPoolStats() {
-  const currentDb = getDb();
-  const pool = currentDb.client.pool;
-  const snapshot = defaultPoolMonitor.getSnapshot() || {};
-  return {
-    min: pool ? pool.min : 0,
-    max: pool ? pool.max : 10,
-    used: pool && typeof pool.numUsed === 'function' ? pool.numUsed() : (snapshot.used ?? 0),
-    free: pool && typeof pool.numFree === 'function' ? pool.numFree() : (snapshot.free ?? 0),
-    pendingAcquires:
-      pool && typeof pool.numPendingAcquires === 'function'
-        ? pool.numPendingAcquires()
-        : (snapshot.pendingAcquires ?? 0),
-    pendingCreates:
-      pool && typeof pool.numPendingCreates === 'function'
-        ? pool.numPendingCreates()
-        : (snapshot.pendingCreates ?? 0),
-    utilization: snapshot.utilization ?? 0,
-    saturation: snapshot.saturation ?? 0,
-    status: snapshot.status ?? 'healthy',
-  };
-}
-
-/**
- * Get full connection pool metrics, including counters and latency timing (#520).
- *
- * @returns {Object}
- */
-function getPoolMetrics() {
-  return defaultPoolMonitor.getMetrics();
-}
-
-/**
- * Convenience wrapper for `withTransaction(getDb(), callback, options)`
- *
- * @param {Function} callback - Async function receiving (trx)
- * @param {Object} [options]
- * @returns {Promise<*>}
- */
-async function transaction(callback, options = {}) {
-  const currentDb = getDb();
-  return withTransaction(currentDb, callback, options);
+function setDb(customInstance) {
+  instance = customInstance;
 }
 
 module.exports = {
   getDb,
-  setDb,
   closeDb,
-  withConnection,
-  getPoolStats,
-  getPoolMetrics,
-  PoolMonitor,
-  defaultPoolMonitor,
-  withTransaction,
-  transaction,
-  sortIds,
-  lockRows,
-  isDeadlockOrSerializationError,
-  // Encryption at rest (#519)
-  encryption,
-  encrypt: encryption.encrypt,
-  decrypt: encryption.decrypt,
-  isEncrypted: encryption.isEncrypted,
-  encryptRecord: encryption.encryptRecord,
-  decryptRecord: encryption.decryptRecord,
-  encryptRow: encryption.encryptRow,
-  decryptRow: encryption.decryptRow,
-  encryptFields: encryption.encryptFields,
-  decryptFields: encryption.decryptFields,
-  encryptRows: encryption.encryptRows,
-  decryptRows: encryption.decryptRows,
-  hashBlindIndex: encryption.hashBlindIndex,
+  setDb,
+  migrateUp,
+  migrateDown,
+  getMigrationStatus,
+  loadMigrations,
+  MIN_TLS_VERSION,
+  buildDatabaseSslConfig,
+  buildSecureConnectionConfig,
 };

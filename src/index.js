@@ -33,6 +33,10 @@ const {
   attachApiKey,
   auditApiKeyUsage,
 } = require("./middleware/auth");
+const {
+  csrfProtectionMiddleware,
+  csrfTokenHandler,
+} = require("./middleware/csrf");
 const { errorHandler, notFoundHandler } = require("./middleware/errorHandler");
 const { checkDatabase } = require("./services/dbHealth");
 const pricesRouter = require("./routes/prices");
@@ -295,9 +299,14 @@ app.use(globalRateLimit);
 app.use(requestValidationMiddleware);
 app.use("/static", createStaticAssetsMiddleware(config.staticAssets));
 
+// #465 — Global CSRF protection for state-changing requests and CSRF token endpoint
+app.get("/csrf-token", csrfTokenHandler);
+app.use(csrfProtectionMiddleware);
+
 // ==================== API ROUTING & VERSIONING (#460) ====================
 // Build the core v1 API router.
 const apiV1Router = express.Router();
+apiV1Router.get("/csrf-token", csrfTokenHandler);
 apiV1Router.use(attachApiKey());
 apiV1Router.use(auditApiKeyUsage());
 apiV1Router.use(apiKeyLimit);

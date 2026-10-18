@@ -306,6 +306,24 @@ Each price source (`stellar_dex`, `coingecko`, `coinmarketcap`) gets one circuit
 
 ---
 
+## Time handling
+
+All instants are created, computed, compared and stored in **UTC**, and serialized in API responses as ISO-8601 strings with a `Z` suffix (e.g. `2026-06-30T19:00:00.000Z`). Local time is a presentation concern: clients convert a UTC value to their own zone. The server does not accept or emit local times.
+
+- Shared helpers live in `src/utils/dates.js` (`nowIso`, `toIso`, `startOfUtcDay`, `utcDayKey`).
+- Day-boundary logic (daily limits, expiries, "today" queries) must use `utcDayKey()`/`startOfUtcDay()` — never a slice of a local-time string.
+- PostgreSQL sessions are pinned to UTC (`SET TIME ZONE 'UTC'` on every pooled connection), and every timestamp column is `TIMESTAMPTZ`.
+- Log file rotation (`winston-daily-rotate-file`) uses `utc: true`, so filenames and retention are bucketed by UTC date regardless of the host's time zone.
+- `TZ` is set to `UTC` by default (in `Dockerfile`/`docker-compose`, and defensively at process start when unset). This is **not** the fix for time-zone bugs — it only provides a stable default, and the code stays correct if it is overridden. `TZ` is reported in the startup banner as `time_zone`.
+
+Regression coverage: `test/timezone.test.js` runs the date helpers under `TZ=UTC`, `TZ=America/New_York` and `TZ=Asia/Tokyo` and asserts identical UTC results.
+
+| Variable | Description | Default | Required |
+| --- | --- | --- | --- |
+| `TZ` | Process time zone. The app sets `UTC` when unset and warns if set to a non-UTC zone. | `UTC` | No |
+
+---
+
 ## Observability
 
 ### Startup banner

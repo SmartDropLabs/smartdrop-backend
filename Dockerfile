@@ -1,5 +1,8 @@
 # --- Base & Development Stage ---
 FROM node:20-alpine AS development
+# Issue #494 — all instants are UTC; pin the container default explicitly so
+# log rotation filenames and any date the runtime formats are UTC too.
+ENV TZ=UTC
 WORKDIR /app
 
 # Instalar dependencias completas (incluye devDependencies para nodemon/hot-reload)
@@ -27,6 +30,8 @@ COPY public ./public
 FROM node:20-alpine AS production
 WORKDIR /app
 ENV NODE_ENV=production
+# Issue #494 — UTC process default (see development stage above).
+ENV TZ=UTC
 
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/src ./src

@@ -313,6 +313,10 @@ Each price source (`stellar_dex`, `coingecko`, `coinmarketcap`) gets one circuit
 | `SESSION_IDLE_TIMEOUT_SECONDS` | Inactivity timeout in seconds that activity extends | 1800 (30m) | No |
 | `SESSION_ACTIVITY_THROTTLE_SECONDS` | Minimum interval in seconds between session store activity writes | 60 | No |
 | `SESSION_CLOCK_SKEW_SECONDS` | Clock-skew leeway in seconds for expiry comparison | 60 | No |
+| `CSRF_SECRET` | Secret key for signing per-session CSRF tokens (HMAC-SHA256) | auto-generated | No |
+| `METRICS_ENABLED` | Enable Prometheus text exposition endpoint at `/metrics` | true | No |
+| `METRICS_AUTH_TOKEN` | Bearer token / password for authenticating `/metrics` scrapes | empty | No |
+| `METRICS_ALLOWED_IPS` | Comma-separated list of IP addresses allowed to scrape `/metrics` | empty | No |
 
 
 ---

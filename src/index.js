@@ -43,6 +43,7 @@ const {
   auditApiKeyUsage,
 } = require("./middleware/auth");
 const { errorHandler, notFoundHandler } = require("./middleware/errorHandler");
+const { jsonReplacer } = require("./utils/serialization");
 const { checkDatabase } = require("./services/dbHealth");
 const pricesRouter = require("./routes/prices");
 const alertsRouter = require("./routes/alerts");

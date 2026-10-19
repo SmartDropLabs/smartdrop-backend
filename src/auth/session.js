@@ -41,6 +41,10 @@ const CLOCK_SKEW_SECONDS = getEnvNumber('SESSION_CLOCK_SKEW_SECONDS', 60); // 60
 const SESSIONS_ACTIVE_INDEX = 'sessions:active';
 let cleanupTimer = null;
 
+function userSessionsKey(userId) {
+  return `user:${userId}:sessions`;
+}
+
 function sessionKey(id) {
   return `session:${id}`;
 }
@@ -134,6 +138,7 @@ async function createSession(userId, metadata = {}) {
     const redis = cache.getClient();
     if (redis && typeof redis.zadd === 'function') {
       await redis.zadd(SESSIONS_ACTIVE_INDEX, effectiveExpiryMs, record.id);
+      await redis.sadd(userSessionsKey(userId), record.id);
     }
   } catch (err) {
     logger.warn('Failed to add session to active index', { error: err.message });
@@ -208,15 +213,59 @@ async function invalidateSession(sessionId) {
   if (!sessionId) return false;
 
   try {
+    const record = await cache.get(sessionKey(sessionId));
     await cache.del(sessionKey(sessionId));
     const redis = cache.getClient();
     if (redis && typeof redis.zrem === 'function') {
       await redis.zrem(SESSIONS_ACTIVE_INDEX, sessionId);
+      if (record && record.user_id) {
+        await redis.srem(userSessionsKey(record.user_id), sessionId);
+      }
     }
     return true;
   } catch (err) {
     logger.error('Failed to invalidate session', { sessionId, error: err.message });
     return false;
+  }
+}
+
+/**
+ * Invalidate all active sessions for a user (#554).
+ * Called after a password change so that any compromised sessions are immediately revoked.
+ */
+async function invalidateAllUserSessions(userId) {
+  if (!userId) return 0;
+
+  try {
+    const redis = cache.getClient();
+    let sessionIds = [];
+
+    if (redis && typeof redis.smembers === 'function') {
+      sessionIds = (await redis.smembers(userSessionsKey(userId))) || [];
+    }
+
+    if (sessionIds.length === 0) return 0;
+
+    await Promise.all(sessionIds.map((id) => cache.del(sessionKey(id))));
+
+    if (redis) {
+      const pipeline = redis.multi ? redis.multi() : null;
+      if (pipeline) {
+        sessionIds.forEach((id) => {
+          pipeline.zrem(SESSIONS_ACTIVE_INDEX, id);
+        });
+        pipeline.del(userSessionsKey(userId));
+        await pipeline.exec();
+      } else {
+        await Promise.all(sessionIds.map((id) => redis.zrem(SESSIONS_ACTIVE_INDEX, id)));
+        await redis.del(userSessionsKey(userId));
+      }
+    }
+
+    return sessionIds.length;
+  } catch (err) {
+    logger.error('Failed to invalidate all user sessions', { userId, error: err.message });
+    return 0;
   }
 }
 
@@ -368,6 +417,7 @@ module.exports = {
   createSession,
   validateSession,
   invalidateSession,
+  invalidateAllUserSessions,
   cleanupExpiredSessions,
   startCleanupTimer,
   stopCleanupTimer,

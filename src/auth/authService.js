@@ -7,6 +7,7 @@ const {
   verifyPassword,
   dummyVerify,
   validatePasswordLength,
+  validatePasswordComplexity,
 } = require('./password');
 
 /**
@@ -37,6 +38,7 @@ function sanitizeUser(user) {
  */
 async function registerUser({ email, username, password }, userStore) {
   validatePasswordLength(password);
+  validatePasswordComplexity(password);
 
   if (userStore.findByEmail && (await userStore.findByEmail(email))) {
     throw new AppError('CONFLICT', 'User already exists', 409);
@@ -150,12 +152,23 @@ async function changePassword(userId, currentPassword, newPassword, userStore) {
   }
 
   validatePasswordLength(newPassword);
+  validatePasswordComplexity(newPassword);
   const newHash = await hashPassword(newPassword);
 
   const updated = await userStore.update(userId, {
     password_hash: newHash,
     updated_at: new Date().toISOString(),
   });
+
+  // Invalidate all sessions so any compromised session can no longer be used (#554).
+  try {
+    await invalidateAllUserSessions(userId);
+  } catch (err) {
+    logger.warn('Failed to invalidate user sessions after password change', {
+      userId,
+      error: err.message,
+    });
+  }
 
   return sanitizeUser(updated);
 }
@@ -165,6 +178,8 @@ const {
   refreshTokens,
   revokeRefreshToken,
 } = require('./tokenRefresh');
+
+const { invalidateAllUserSessions } = require('./session');
 
 module.exports = {
   changePassword,

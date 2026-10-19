@@ -1,8 +1,15 @@
+const http = require('http');
+const https = require('https');
 const axios = require('axios');
 const config = require('../../config');
 const logger = require('../../logger');
 const { createCircuitBreaker } = require('./circuitBreaker');
 const { getRequestIdHeaders } = require('../../middleware/requestId');
+
+const keepAliveAgents = {
+  http: new http.Agent({ keepAlive: true }),
+  https: new https.Agent({ keepAlive: true }),
+};
 
 const STELLAR_COINGECKO_MAP = {
   XLM: 'stellar',
@@ -30,6 +37,8 @@ function getClient() {
     baseURL: config.coingecko.baseUrl,
     headers,
     timeout: 10000,
+    httpAgent: keepAliveAgents.http,
+    httpsAgent: keepAliveAgents.https,
   });
   lastApiKey = currentKey;
   return apiClient;

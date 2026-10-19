@@ -92,6 +92,48 @@ function validatePasswordLength(password) {
   }
 }
 
+const PASSWORD_MIN_LENGTH = 8;
+const PASSWORD_COMPLEXITY_RE = {
+  uppercase: /[A-Z]/,
+  lowercase: /[a-z]/,
+  digit: /[0-9]/,
+  special: /[^A-Za-z0-9]/,
+};
+
+/**
+ * Validate password complexity requirements (#536).
+ * Enforces minimum length, uppercase, lowercase, digit, and special character.
+ * Throws AppError with code INVALID_INPUT on failure.
+ */
+function validatePasswordComplexity(password) {
+  if (typeof password !== 'string') {
+    throw new AppError('INVALID_INPUT', 'Password must be a string', 400);
+  }
+  if (password.length < PASSWORD_MIN_LENGTH) {
+    throw new AppError(
+      'INVALID_INPUT',
+      `Password must be at least ${PASSWORD_MIN_LENGTH} characters`,
+      400
+    );
+  }
+  if (!PASSWORD_COMPLEXITY_RE.uppercase.test(password)) {
+    throw new AppError('INVALID_INPUT', 'Password must contain at least one uppercase letter', 400);
+  }
+  if (!PASSWORD_COMPLEXITY_RE.lowercase.test(password)) {
+    throw new AppError('INVALID_INPUT', 'Password must contain at least one lowercase letter', 400);
+  }
+  if (!PASSWORD_COMPLEXITY_RE.digit.test(password)) {
+    throw new AppError('INVALID_INPUT', 'Password must contain at least one digit', 400);
+  }
+  if (!PASSWORD_COMPLEXITY_RE.special.test(password)) {
+    throw new AppError(
+      'INVALID_INPUT',
+      'Password must contain at least one special character',
+      400
+    );
+  }
+}
+
 /**
  * Hash a password using bcrypt (or fallback crypto adapter).
  *
@@ -211,12 +253,14 @@ async function dummyVerify(password = 'dummy-password') {
 
 module.exports = {
   BCRYPT_MAX_BYTES,
+  PASSWORD_MIN_LENGTH,
   constantTimeCompare,
   dummyVerify,
   extractBcryptCost,
   getCostFactor,
   hashPassword,
   isBcryptHash,
+  validatePasswordComplexity,
   validatePasswordLength,
   verifyPassword,
 };

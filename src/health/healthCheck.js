@@ -75,6 +75,34 @@ async function checkRedisDependency(timeoutMs = DEFAULT_DEPENDENCY_TIMEOUT_MS) {
 }
 
 /**
+ * Check health of background jobs.
+ *
+ * @param {Object} jobs - Map of job name to job instance with getHealth()
+ * @returns {{ jobHealth: Object, allHealthy: boolean }}
+ */
+function checkJobHealth(jobs = {}) {
+  const jobHealth = {};
+  let allHealthy = true;
+
+  for (const [name, job] of Object.entries(jobs)) {
+    if (typeof job?.getHealth === 'function') {
+      try {
+        const health = job.getHealth();
+        jobHealth[name] = health;
+        if (!health.healthy) {
+          allHealthy = false;
+        }
+      } catch (err) {
+        jobHealth[name] = { healthy: false, error: err.message };
+        allHealthy = false;
+      }
+    }
+  }
+
+  return { jobHealth, allHealthy };
+}
+
+/**
  * Lightweight liveness check: returns 200 without touching dependencies.
  */
 function checkLiveness() {
@@ -120,6 +148,7 @@ async function checkReadiness(options = {}) {
 
 module.exports = {
   checkDatabaseDependency,
+  checkJobHealth,
   checkLiveness,
   checkReadiness,
   checkRedisDependency,

@@ -330,7 +330,7 @@ function generateDeliveryTraceId() {
   return `trace_${crypto.randomUUID().replace(/-/g, "").slice(0, 20)}`;
 }
 
-function matchesWebhookFilters(filters, data) {
+function matchesWebhookFilters(filters, data, eventType) {
   if (!filters) return true;
   if (!data || typeof data !== "object") return false;
 
@@ -342,6 +342,17 @@ function matchesWebhookFilters(filters, data) {
 
   if (filters.pool_id !== undefined && data.pool_id !== filters.pool_id) {
     return false;
+  }
+
+  // #557 — filter by exact event type or category prefix (e.g. "pool.*")
+  if (filters.event_type !== undefined && eventType !== undefined) {
+    const f = filters.event_type;
+    if (typeof f === "string") {
+      const passes =
+        f === eventType ||
+        (f.endsWith(".*") && eventType.startsWith(f.slice(0, -1)));
+      if (!passes) return false;
+    }
   }
 
   return true;
@@ -696,7 +707,7 @@ async function dispatch({ event_type: eventType, event_id: eventId, data }) {
         eventType,
         events.matchesSubscription,
       )
-    ).filter((webhook) => matchesWebhookFilters(webhook.filters, data));
+    ).filter((webhook) => matchesWebhookFilters(webhook.filters, data, eventType));
     if (targets.length === 0) {
       logger.info("Dispatch started, no matching webhooks", {
         event_id: eventId,

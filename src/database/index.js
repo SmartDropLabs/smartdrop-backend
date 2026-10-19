@@ -132,6 +132,66 @@ function getPoolMetrics() {
 }
 
 /**
+ * Stream query results one row at a time without loading the full result
+ * set into memory (issue #560). Uses a server-side cursor so large tables
+ * can be iterated without exhausting the heap.
+ *
+ * @param {Object} queryBuilder - Knex query builder (select)
+ * @param {Function} onRow - Called with each row; return false to stop early
+ * @param {Object} [options]
+ * @param {number} [options.batchSize=100] - Rows fetched per cursor round-trip
+ * @returns {Promise<number>} Total rows processed
+ */
+async function streamQuery(queryBuilder, onRow, { batchSize = 100 } = {}) {
+  const currentDb = getDb();
+  const conn = await currentDb.client.acquireConnection();
+  let processed = 0;
+  try {
+    // Knex's .stream() returns a Readable in object mode; we process rows
+    // one at a time and pause when the consumer needs back-pressure.
+    const stream = queryBuilder.connection(conn).stream({ highWaterMark: batchSize });
+    for await (const row of stream) {
+      const result = onRow(row, processed);
+      processed += 1;
+      if (result === false) break;
+    }
+  } finally {
+    currentDb.client.releaseConnection(conn);
+  }
+  return processed;
+}
+
+/**
+ * Iterate query results in batches without holding the full result set in
+ * memory (issue #560). Each batch is an array of at most `batchSize` rows.
+ *
+ * @param {Object} queryBuilder - Knex query builder with an ORDER BY
+ * @param {Function} onBatch - Called with each array of rows; return false to stop
+ * @param {Object} [options]
+ * @param {number} [options.batchSize=100] - Rows per batch
+ * @param {string} [options.idColumn='id'] - Column used as the cursor key
+ * @returns {Promise<number>} Total rows processed
+ */
+async function streamBatches(queryBuilder, onBatch, { batchSize = 100, idColumn = 'id' } = {}) {
+  let lastId = null;
+  let processed = 0;
+  for (;;) {
+    let q = queryBuilder.clone().limit(batchSize);
+    if (lastId !== null) {
+      q = q.where(idColumn, '>', lastId);
+    }
+    const rows = await q;
+    if (rows.length === 0) break;
+    const result = onBatch(rows, processed);
+    processed += rows.length;
+    if (result === false) break;
+    if (rows.length < batchSize) break;
+    lastId = rows[rows.length - 1][idColumn];
+  }
+  return processed;
+}
+
+/**
  * Convenience wrapper for `withTransaction(getDb(), callback, options)`
  *
  * @param {Function} callback - Async function receiving (trx)
@@ -150,6 +210,8 @@ module.exports = {
   withConnection,
   getPoolStats,
   getPoolMetrics,
+  streamQuery,
+  streamBatches,
   PoolMonitor,
   defaultPoolMonitor,
   withTransaction,

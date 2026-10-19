@@ -273,6 +273,21 @@ async function remove(id) {
   }
   // #369 — clean up per-event-type index entries in the same transaction.
   removeEventIndexes(multi, id, existing.events);
+
+  // Issue #559: cascade-delete associated delivery records and their
+  // indexes so removing a webhook does not orphan delivery data.
+  const deliveryIndexKey = `webhook:${id}:deliveries`;
+  const deliveryIds = await redis.zrange(deliveryIndexKey, 0, -1);
+  for (const did of deliveryIds) {
+    multi.del(`webhook_delivery:${did}`);
+    multi.zrem('webhooks:retries', did);
+  }
+  // Remove all per-status delivery indexes (pending / success / failed).
+  for (const status of ['pending', 'success', 'failed']) {
+    multi.del(`webhook:${id}:deliveries:${status}`);
+  }
+  multi.del(deliveryIndexKey);
+
   await multi.exec();
   return normalize(existing);
 }

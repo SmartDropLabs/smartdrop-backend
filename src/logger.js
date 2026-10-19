@@ -91,19 +91,18 @@ const transports = [
   })
 ];
 
-// Optional file logging
-if (process.env.LOG_FILE_PATH) {
-  transports.push(
-    new DailyRotateFile({
-      filename: `${process.env.LOG_FILE_PATH}/application-%DATE%.log`,
-      datePattern: 'YYYY-MM-DD',
-      zippedArchive: true,
-      maxSize: '20m',
-      maxFiles: '14d',
-      format: jsonFormat
-    })
-  );
-}
+// Optional file logging — always rotates by date and size to prevent disk exhaustion.
+const logDir = process.env.LOG_FILE_PATH || 'logs';
+transports.push(
+  new DailyRotateFile({
+    filename: `${logDir}/application-%DATE%.log`,
+    datePattern: 'YYYY-MM-DD',
+    zippedArchive: true,
+    maxSize: process.env.LOG_MAX_SIZE || '20m',
+    maxFiles: process.env.LOG_MAX_FILES || '14d',
+    format: jsonFormat
+  })
+);
 
 // ==================== LOGGER ====================
 const logger = winston.createLogger({

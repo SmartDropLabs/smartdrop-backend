@@ -2,6 +2,7 @@ const axios = require('axios');
 const config = require('../../config');
 const logger = require('../../logger');
 const { createCircuitBreaker } = require('./circuitBreaker');
+const { getCertificatePins, getSPKIPins, getPinnedAgent } = require('../../utils/sslPinning');
 
 const circuit = createCircuitBreaker({
   sourceName: 'coinmarketcap',
@@ -13,14 +14,18 @@ let apiClient = null;
 
 function getClient() {
   if (!apiClient) {
-    apiClient = axios.create({
+    const axiosOpts = {
       baseURL: config.coinmarketcap.baseUrl,
       headers: {
         'Accept': 'application/json',
         'X-CMC_PRO_API_KEY': config.coinmarketcap.apiKey,
       },
       timeout: 10000,
-    });
+    };
+    if (getCertificatePins().length > 0 || getSPKIPins().length > 0) {
+      axiosOpts.httpsAgent = getPinnedAgent();
+    }
+    apiClient = axios.create(axiosOpts);
   }
   return apiClient;
 }

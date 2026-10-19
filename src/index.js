@@ -15,6 +15,7 @@ const { warmCache } = require('./startup/cacheWarm');
 const buildCorsMiddleware = require('./middleware/cors');
 const buildRateLimit = require('./middleware/rateLimit');
 const { requestIdMiddleware } = require('./middleware/requestId');
+const { requestValidation } = require('./middleware/requestValidation');
 const { requireApiKey } = require('./middleware/auth');
 const { errorHandler, notFoundHandler } = require('./middleware/errorHandler');
 const pricesRouter = require('./routes/prices');
@@ -69,6 +70,7 @@ app.use(requestMetricsMiddleware);
 app.use(helmet());
 app.use(buildCorsMiddleware(config.corsAllowedOrigins));
 app.use(express.json({ limit: config.airdrops.jsonMaxBytes }));
+app.use(requestValidation());
 
 app.get('/health', (req, res) => {
   const redisConnected = cache.isConnected();

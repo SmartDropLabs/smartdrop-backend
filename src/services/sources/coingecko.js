@@ -2,6 +2,7 @@ const axios = require('axios');
 const config = require('../../config');
 const logger = require('../../logger');
 const { createCircuitBreaker } = require('./circuitBreaker');
+const { getCertificatePins, getSPKIPins, getPinnedAgent } = require('../../utils/sslPinning');
 
 const STELLAR_COINGECKO_MAP = {
   XLM: 'stellar',
@@ -21,11 +22,15 @@ function getClient() {
     if (config.coingecko.apiKey) {
       headers['x-cg-demo-api-key'] = config.coingecko.apiKey;
     }
-    apiClient = axios.create({
+    const axiosOpts = {
       baseURL: config.coingecko.baseUrl,
       headers,
       timeout: 10000,
-    });
+    };
+    if (getCertificatePins().length > 0 || getSPKIPins().length > 0) {
+      axiosOpts.httpsAgent = getPinnedAgent();
+    }
+    apiClient = axios.create(axiosOpts);
   }
   return apiClient;
 }

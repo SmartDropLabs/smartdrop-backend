@@ -22,6 +22,7 @@ const buildRateLimit = require("../middleware/rateLimit");
 const { routeTimeout } = require("../middleware/timeout");
 const { StrKey } = require("@stellar/stellar-sdk");
 const { paginateResponse } = require("../utils/paginate");
+const virusScanner = require("../services/virusScanner");
 
 // Stellar Int64 max in stroops (1 unit = 10_000_000 stroops for XLM/USDC)
 const INT64_MAX_STROOPS = 9223372036854775807n;
@@ -71,7 +72,7 @@ const addRecipientsLimit = buildRateLimit({
 });
 
 function uploadRecipientsFile(req, res, next) {
-  upload.single("file")(req, res, (err) => {
+  upload.single("file")(req, res, async (err) => {
     if (err instanceof multer.MulterError) {
       if (err.code === "LIMIT_FILE_SIZE") {
         return next(
@@ -93,7 +94,49 @@ function uploadRecipientsFile(req, res, next) {
         ),
       );
     }
-    return next(err);
+
+    if (err) {
+      return next(err);
+    }
+
+    if (!req.file) {
+      return next(
+        new AppError(
+          "VALIDATION_ERROR",
+          "No file provided in upload",
+          400,
+        ),
+      );
+    }
+
+    try {
+      const scanResult = await virusScanner.scan(req.file.buffer, req.file.originalname);
+      if (scanResult.infected) {
+        logger.warn("Infected file upload rejected", {
+          filename: req.file.originalname,
+          threats: scanResult.threats,
+        });
+        return next(
+          new AppError(
+            "SECURITY_ERROR",
+            "Uploaded file failed virus scan",
+            400,
+            { infected: true, threats: scanResult.threats },
+          ),
+        );
+      }
+    } catch (scanErr) {
+      logger.error("Virus scan error during upload", { error: scanErr.message });
+      return next(
+        new AppError(
+          "INTERNAL_ERROR",
+          "Failed to scan uploaded file",
+          500,
+        ),
+      );
+    }
+
+    return next();
   });
 }
 

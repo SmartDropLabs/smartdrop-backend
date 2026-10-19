@@ -220,6 +220,24 @@ async function del(key) {
   }
 }
 
+/**
+ * Bulk delete operation for cache invalidation on batch updates (#564).
+ * Invalidates multiple cache keys in parallel while respecting concurrency limits.
+ *
+ * @param {string[]} keys - Array of cache keys to delete
+ * @returns {Promise<number>} Number of keys deleted
+ */
+async function delMany(keys) {
+  if (!Array.isArray(keys) || keys.length === 0) return 0;
+  const release = await operationSemaphore.acquire(5000);
+  try {
+    const redis = getClient();
+    return await redis.del(...keys);
+  } finally {
+    release();
+  }
+}
+
 async function disconnect() {
   if (client) {
     await client.quit();
@@ -228,6 +246,6 @@ async function disconnect() {
 }
 
 module.exports = {
-  get, mget, set, del, disconnect, getClient, isConnected,
+  get, mget, set, del, delMany, disconnect, getClient, isConnected,
   getCommandQueueLength, getConcurrencyStats,
 };

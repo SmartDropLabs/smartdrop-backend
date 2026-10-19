@@ -5,23 +5,21 @@ const logger = require('../logger');
 const AppError = require('../errors/AppError');
 const buildRateLimit = require('../middleware/rateLimit');
 const { parsePagination, paginateResponse } = require('../utils/paginate');
+const { validate } = require('../middleware/validate');
+const {
+  indexerAirdropIdParamsSchema,
+  indexerAddressParamsSchema,
+  paginationQuerySchema,
+} = require('../validation/schemas');
 
 const router = express.Router();
 
-function isValidId(value) {
-  return typeof value === 'string' && /^[A-Za-z0-9:_-]{1,128}$/.test(value);
-}
+const validateAirdropId = validate(indexerAirdropIdParamsSchema, 'params');
+const validateAddress = validate(indexerAddressParamsSchema, 'params');
+const validatePagination = validate(paginationQuerySchema, 'query');
 
-function isValidAddress(value) {
-  return typeof value === 'string' && /^[A-Z0-9]{10,80}$/.test(value);
-}
-
-router.get('/airdrops/:id/status', async (req, res, next) => {
+router.get('/airdrops/:id/status', validateAirdropId, async (req, res, next) => {
   try {
-    if (!isValidId(req.params.id)) {
-      return next(new AppError('VALIDATION_ERROR', 'Invalid airdrop id', 400, { param: 'id' }));
-    }
-
     const status = await eventStore.getAirdropStatus(req.params.id);
     if (!status) {
       return next(new AppError('AIRDROP_NOT_INDEXED', 'Airdrop has not been indexed', 404, {
@@ -47,14 +45,10 @@ router.get('/airdrops/:id/status', async (req, res, next) => {
 // getJsonList) — there's no server-side "fetch only a page" available at
 // the storage layer, so pagination here is a slice of the already-fetched
 // array plus the canonical envelope, not a more efficient query (#131).
-router.get('/airdrops/:id/onchain-recipients', async (req, res, next) => {
+router.get('/airdrops/:id/onchain-recipients', validateAirdropId, validatePagination, async (req, res, next) => {
   try {
-    if (!isValidId(req.params.id)) {
-      return next(new AppError('VALIDATION_ERROR', 'Invalid airdrop id', 400, { param: 'id' }));
-    }
-
     const allRecipients = await eventStore.getAirdropRecipients(req.params.id);
-    const { page, limit } = parsePagination(req.query);
+    const { page, limit } = req.validated.query;
     const start = (page - 1) * limit;
     const pageRecipients = allRecipients.slice(start, start + limit);
     return res.json(paginateResponse(pageRecipients, allRecipients.length, { page, limit }));
@@ -64,16 +58,10 @@ router.get('/airdrops/:id/onchain-recipients', async (req, res, next) => {
   }
 });
 
-router.get('/recipients/:address/claims', async (req, res, next) => {
+router.get('/recipients/:address/claims', validateAddress, validatePagination, async (req, res, next) => {
   try {
-    if (!isValidAddress(req.params.address)) {
-      return next(new AppError('VALIDATION_ERROR', 'Invalid recipient address', 400, {
-        param: 'address',
-      }));
-    }
-
     const allClaims = await eventStore.getRecipientClaims(req.params.address);
-    const { page, limit } = parsePagination(req.query);
+    const { page, limit } = req.validated.query;
     const start = (page - 1) * limit;
     const pageClaims = allClaims.slice(start, start + limit);
     return res.json(paginateResponse(pageClaims, allClaims.length, { page, limit }));

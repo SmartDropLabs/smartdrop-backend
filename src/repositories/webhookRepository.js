@@ -24,6 +24,9 @@ const logger = require('../logger');
 const { encryptSecret, decryptSecret, isEncrypted } = require('../services/webhookEncryption');
 
 const IDS_KEY = 'webhooks:ids';
+// Hard ceiling on how many webhooks listAll() will return (issue #530).
+// Prevents unbounded result sets that exhaust memory on large datasets.
+const MAX_LIST_ALL_LIMIT = 1000;
 
 // #369 — per-event-type index sets so listActiveForEvent can fetch only the
 // webhook IDs that subscribe to a given event, rather than loading every
@@ -165,9 +168,10 @@ async function findById(id) {
   }
 }
 
-/** Every webhook, unpaginated — for internal fan-out (listActiveForEvent
+/** Every webhook, up to MAX_LIST_ALL_LIMIT — for internal fan-out (listActiveForEvent
  * below), which needs the complete set to notify every subscriber, not a
- * page of it. Not exposed as a public list endpoint; see list() for that. */
+ * page of it. Not exposed as a public list endpoint; see list() for that.
+ * Capped at MAX_LIST_ALL_LIMIT to prevent unbounded result sets (issue #530). */
 async function listAll() {
   try {
     const redis = cache.getClient();

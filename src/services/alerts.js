@@ -80,6 +80,9 @@ async function create(data) {
   return alert;
 }
 
+// Hard ceiling on unbounded list queries (issue #530).
+const MAX_LIST_LIMIT = 1000;
+
 async function list() {
   const redis = cache.getClient();
   const ids = await redis.zrevrange(IDS_KEY, 0, -1);

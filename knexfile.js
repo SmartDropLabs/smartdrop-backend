@@ -27,6 +27,14 @@ function connectionFor(fallback) {
   return process.env.DATABASE_URL || fallback;
 }
 
+// Enable SSL for database connections in production (issue #529).
+// Encrypts data in transit to prevent interception and meet compliance
+// requirements. Set DB_SSL=false to disable if the database doesn't support it.
+function sslConfig() {
+  if (process.env.DB_SSL === 'false') return false;
+  return { rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false' };
+}
+
 module.exports = {
   development: {
     client: 'pg',
@@ -42,7 +50,10 @@ module.exports = {
 
   production: {
     client: 'pg',
-    connection: connectionFor(undefined),
+    connection: {
+      connectionString: connectionFor(undefined),
+      ssl: sslConfig(),
+    },
     pool: { min: 2, max: 10 },
     migrations,
   },

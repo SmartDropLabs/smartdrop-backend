@@ -312,6 +312,26 @@ const airdropRecipientsBodySchema = z.object({
   }, recipientsSchema.optional()),
 });
 
+// ── Indexer route schemas (issue #527) ───────────────────────────────────────
+
+const indexerAirdropIdParamsSchema = z.object({
+  id: z
+    .string()
+    .trim()
+    .min(1)
+    .max(128)
+    .regex(/^[A-Za-z0-9:_-]+$/, "Invalid airdrop id"),
+});
+
+const indexerAddressParamsSchema = z.object({
+  address: z
+    .string()
+    .trim()
+    .min(10)
+    .max(80)
+    .regex(/^[A-Z0-9]+$/, "Invalid recipient address"),
+});
+
 module.exports = {
   airdropCreateBodySchema,
   airdropRecipientsBodySchema,
@@ -319,6 +339,8 @@ module.exports = {
   alertCreateBodySchema,
   assetCodeSchema,
   httpUrlSchema,
+  indexerAddressParamsSchema,
+  indexerAirdropIdParamsSchema,
   keyCreateBodySchema,
   keyRotateBodySchema,
   optionalIssuerSchema,

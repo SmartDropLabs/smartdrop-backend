@@ -42,9 +42,12 @@ async function getKey(id) {
   return cache.get(keyPath(id));
 }
 
+// Hard ceiling on unbounded list queries (issue #530).
+const MAX_LIST_LIMIT = 1000;
+
 async function listKeys() {
   const redis = cache.getClient();
-  const ids = await redis.zrevrange(IDS_KEY, 0, -1);
+  const ids = await redis.zrevrange(IDS_KEY, 0, MAX_LIST_LIMIT - 1);
   const records = await Promise.all(ids.map((id) => getKey(id)));
   return records.filter(Boolean).map(sanitize);
 }

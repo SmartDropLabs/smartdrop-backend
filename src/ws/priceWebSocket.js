@@ -52,6 +52,13 @@ function attach(httpServer) {
     logger.error('WebSocket server error', { error: err.message });
   });
 
+  // Clean up all WebSocket connections when the HTTP server closes (issue #528).
+  // Without this, sockets remain open after the server shuts down, leaking
+  // file descriptors and preventing graceful exit.
+  httpServer.on('close', () => {
+    subscriptionManager.drain(1000).catch(() => {});
+  });
+
   subscriptionManager.startHeartbeat();
   logger.info('WebSocket price-stream server attached at /ws');
 

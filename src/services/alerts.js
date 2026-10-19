@@ -61,9 +61,12 @@ async function create(data) {
   return alert;
 }
 
+// Hard ceiling on unbounded list queries (issue #530).
+const MAX_LIST_LIMIT = 1000;
+
 async function list() {
   const redis = cache.getClient();
-  const ids = await redis.zrevrange(IDS_KEY, 0, -1);
+  const ids = await redis.zrevrange(IDS_KEY, 0, MAX_LIST_LIMIT - 1);
   const alerts = await Promise.all(ids.map((id) => cache.get(alertKey(id))));
   return alerts.filter(Boolean);
 }
@@ -129,7 +132,7 @@ async function evaluateForAsset(asset, priceUsd) {
 
 async function evaluateForAssetInner(asset, priceUsd) {
   const redis = cache.getClient();
-  const ids = await redis.zrevrange(IDS_KEY, 0, -1);
+  const ids = await redis.zrevrange(IDS_KEY, 0, MAX_LIST_LIMIT - 1);
 
   for (const id of ids) {
     const alert = await cache.get(alertKey(id));

@@ -47,6 +47,16 @@ function deriveKey(customKeyMaterial) {
     process.env.DB_ENCRYPTION_KEY;
 
   if (!configured) {
+    // #533 — DEV_FALLBACK_KEY_MATERIAL is a fixed, public string committed to
+    // this repo. Silently encrypting production data with it is equivalent
+    // to not encrypting at all, so production must set a real key instead
+    // of just being warned.
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(
+        'DB_ENCRYPTION_KEY must be set in production — refusing to encrypt data at rest ' +
+          'with the public fallback development key.'
+      );
+    }
     if (!warnedAboutDevKey && process.env.NODE_ENV !== 'test') {
       logger.warn(
         'DB_ENCRYPTION_KEY is not set — database encryption is using an insecure fixed development key. ' +

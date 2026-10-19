@@ -48,6 +48,8 @@ const {
 } = require("./middleware/csrf");
 const { errorHandler, notFoundHandler } = require("./middleware/errorHandler");
 const { jsonReplacer } = require("./utils/serialization");
+const { sqlSanitize } = require("./middleware/sqlSanitize");
+const { cdnCache } = require("./middleware/cdnCache");
 const { checkDatabase } = require("./services/dbHealth");
 const pricesRouter = require("./routes/prices");
 const alertsRouter = require("./routes/alerts");
@@ -119,6 +121,10 @@ app.use(requestMetricsMiddleware);
 // #468 — Enforce HTTPS early before payload parsing or route processing.
 app.use(httpsEnforcementMiddleware);
 app.use(compression());
+// #583 — CDN cache headers
+app.use(cdnCache());
+// #581 — SQL input sanitization
+app.use(sqlSanitize());
 app.use(
   helmet({
     contentSecurityPolicy: {

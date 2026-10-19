@@ -160,6 +160,8 @@ const env = cleanEnv(rawEnv, {
   CACHE_WARM_CONCURRENCY: num({ default: 8 }),
   CACHE_WARM_JITTER_MS: num({ default: 0 }),
   CACHE_WARM_LOCK_TTL_MS: num({ default: 60000 }),
+  DB_POOL_MIN: positiveInteger({ default: 2 }),
+  DB_POOL_MAX: positiveInteger({ default: 10 }),
 });
 
 const usdcIssuer = env.USDC_ISSUER;
@@ -179,6 +181,12 @@ const config = module.exports = {
     maxAgeSeconds: env.STATIC_ASSETS_MAX_AGE_SECONDS,
   },
   databaseUrl: env.DATABASE_URL,
+  database: {
+    pool: {
+      min: env.DB_POOL_MIN,
+      max: env.DB_POOL_MAX,
+    },
+  },
   redis: {
     url: env.REDIS_URL,
   },

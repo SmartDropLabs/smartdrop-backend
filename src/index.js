@@ -35,6 +35,7 @@ const {
   API_CSP_DIRECTIVES,
   docsCspMiddleware,
 } = require("./middleware/csp");
+const { contentTypeValidationMiddleware } = require("./middleware/contentTypeValidation");
 const requestLoggerMiddleware = require("./middleware/requestLogger");
 const { createStaticAssetsMiddleware } = require("./middleware/staticAssets");
 const {
@@ -145,6 +146,7 @@ app.use(buildCorsMiddleware(config.corsAllowedOrigins));
 // their own express.json({ limit }) middleware (#287).
 const DEFAULT_BODY_LIMIT = "1mb";
 app.use(express.json({ limit: DEFAULT_BODY_LIMIT }));
+app.use(contentTypeValidationMiddleware);
 
 const EMPTY_QUEUE_STATS = {
   pendingRetries: null,

@@ -9,6 +9,7 @@ const { idempotencyMiddleware } = require("../services/idempotency");
 const logger = require("../logger");
 const AppError = require("../errors/AppError");
 const { flattenZodIssues, validate } = require("../middleware/validate");
+const { requireApiKey } = require("../middleware/auth");
 const {
   airdropCreateBodySchema,
   airdropRecipientsBodySchema,
@@ -300,6 +301,7 @@ async function parseCSV(buffer) {
 
 router.post(
   "/airdrops",
+  requireApiKey({ scopes: ["airdrops"] }),
   routeTimeout(),
   createAirdropLimit,
   idempotencyMiddleware("airdrop"),
@@ -343,6 +345,7 @@ router.get("/airdrops/:id", validateRouteIdParams, async (req, res, next) => {
 
 router.patch(
   "/airdrops/:id",
+  requireApiKey({ scopes: ["airdrops"] }),
   validateRouteIdParams,
   validateWithCurrentLedger(airdropUpdateBodySchema),
   async (req, res, next) => {
@@ -366,6 +369,7 @@ router.patch(
 
 router.delete(
   "/airdrops/:id",
+  requireApiKey({ scopes: ["airdrops"] }),
   validateRouteIdParams,
   async (req, res, next) => {
     try {
@@ -385,6 +389,7 @@ router.delete(
 
 router.post(
   "/airdrops/:id/cancel",
+  requireApiKey({ scopes: ["airdrops"] }),
   validateRouteIdParams,
   async (req, res, next) => {
     try {
@@ -404,6 +409,7 @@ router.post(
 
 router.post(
   "/airdrops/:id/recipients",
+  requireApiKey({ scopes: ["airdrops"] }),
   routeTimeout(),
   validateRouteIdParams,
   addRecipientsLimit,

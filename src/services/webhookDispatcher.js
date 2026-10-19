@@ -436,7 +436,12 @@ async function attempt(deliveryId, sequence) {
       const res = await postOnce(webhook.url, headers, body, webhook.timeoutMs);
       responseStatus = res.status;
     } catch (err) {
-      networkError = err.message || "network error";
+      const errorCode = err?.code || err?.errno;
+      if (errorCode === 'ETIMEDOUT') {
+        networkError = 'webhook request timeout';
+      } else {
+        networkError = err.message || "network error";
+      }
     }
 
     const succeeded =

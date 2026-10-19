@@ -3,6 +3,7 @@
 const AppError = require('../errors/AppError');
 const logger = require('../logger');
 const errorTracker = require('../services/errorTracker');
+const { translate, getLocale } = require('../services/i18n');
 
 /**
  * Standardized error response format (#491).
@@ -45,9 +46,10 @@ function notFoundHandler(req, _res, next) {
 function errorHandler(err, req, res, _next) {
   const isAppError = err instanceof AppError;
   const isPayloadTooLarge = !isAppError && (err.type === 'entity.too.large' || err.status === 413 || err.statusCode === 413);
+  const locale = getLocale(req);
   let status = 500;
   let code = 'INTERNAL_ERROR';
-  let message = 'An unexpected error occurred';
+  let message = translate('INTERNAL_ERROR', locale);
 
   if (isAppError) {
     status = err.statusCode;
@@ -56,14 +58,14 @@ function errorHandler(err, req, res, _next) {
   } else if (err.isCircuitBreakerError || err.name === 'CircuitBreakerOpenError') {
     status = 503;
     code = 'SERVICE_UNAVAILABLE';
-    message = err.message || 'Service temporarily unavailable';
+    message = err.message || translate('SERVICE_UNAVAILABLE', locale);
     if (err.retryAfter) {
       res.setHeader('Retry-After', String(err.retryAfter));
     }
   } else if (isPayloadTooLarge) {
     status = 413;
     code = 'PAYLOAD_TOO_LARGE';
-    message = 'Request body is too large';
+    message = translate('PAYLOAD_TOO_LARGE', locale);
   } else if (err.status || err.statusCode) {
     status = err.status || err.statusCode;
     const STATUS_CODES = { 400: 'VALIDATION_ERROR', 401: 'UNAUTHORIZED', 403: 'FORBIDDEN', 404: 'NOT_FOUND', 413: 'PAYLOAD_TOO_LARGE', 429: 'RATE_LIMITED', 503: 'SERVICE_UNAVAILABLE' };
@@ -91,8 +93,10 @@ function errorHandler(err, req, res, _next) {
 
   // #449 — Sanitize the message before sending to the client to prevent
   // stack traces, file paths, or other internal details from leaking.
+  // #571 — Localize standard error messages based on the client's language preference.
   const safeMessage = sanitizeMessage(message);
-  const error = { code, message: safeMessage, request_id: req.id };
+  const localizedMessage = translate(code, locale) !== code ? translate(code, locale) : safeMessage;
+  const error = { code, message: localizedMessage, request_id: req.id };
   if (isAppError && err.details && Object.keys(err.details).length > 0) {
     // Also sanitize details to prevent stack traces in nested fields.
     const safeDetails = {};

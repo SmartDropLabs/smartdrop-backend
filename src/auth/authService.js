@@ -9,6 +9,7 @@ const {
   validatePasswordLength,
   validatePasswordComplexity,
 } = require('./password');
+const { defaultLockout } = require('./accountLockout');
 
 /**
  * Sanitize a user object so passwords, hashes, salts, and secrets are NEVER returned.
@@ -69,6 +70,7 @@ async function registerUser({ email, username, password }, userStore) {
  * 2. Compares passwords using constant-time algorithms.
  * 3. Transparently upgrades legacy hashes/plaintext to bcrypt on successful authentication.
  * 4. Never logs or echoes password or hash values.
+ * 5. Prevents brute force attacks with account lockout after repeated failures (#573).
  *
  * @param {string} identifier - Email or username
  * @param {string} password - Raw password input
@@ -87,6 +89,16 @@ async function loginUser(identifier, password, userStore) {
     throw invalidCredentialsError;
   }
 
+  // Check brute force lockout (#573)
+  const lockoutStatus = defaultLockout.isLocked(identifier);
+  if (lockoutStatus.locked) {
+    logger.warn('Login attempt on locked account', {
+      identifier,
+      lockedUntil: lockoutStatus.lockedUntil,
+    });
+    throw invalidCredentialsError;
+  }
+
   // Look up user
   let user = null;
   if (typeof userStore.findByIdentifier === 'function') {
@@ -98,6 +110,7 @@ async function loginUser(identifier, password, userStore) {
   // If user does not exist, run dummy verification to equalize response timing
   if (!user || !user.password_hash) {
     await dummyVerify(password);
+    defaultLockout.recordFailure(identifier);
     throw invalidCredentialsError;
   }
 
@@ -106,8 +119,12 @@ async function loginUser(identifier, password, userStore) {
 
   if (!valid) {
     logger.warn('Failed login attempt', { identifier });
+    defaultLockout.recordFailure(identifier);
     throw invalidCredentialsError;
   }
+
+  // Successful login - reset failed attempts
+  defaultLockout.recordSuccess(identifier);
 
   // Lazy upgrade: if password was stored in legacy format or lower cost factor,
   // rehash with bcrypt and persist.

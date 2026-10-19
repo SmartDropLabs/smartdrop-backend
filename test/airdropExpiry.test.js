@@ -129,11 +129,16 @@ describe('airdropExpiry job tick (#88)', () => {
     expect(mockDispatch).toHaveBeenCalledTimes(1);
   });
 
-  test('a Horizon failure logs a warning and does not throw or touch any airdrop', async () => {
+  test('retries Horizon call with backoff on failure before skipping cycle', async () => {
     mockAirdropsService.getCurrentLedger.mockRejectedValue(new Error('Horizon unreachable'));
 
     await expect(tick()).resolves.toBeUndefined();
 
+    expect(mockAirdropsService.getCurrentLedger).toHaveBeenCalledTimes(3);
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('Horizon call failed, retrying'),
+      expect.objectContaining({ attempt: 1, maxRetries: 3 })
+    );
     expect(mockLogger.warn).toHaveBeenCalledWith(
       expect.stringContaining('Horizon unreachable'),
       expect.objectContaining({ error: 'Horizon unreachable' })
@@ -141,6 +146,23 @@ describe('airdropExpiry job tick (#88)', () => {
     expect(mockAirdropsService.scanIds).not.toHaveBeenCalled();
     expect(mockAirdropsService.markExpired).not.toHaveBeenCalled();
     expect(mockDispatch).not.toHaveBeenCalled();
+  });
+
+  test('succeeds if Horizon call succeeds on a retry attempt', async () => {
+    mockAirdropsService.getCurrentLedger
+      .mockRejectedValueOnce(new Error('Horizon temporary timeout'))
+      .mockResolvedValueOnce(150);
+    mockScanIdsReturning([['drop_1']]);
+    mockAirdropsService.get.mockResolvedValue(draftAirdrop({ expiry_ledger: 100 }));
+    mockAirdropsService.markExpired.mockResolvedValue(
+      draftAirdrop({ status: 'expired', expiry_ledger: 100 })
+    );
+
+    await tick();
+
+    expect(mockAirdropsService.getCurrentLedger).toHaveBeenCalledTimes(2);
+    expect(mockAirdropsService.markExpired).toHaveBeenCalledWith('drop_1', 150);
+    expect(mockDispatch).toHaveBeenCalledTimes(1);
   });
 
   test('a dispatch failure is logged and does not throw out of the tick', async () => {

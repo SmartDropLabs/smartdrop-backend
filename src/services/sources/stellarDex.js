@@ -1,12 +1,24 @@
-const { Asset, Horizon } = require('stellar-sdk');
+const { Asset, Horizon } = require('@stellar/stellar-sdk');
 const config = require('../../config');
 const logger = require('../../logger');
+const { addRequestIdHeaderInterceptor } = require('../../middleware/requestId');
+
+const HORIZON_TIMEOUT_MS = config.priceSources?.horizonTimeoutMs || 10000;
 
 let server = null;
+let serverHorizonUrl = null;
 
 function getServer() {
-  if (!server) {
-    server = new Horizon.Server(config.stellar.horizonUrl);
+  // Issue #372: config.stellar is replaced wholesale by config.reload()
+  // (SIGHUP hot-reload in production) — a cached server built from the
+  // horizonUrl that was current at first use would otherwise keep talking
+  // to the old Horizon endpoint forever. Rebuild whenever it differs from
+  // what's cached, rather than only ever building once.
+  if (!server || serverHorizonUrl !== config.stellar.horizonUrl) {
+    server = addRequestIdHeaderInterceptor(
+      new Horizon.Server(config.stellar.horizonUrl, { timeout: HORIZON_TIMEOUT_MS })
+    );
+    serverHorizonUrl = config.stellar.horizonUrl;
   }
   return server;
 }
@@ -70,14 +82,14 @@ async function fetchPrice(assetCode, issuer) {
       return await fetchOrderBookMidpoint(horizon, xlmAsset(), usdcAsset());
     }
 
-    const assetInXlm = await fetchOrderBookMidpoint(
+    const assetInXlmPromise = fetchOrderBookMidpoint(
       horizon,
       issuedAsset(normalizedCode, issuer),
       xlmAsset()
     );
+    const xlmUsdPromise = getXlmUsdPrice(horizon);
+    const [assetInXlm, xlmUsd] = await Promise.all([assetInXlmPromise, xlmUsdPromise]);
     if (assetInXlm === null) return null;
-
-    const xlmUsd = await getXlmUsdPrice(horizon);
     if (xlmUsd === null) return null;
     return assetInXlm * xlmUsd;
   } catch (err) {

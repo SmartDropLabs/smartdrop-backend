@@ -2,6 +2,8 @@ const winston = require('winston');
 const DailyRotateFile = require('winston-daily-rotate-file');
 const { name: serviceName, version } = require('../package.json');
 const { requestContext } = require('./middleware/requestId');
+const { redactFormat } = require('./services/logRedaction');
+const { nowIso } = require('./utils/dates');
 
 // ==================== LOG LEVEL ====================
 const getLogLevel = () => {
@@ -14,37 +16,6 @@ const getLogLevel = () => {
   return 'debug';
 };
 
-// ==================== REDACTION ====================
-const redactFormat = winston.format((info) => {
-  const sensitiveKeys = ['apikey', 'privatekey', 'secret', 'token'];
-
-  const redactValue = (value, key) => {
-    if (typeof value !== 'string') return '[REDACTED]';
-    if (key.toLowerCase().includes('secret') && value.startsWith('whsec_')) {
-      return 'whsec_****';
-    }
-    return '[REDACTED]';
-  };
-
-  const redact = (obj) => {
-    if (!obj || typeof obj !== 'object') return obj;
-
-    for (const key of Object.keys(obj)) {
-      const lowerKey = key.toLowerCase();
-      const isSensitive = sensitiveKeys.some(k => lowerKey.includes(k));
-
-      if (isSensitive) {
-        obj[key] = redactValue(obj[key], key);
-      } else if (typeof obj[key] === 'object') {
-        redact(obj[key]);
-      }
-    }
-    return obj;
-  };
-
-  return redact(info);
-});
-
 // ==================== FORMAT DECISION ====================
 const env = process.env.NODE_ENV || 'development';
 const logFormat = process.env.LOG_FORMAT || (env === 'production' ? 'json' : 'pretty');
@@ -52,16 +23,34 @@ const useJsonFormat = logFormat === 'json';
 
 // ==================== REQUEST CONTEXT ====================
 const requestIdFormat = winston.format((info) => {
-  info.requestId = requestContext.getStore()?.requestId ?? 'system';
+  const store = requestContext.getStore();
+  const requestId = store?.requestId || store?.correlationId || 'system';
+  info.requestId = requestId;
+  // snake_case alias so structured log output matches the request_id field
+  // name used on delivery records and in API responses (issue #250).
+  // `requestId` is kept for existing dashboards and queries.
+  if (info.request_id === undefined) info.request_id = requestId;
+  if (info.correlationId === undefined) info.correlationId = requestId;
+  if (info.correlation_id === undefined) info.correlation_id = requestId;
+  return info;
+});
+
+const errorTrackerFormat = winston.format((info) => {
+  if (info.level === 'error') {
+    const errorObj = info.error instanceof Error ? info.error : (info.stack ? info : new Error(info.message || 'Logged Error'));
+    const { level, message, timestamp, ...extra } = info;
+    require('./services/errorTracker').captureException(errorObj, extra);
+  }
   return info;
 });
 
 // ==================== BASE FORMATS ====================
 const baseFormats = [
-  winston.format.timestamp({ format: () => new Date().toISOString() }),
+  winston.format.timestamp({ format: () => nowIso() }),
   winston.format.errors({ stack: true }),
   requestIdFormat(),
   redactFormat(),
+  errorTrackerFormat(),
 ];
 
 // ==================== JSON FORMAT ====================
@@ -75,7 +64,9 @@ const prettyFormat = winston.format.combine(
   ...baseFormats,
   winston.format.colorize(),
   winston.format.printf(({ timestamp, level, message, stack, ...meta }) => {
-    const { service, version: ver, ...rest } = meta;
+    // request_id is a snake_case alias of requestId (issue #250); printing
+    // both would duplicate the same value in every pretty-formatted line.
+    const { service, version: ver, request_id: _requestIdAlias, ...rest } = meta;
     const metaStr = Object.keys(rest).length
       ? ` ${JSON.stringify(rest)}`
       : '';
@@ -91,18 +82,24 @@ const transports = [
   })
 ];
 
-// Optional file logging — always rotates by date and size to prevent disk exhaustion.
-const logDir = process.env.LOG_FILE_PATH || 'logs';
-transports.push(
-  new DailyRotateFile({
-    filename: `${logDir}/application-%DATE%.log`,
-    datePattern: 'YYYY-MM-DD',
-    zippedArchive: true,
-    maxSize: process.env.LOG_MAX_SIZE || '20m',
-    maxFiles: process.env.LOG_MAX_FILES || '14d',
-    format: jsonFormat
-  })
-);
+// Optional file logging
+if (process.env.LOG_FILE_PATH) {
+  transports.push(
+    new DailyRotateFile({
+      filename: `${process.env.LOG_FILE_PATH}/application-%DATE%.log`,
+      datePattern: 'YYYY-MM-DD',
+      // Issue #494 — winston-daily-rotate-file resolves %DATE% from the host
+      // wall clock by default, so two servers in different time zones named
+      // (and rotated) the same UTC log window differently. utc: true pins the
+      // filename/rotation date to UTC.
+      utc: true,
+      zippedArchive: true,
+      maxSize: '20m',
+      maxFiles: '14d',
+      format: jsonFormat
+    })
+  );
+}
 
 // ==================== LOGGER ====================
 const logger = winston.createLogger({
@@ -112,4 +109,23 @@ const logger = winston.createLogger({
   exitOnError: false
 });
 
+// #524 — Runtime log level configuration
+const VALID_LEVELS = ['debug', 'info', 'warn', 'error'];
+
+function setLogLevel(level) {
+  if (!VALID_LEVELS.includes(level)) {
+    throw new Error(`Invalid log level: ${level}. Must be one of: ${VALID_LEVELS.join(', ')}`);
+  }
+  logger.level = level;
+  logger.info(`Log level changed to ${level}`);
+  return level;
+}
+
+function getCurrentLogLevel() {
+  return logger.level;
+}
+
 module.exports = logger;
+module.exports.setLogLevel = setLogLevel;
+module.exports.getCurrentLogLevel = getCurrentLogLevel;
+module.exports.VALID_LEVELS = VALID_LEVELS;

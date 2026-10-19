@@ -32,13 +32,61 @@ const mockRedis = {
     const stopIdx = stop === -1 ? entries.length + stop : stop;
     return entries.slice(startIdx, stopIdx + 1).map(([member]) => member);
   }),
+  multi: jest.fn(() => {
+    const ops = [];
+    const chain = {
+      set: jest.fn((k, v) => {
+        ops.push(() => mockStore.set(k, v));
+        return chain;
+      }),
+      del: jest.fn((k) => {
+        ops.push(() => mockStore.delete(k));
+        return chain;
+      }),
+      zadd: jest.fn((k, score, member) => {
+        ops.push(() => mockRedis.zadd(k, score, member));
+        return chain;
+      }),
+      zrem: jest.fn((k, member) => {
+        ops.push(() => mockRedis.zrem(k, member));
+        return chain;
+      }),
+      exec: jest.fn(async () => {
+        for (const op of ops) await op();
+        return [];
+      }),
+    };
+    return chain;
+  }),
 };
 
 jest.mock('../src/services/cache', () => ({
   getClient: () => mockRedis,
   get: jest.fn(async (key) => {
     const v = mockStore.get(key);
-    return v !== undefined ? JSON.parse(JSON.stringify(v)) : null;
+    if (v === undefined || v === null) return null;
+    if (typeof v === 'string') {
+      try {
+        return JSON.parse(v);
+      } catch {
+        return v;
+      }
+    }
+    return JSON.parse(JSON.stringify(v));
+  }),
+  mget: jest.fn(async (keys) => {
+    return keys.map((k) => {
+      const v = mockStore.get(k);
+      if (v === undefined || v === null) return null;
+      if (typeof v === 'string') {
+        try {
+          return JSON.parse(v);
+        } catch {
+          return v;
+        }
+      }
+      return JSON.parse(JSON.stringify(v));
+    });
   }),
   set: jest.fn(async (key, value) => {
     mockStore.set(key, JSON.parse(JSON.stringify(value)));
@@ -170,6 +218,33 @@ describe('requireApiKey middleware', () => {
     expect(res.status).toBe(200);
     const stored = await apiKeys.getKey(created.key.id);
     expect(stored.last_used_at).toEqual(expect.any(String));
+  });
+
+  test('rejects API key with 403 when required scope is missing', async () => {
+    const created = await apiKeys.createKey({ label: 'alerts worker', scopes: ['alerts'] });
+    const app = buildProtectedApp({ scopes: ['webhooks'] });
+
+    const res = await request(app)
+      .get('/protected')
+      .set('Authorization', `Bearer ${created.api_key}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toMatchObject({
+      code: 'FORBIDDEN',
+      message: 'Insufficient API key scope',
+    });
+  });
+
+  test('allows API key when required scope matches', async () => {
+    const created = await apiKeys.createKey({ label: 'webhooks worker', scopes: ['webhooks'] });
+    const app = buildProtectedApp({ scopes: ['webhooks'] });
+
+    const res = await request(app)
+      .get('/protected')
+      .set('Authorization', `Bearer ${created.api_key}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
   });
 });
 

@@ -1,6 +1,6 @@
-'use strict';
+"use strict";
 
-const logger = require('../../logger');
+const logger = require("../../logger");
 
 /**
  * A per-source circuit breaker for permanent (nonRetryable) failures like an
@@ -18,6 +18,7 @@ const logger = require('../../logger');
 function createCircuitBreaker({ sourceName, cooldownMs, reminderIntervalMs }) {
   let openUntil = 0;
   let lastReminderLoggedAt = 0;
+  let lastSuccessAt = null;
 
   function isOpen() {
     return Date.now() < openUntil;
@@ -27,7 +28,7 @@ function createCircuitBreaker({ sourceName, cooldownMs, reminderIntervalMs }) {
   function noteSkipped(context = {}) {
     const now = Date.now();
     if (now - lastReminderLoggedAt >= reminderIntervalMs) {
-      logger.warn('Price source circuit open, skipping fetch', {
+      logger.warn("Price source circuit open, skipping fetch", {
         source: sourceName,
         openUntil: new Date(openUntil).toISOString(),
         ...context,
@@ -36,14 +37,15 @@ function createCircuitBreaker({ sourceName, cooldownMs, reminderIntervalMs }) {
     }
   }
 
-  /** Call on a nonRetryable failure. Logs distinctly (error level) only the first time the circuit transitions from closed to open. */
+  /** Call on a nonRetryable failure. Logs distinctly (error level) only the first time the circuit transitions from closed to open. When `context.cooldownMs` is provided it overrides the default — used for permanent auth failures (401) that should keep the circuit open longer than transient misconfigurations. */
   function open(context = {}) {
     const wasOpen = isOpen();
-    openUntil = Date.now() + cooldownMs;
+    const effectiveCooldown = context.cooldownMs || cooldownMs;
+    openUntil = Date.now() + effectiveCooldown;
     if (!wasOpen) {
-      logger.error('Price source permanently misconfigured', {
+      logger.error("Price source permanently misconfigured", {
         source: sourceName,
-        cooldownMs,
+        cooldownMs: effectiveCooldown,
         ...context,
       });
       lastReminderLoggedAt = Date.now();
@@ -54,6 +56,7 @@ function createCircuitBreaker({ sourceName, cooldownMs, reminderIntervalMs }) {
   function close() {
     openUntil = 0;
     lastReminderLoggedAt = 0;
+    lastSuccessAt = Date.now();
   }
 
   function getState() {
@@ -61,6 +64,9 @@ function createCircuitBreaker({ sourceName, cooldownMs, reminderIntervalMs }) {
       source: sourceName,
       open: isOpen(),
       openUntil: openUntil ? new Date(openUntil).toISOString() : null,
+      last_success_at: lastSuccessAt
+        ? new Date(lastSuccessAt).toISOString()
+        : null,
     };
   }
 

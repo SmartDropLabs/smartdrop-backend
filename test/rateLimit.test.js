@@ -5,12 +5,13 @@ const request = require('supertest');
 const { createCacheMock } = require('./helpers/cacheMock');
 
 const mockHelper = createCacheMock();
-const { reset } = mockHelper;
+const { reset, redis } = mockHelper;
 
 jest.mock('../src/services/cache', () => mockHelper.cacheMock);
-jest.mock('../src/logger', () => ({
+const mockLogger = {
   info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn(),
-}));
+};
+jest.mock('../src/logger', () => mockLogger);
 
 const buildRateLimit = require('../src/middleware/rateLimit');
 const { errorHandler } = require('../src/middleware/errorHandler');
@@ -23,7 +24,10 @@ function buildApp(limiter) {
   return app;
 }
 
-beforeEach(() => reset());
+beforeEach(() => {
+  reset();
+  Object.values(mockLogger).forEach((fn) => fn.mockClear());
+});
 
 describe('rateLimit middleware', () => {
   test('allows requests under the limit and sets rate-limit headers', async () => {
@@ -43,6 +47,44 @@ describe('rateLimit middleware', () => {
     expect(blocked.body.error).toMatchObject({ code: 'RATE_LIMITED' });
     expect(blocked.body.error.details.retry_after_seconds).toBeGreaterThan(0);
     expect(blocked.headers['retry-after']).toBeDefined();
+  });
+
+  test('sets Redis expiry only when a fixed-window bucket is first created', async () => {
+    const app = buildApp(buildRateLimit({ windowSeconds: 30, max: 5, keyPrefix: 'expire' }));
+
+    await request(app).get('/test');
+    await request(app).get('/test');
+
+    expect(redis.incr).toHaveBeenCalledTimes(2);
+    expect(redis.expire).toHaveBeenCalledTimes(1);
+    expect(redis.expire.mock.calls[0][1]).toBe(30);
+  });
+
+  test('fails open when Redis increment fails and logs the cache outage', async () => {
+    redis.incr.mockRejectedValueOnce(new Error('redis down'));
+    const app = buildApp(buildRateLimit({ windowSeconds: 60, max: 1, keyPrefix: 'open' }));
+
+    const res = await request(app).get('/test');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      'Rate limit fail-open due to cache error',
+      expect.objectContaining({ keyPrefix: 'open', error: 'redis down' })
+    );
+  });
+
+  test('clears fail-open escalation state after a successful Redis call', async () => {
+    const app = buildApp(buildRateLimit({ windowSeconds: 60, max: 3, keyPrefix: 'recover' }));
+    redis.incr.mockRejectedValueOnce(new Error('first outage'));
+
+    await request(app).get('/test');
+    await request(app).get('/test');
+    redis.incr.mockRejectedValueOnce(new Error('second outage'));
+    await request(app).get('/test');
+
+    expect(mockLogger.error).not.toHaveBeenCalled();
+    expect(mockLogger.warn).toHaveBeenCalledTimes(2);
   });
 
   test('throws when configured with invalid options', () => {

@@ -2,33 +2,35 @@ const express = require('express');
 const eventStore = require('../indexer/eventStore');
 const indexerPoller = require('../indexer/runtime');
 const logger = require('../logger');
+const AppError = require('../errors/AppError');
+const buildRateLimit = require('../middleware/rateLimit');
 const { parsePagination, paginateResponse } = require('../utils/paginate');
+const { validate } = require('../middleware/validate');
+const {
+  indexerAirdropIdParamsSchema,
+  indexerAddressParamsSchema,
+  paginationQuerySchema,
+} = require('../validation/schemas');
 
 const router = express.Router();
 
-function isValidId(value) {
-  return typeof value === 'string' && /^[A-Za-z0-9:_-]{1,128}$/.test(value);
-}
+const validateAirdropId = validate(indexerAirdropIdParamsSchema, 'params');
+const validateAddress = validate(indexerAddressParamsSchema, 'params');
+const validatePagination = validate(paginationQuerySchema, 'query');
 
-function isValidAddress(value) {
-  return typeof value === 'string' && /^[A-Z0-9]{10,80}$/.test(value);
-}
-
-router.get('/airdrops/:id/status', async (req, res) => {
+router.get('/airdrops/:id/status', validateAirdropId, async (req, res, next) => {
   try {
-    if (!isValidId(req.params.id)) {
-      return res.status(400).json({ error: 'Invalid airdrop id' });
-    }
-
     const status = await eventStore.getAirdropStatus(req.params.id);
     if (!status) {
-      return res.status(404).json({ error: 'Airdrop not indexed' });
+      return next(new AppError('AIRDROP_NOT_INDEXED', 'Airdrop has not been indexed', 404, {
+        airdrop_id: req.params.id,
+      }));
     }
 
     return res.json(status);
   } catch (err) {
     logger.error('Airdrop status lookup failed', { error: err.message });
-    return res.status(500).json({ error: 'Internal server error' });
+    return next(err);
   }
 });
 
@@ -43,41 +45,39 @@ router.get('/airdrops/:id/status', async (req, res) => {
 // getJsonList) — there's no server-side "fetch only a page" available at
 // the storage layer, so pagination here is a slice of the already-fetched
 // array plus the canonical envelope, not a more efficient query (#131).
-router.get('/airdrops/:id/onchain-recipients', async (req, res) => {
+router.get('/airdrops/:id/onchain-recipients', validateAirdropId, validatePagination, async (req, res, next) => {
   try {
-    if (!isValidId(req.params.id)) {
-      return res.status(400).json({ error: 'Invalid airdrop id' });
-    }
-
     const allRecipients = await eventStore.getAirdropRecipients(req.params.id);
-    const { page, limit } = parsePagination(req.query);
+    const { page, limit } = req.validated.query;
     const start = (page - 1) * limit;
     const pageRecipients = allRecipients.slice(start, start + limit);
     return res.json(paginateResponse(pageRecipients, allRecipients.length, { page, limit }));
   } catch (err) {
     logger.error('Airdrop recipients lookup failed', { error: err.message });
-    return res.status(500).json({ error: 'Internal server error' });
+    return next(err);
   }
 });
 
-router.get('/recipients/:address/claims', async (req, res) => {
+router.get('/recipients/:address/claims', validateAddress, validatePagination, async (req, res, next) => {
   try {
-    if (!isValidAddress(req.params.address)) {
-      return res.status(400).json({ error: 'Invalid recipient address' });
-    }
-
     const allClaims = await eventStore.getRecipientClaims(req.params.address);
-    const { page, limit } = parsePagination(req.query);
+    const { page, limit } = req.validated.query;
     const start = (page - 1) * limit;
     const pageClaims = allClaims.slice(start, start + limit);
     return res.json(paginateResponse(pageClaims, allClaims.length, { page, limit }));
   } catch (err) {
     logger.error('Recipient claims lookup failed', { error: err.message });
-    return res.status(500).json({ error: 'Internal server error' });
+    return next(err);
   }
 });
 
-router.get('/indexer/status', async (_req, res) => {
+const indexerStatusLimit = buildRateLimit({
+  windowSeconds: 1,
+  max: 1,
+  keyPrefix: 'indexer-status',
+});
+
+router.get('/indexer/status', indexerStatusLimit, async (_req, res, next) => {
   try {
     const stats = await eventStore.getStats();
     const poller = indexerPoller.getStatus();
@@ -97,7 +97,7 @@ router.get('/indexer/status', async (_req, res) => {
     });
   } catch (err) {
     logger.error('Indexer status lookup failed', { error: err.message });
-    return res.status(500).json({ error: 'Internal server error' });
+    return next(err);
   }
 });
 

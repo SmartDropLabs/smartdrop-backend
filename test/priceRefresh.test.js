@@ -160,6 +160,7 @@ describe('priceRefresh job reentrancy guard (#71)', () => {
     expect(health.lastSuccessAt).toBeDefined();
     expect(health.lastError).toBeNull();
     expect(health.stalled).toBe(false);
+    expect(mockEvaluateAll).toHaveBeenCalledTimes(1);
   });
 
   test('getHealth reports error after failed cycle', async () => {

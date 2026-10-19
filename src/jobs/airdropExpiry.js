@@ -8,6 +8,31 @@ const logger = require('../logger');
 
 let scheduledTask = null;
 
+const HORIZON_MAX_RETRIES = 3;
+const HORIZON_RETRY_BASE_MS = 1000;
+
+async function fetchCurrentLedgerWithRetry(maxRetries = HORIZON_MAX_RETRIES, baseDelayMs = HORIZON_RETRY_BASE_MS) {
+  let lastError;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await airdropsService.getCurrentLedger();
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxRetries) {
+        const delay = baseDelayMs * 2 ** (attempt - 1);
+        logger.warn('Horizon call failed, retrying ledger sequence fetch', {
+          attempt,
+          maxRetries,
+          delayMs: delay,
+          error: err.message,
+        });
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+  }
+  throw lastError;
+}
+
 /**
  * One reconciliation pass: scans every non-terminal airdrop and expires any
  * whose expiry_ledger has passed the current Horizon ledger. Exported
@@ -17,7 +42,7 @@ let scheduledTask = null;
 async function tick() {
   let currentLedger;
   try {
-    currentLedger = await airdropsService.getCurrentLedger();
+    currentLedger = await fetchCurrentLedgerWithRetry();
   } catch (err) {
     // Matches priceOracle.js's graceful-degradation style: Horizon being
     // temporarily unreachable is expected and recoverable — log and skip
@@ -104,6 +129,19 @@ function start() {
   if (scheduledTask) return;
 
   const intervalSeconds = config.airdrops.expiryCheckIntervalSeconds;
+
+  // Validate that the interval evenly divides 60 so the cron
+  // expression produces a correct schedule. Non-divisor intervals (e.g.
+  // 7 seconds) would create an incorrect cron schedule with node-cron's
+  // second-level syntax.
+  if (!Number.isInteger(intervalSeconds) || intervalSeconds < 1 || intervalSeconds > 59 || 60 % intervalSeconds !== 0) {
+    throw new Error(
+      `airdrops.expiryCheckIntervalSeconds must be a whole number between 1 and 59 that evenly divides 60 ` +
+      `(got ${intervalSeconds}). Non-divisor intervals produce incorrect cron schedules. ` +
+      `Valid values: 1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30, 60.`
+    );
+  }
+
   const cronExpression = `*/${intervalSeconds} * * * * *`;
 
   scheduledTask = cron.schedule(

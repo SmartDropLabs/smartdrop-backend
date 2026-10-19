@@ -1,5 +1,6 @@
 require('dotenv').config();
 
+const path = require('path');
 const { cleanEnv, makeValidator, num, port, str, url } = require('envalid');
 
 const stellarAddress = makeValidator((input) => {
@@ -51,10 +52,32 @@ const positiveInteger = makeValidator((input) => {
   return value;
 });
 
+const optionalHttpUrl = makeValidator((input) => {
+  const value = String(input || '').trim();
+  if (!value) return '';
+  const parsed = new URL(value);
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error('must be an http or https URL');
+  }
+  return parsed.toString().replace(/\/+$/, '');
+});
+
 const databaseDevDefault =
   process.env.NODE_ENV === 'test'
     ? 'postgres://localhost/smartdrop_test'
     : 'postgres://localhost/smartdrop';
+
+function parseTrustProxy(value, nodeEnv) {
+  if (value === undefined || value === '') {
+    return nodeEnv === 'production' ? 'loopback' : false;
+  }
+  const trimmed = String(value).trim().toLowerCase();
+  if (trimmed === 'true') return true;
+  if (trimmed === 'false') return false;
+  const numVal = Number(trimmed);
+  if (!Number.isNaN(numVal)) return numVal;
+  return value;
+}
 
 const rawEnv = {
   ...process.env,
@@ -80,16 +103,28 @@ const env = cleanEnv(rawEnv, {
   LEASE_TTL_MS: positiveInteger({ default: 15000 }),
   LEASE_RENEW_INTERVAL_MS: positiveInteger({ default: 5000 }),
   ADMIN_API_KEY: str({ default: '' }),
+  BCRYPT_ROUNDS: positiveInteger({ default: 12 }),
+  API_KEY_ROTATION_GRACE_SECONDS: num({ default: 0 }),
+  // 32-byte AES-256 key for encrypting webhook secrets at rest (issue #145),
+  // hex or base64 encoded. Empty in dev — webhookEncryption falls back to an
+  // insecure fixed key and logs a warning; production must set this.
+  WEBHOOK_SECRET_ENCRYPTION_KEY: str({ default: '' }),
+  DB_ENCRYPTION_KEY: str({ default: '' }),
   AIRDROP_CSV_MAX_BYTES: positiveInteger({ default: 5 * 1024 * 1024 }),
   AIRDROP_JSON_MAX_BYTES: positiveInteger({ default: 2 * 1024 * 1024 }),
   AIRDROP_RATELIMIT_WINDOW: positiveInteger({ default: 60 }),
   AIRDROP_RATELIMIT_MAX: positiveInteger({ default: 10 }),
+  CORS_MAX_AGE_SECONDS: positiveInteger({ default: 86400 }),
+  STATIC_ASSETS_DIR: str({ default: 'public' }),
+  STATIC_CDN_URL: optionalHttpUrl({ default: '' }),
+  STATIC_ASSETS_MAX_AGE_SECONDS: positiveInteger({ default: 31536000 }),
   PRICE_CACHE_TTL_SECONDS: num({ default: 60 }),
   PRICE_REFRESH_INTERVAL_SECONDS: num({ default: 30 }),
   PRICE_STALE_THRESHOLD_MINUTES: num({ default: 5 }),
   PRICE_ANOMALY_THRESHOLD_PCT: num({ default: 20 }),
   PRICE_MIN_SOURCES: num({ default: 2 }),
   PRICE_ANOMALY_ACTION: str({ default: 'warn', choices: ['warn', 'reject'] }),
+  PRICE_SOURCE_PRIORITY: str({ default: '' }),
   PRICE_REFRESH_MAX_CYCLE_MS: num({ default: 90000 }),
   CIRCUIT_BREAKER_FAILURE_THRESHOLD: num({ default: 3 }),
   CIRCUIT_BREAKER_SUCCESS_THRESHOLD: num({ default: 1 }),
@@ -100,10 +135,33 @@ const env = cleanEnv(rawEnv, {
   AIRDROP_LEDGER_CACHE_TTL_MS: num({ default: 5000 }),
   AIRDROP_EXPIRY_SCAN_BATCH_SIZE: num({ default: 100 }),
   WATCHED_ASSETS: watchedAssets({ default: '' }),
+  SENTRY_DSN: str({ default: '' }),
   LOG_LEVEL: str({
     default: 'info',
     choices: ['debug', 'info', 'warn', 'error'],
   }),
+  // Requests slower than this get a distinct warn-level log line from
+  // requestLogger.js, in addition to the routine per-request log (issue
+  // #244) — so slow requests are greppable/alertable without external APM.
+  SLOW_REQUEST_THRESHOLD_MS: num({ default: 1000 }),
+  ROUTE_TIMEOUT_MS: num({ default: 30000 }),
+  // Per-API-key rate limit tiers (issue #251). Each authenticated key is
+  // metered in its own bucket sized by the key's tier, so one abusive key
+  // can no longer exhaust the shared IP-keyed bucket for everybody else.
+  API_KEY_RATELIMIT_WINDOW_SECONDS: positiveInteger({ default: 60 }),
+  API_KEY_RATELIMIT_FREE_MAX: positiveInteger({ default: 100 }),
+  API_KEY_RATELIMIT_PRO_MAX: positiveInteger({ default: 1000 }),
+  API_KEY_RATELIMIT_ADMIN_MAX: positiveInteger({ default: 10000 }),
+  // Issue #495 — cache warming startup behavior
+  CACHE_WARM_ENABLED: str({ default: 'true' }),
+  CACHE_WARM_TIMEOUT_MS: num({ default: 30000 }),
+  CACHE_WARM_ENTRY_TIMEOUT_MS: num({ default: 10000 }),
+  CACHE_WARM_MAX_ENTRIES: num({ default: 500 }),
+  CACHE_WARM_CONCURRENCY: num({ default: 8 }),
+  CACHE_WARM_JITTER_MS: num({ default: 0 }),
+  CACHE_WARM_LOCK_TTL_MS: num({ default: 60000 }),
+  DB_POOL_MIN: positiveInteger({ default: 2 }),
+  DB_POOL_MAX: positiveInteger({ default: 10 }),
 });
 
 const usdcIssuer = env.USDC_ISSUER;
@@ -111,9 +169,24 @@ const parsedWatchedAssets = Array.isArray(env.WATCHED_ASSETS)
   ? env.WATCHED_ASSETS
   : parseWatchedAssets(env.WATCHED_ASSETS);
 
-module.exports = {
+const config = module.exports = {
   nodeEnv: env.NODE_ENV,
   port: env.PORT,
+  apiDocs: {
+    enabled: process.env.API_DOCS_ENABLED !== 'false',
+  },
+  staticAssets: {
+    directory: path.resolve(env.STATIC_ASSETS_DIR),
+    cdnBaseUrl: env.STATIC_CDN_URL,
+    maxAgeSeconds: env.STATIC_ASSETS_MAX_AGE_SECONDS,
+  },
+  databaseUrl: env.DATABASE_URL,
+  database: {
+    pool: {
+      min: env.DB_POOL_MIN,
+      max: env.DB_POOL_MAX,
+    },
+  },
   redis: {
     url: env.REDIS_URL,
   },
@@ -128,6 +201,10 @@ module.exports = {
     pollIntervalMs: parseInt(process.env.INDEXER_POLL_INTERVAL_MS, 10) || 5000,
     pollLimit: parseInt(process.env.INDEXER_POLL_LIMIT, 10) || 100,
     startLedger: parseInt(process.env.INDEXER_START_LEDGER, 10) || 0,
+    // Adaptive polling and lag alerting (issue #255).
+    maxPollIntervalMs: parseInt(process.env.INDEXER_MAX_POLL_INTERVAL_MS, 10) || 5 * 60 * 1000,
+    backoffFactor: parseFloat(process.env.INDEXER_BACKOFF_FACTOR) || 2,
+    lagAlertThreshold: parseInt(process.env.INDEXER_LAG_ALERT_THRESHOLD, 10) || 100,
   },
   coingecko: {
     apiKey: env.COINGECKO_API_KEY,
@@ -148,6 +225,9 @@ module.exports = {
     anomalyThresholdPercent: env.PRICE_ANOMALY_THRESHOLD_PCT,
     minSources: env.PRICE_MIN_SOURCES,
     anomalyAction: env.PRICE_ANOMALY_ACTION,
+    sourcePriority: env.PRICE_SOURCE_PRIORITY
+      ? env.PRICE_SOURCE_PRIORITY.split(',').map((s) => s.trim()).filter(Boolean)
+      : [],
     refreshMaxCycleMs: env.PRICE_REFRESH_MAX_CYCLE_MS,
     circuitBreaker: {
       failureThreshold: env.CIRCUIT_BREAKER_FAILURE_THRESHOLD,
@@ -192,7 +272,44 @@ module.exports = {
   },
   auth: {
     adminApiKey: env.ADMIN_API_KEY,
+    bcryptRounds: env.BCRYPT_ROUNDS,
+    apiKeyRotationGraceSeconds: env.API_KEY_ROTATION_GRACE_SECONDS,
   },
+  apiKeyRateLimit: {
+    windowSeconds: env.API_KEY_RATELIMIT_WINDOW_SECONDS,
+    // `free` is the tier assigned to any key created without an explicit
+    // tier, so existing keys keep working after this change.
+    defaultTier: 'free',
+    tiers: {
+      free: env.API_KEY_RATELIMIT_FREE_MAX,
+      pro: env.API_KEY_RATELIMIT_PRO_MAX,
+      admin: env.API_KEY_RATELIMIT_ADMIN_MAX,
+    },
+  },
+  sentryDsn: env.SENTRY_DSN,
+  slowRequestThresholdMs: env.SLOW_REQUEST_THRESHOLD_MS,
+  routeTimeoutMs: env.ROUTE_TIMEOUT_MS,
+  trustProxy: parseTrustProxy(process.env.TRUST_PROXY, env.NODE_ENV),
+  https: {
+    enforce: process.env.ENFORCE_HTTPS !== undefined && process.env.ENFORCE_HTTPS !== ''
+      ? process.env.ENFORCE_HTTPS === 'true'
+      : env.NODE_ENV === 'production',
+    host: process.env.HTTPS_HOST || process.env.PUBLIC_HOSTNAME || '',
+    allowedHosts: (process.env.ALLOWED_HOSTS || '')
+      .split(',')
+      .map((h) => h.trim())
+      .filter(Boolean),
+    hstsMaxAge: parseInt(process.env.HSTS_MAX_AGE_SECONDS, 10) || 31536000,
+    hstsIncludeSubDomains: process.env.HSTS_INCLUDE_SUBDOMAINS !== 'false',
+    // Preload is strictly opt-in because removal from browser preload lists takes months.
+    hstsPreload: process.env.HSTS_PRELOAD === 'true',
+  },
+  webhookSecretEncryptionKey: env.WEBHOOK_SECRET_ENCRYPTION_KEY,
+  databaseEncryptionKey: env.DB_ENCRYPTION_KEY,
+  dbEncryptionKey: env.DB_ENCRYPTION_KEY,
+  // How long browsers may cache a CORS preflight response (issue #344).
+  // Exposed as Access-Control-Max-Age on every successful OPTIONS preflight.
+  corsMaxAgeSeconds: env.CORS_MAX_AGE_SECONDS,
   corsAllowedOrigins: (process.env.CORS_ALLOWED_ORIGINS || 'http://localhost:3000,http://localhost:3001')
     .split(',')
     .map((o) => o.trim())
@@ -206,6 +323,9 @@ module.exports = {
     max: parseInt(process.env.PRICE_RATELIMIT_MAX, 10) || 30,
   },
   webhooks: {
+    // Global defaults; per-webhook overrides can be set via the
+    // WEBHOOK_RETRY_BASE_MS, WEBHOOK_RETRY_FACTOR, WEBHOOK_MAX_ATTEMPTS
+    // env vars (#487).
     maxAttempts: parseInt(process.env.WEBHOOK_MAX_ATTEMPTS, 10) || 3,
     retryBaseMs: parseInt(process.env.WEBHOOK_RETRY_BASE_MS, 10) || 30000,
     retryFactor: parseFloat(process.env.WEBHOOK_RETRY_FACTOR) || 2,
@@ -221,6 +341,7 @@ module.exports = {
     retryPollMs: parseInt(process.env.WEBHOOK_RETRY_POLL_MS, 10) || 5000,
     retryBatchSize: parseInt(process.env.WEBHOOK_RETRY_BATCH, 10) || 25,
     jsonMaxBytes: parseInt(process.env.WEBHOOK_JSON_MAX_BYTES, 10) || 65536,
+    maxPerSubscriber: parseInt(process.env.WEBHOOK_MAX_PER_SUBSCRIBER, 10) || 100,
     rateLimit: {
       windowSeconds: parseInt(process.env.WEBHOOK_RATELIMIT_WINDOW, 10) || 60,
       max: parseInt(process.env.WEBHOOK_RATELIMIT_MAX, 10) || 60,
@@ -229,5 +350,202 @@ module.exports = {
       windowSeconds: parseInt(process.env.WEBHOOK_TEST_RATELIMIT_WINDOW, 10) || 60,
       max: parseInt(process.env.WEBHOOK_TEST_RATELIMIT_MAX, 10) || 5,
     },
+    orderedDelivery: process.env.WEBHOOK_ORDERED_DELIVERY === 'true',
+    shutdownDrainMs: parseInt(process.env.WEBHOOK_RETRY_SHUTDOWN_DRAIN_MS, 10) || 2000,
+    leaseMs: parseInt(process.env.WEBHOOK_RETRY_LEASE_MS, 10) || 300000,
+    recoverBatch: parseInt(process.env.WEBHOOK_RETRY_RECOVER_BATCH, 10) || 100,
+    dlqMax: parseInt(process.env.WEBHOOK_DLQ_MAX, 10) || 10000,
+    deliveryTtlSeconds: parseInt(process.env.WEBHOOK_DELIVERY_TTL_SECONDS, 10) || 2592000,
+  },
+  ws: {
+    maxConnections: parseInt(process.env.WS_MAX_CONNECTIONS, 10) || 100,
+    maxConnectionsPerIp: parseInt(process.env.WS_MAX_CONNECTIONS_PER_IP, 10) || 5,
+  },
+  cacheWarm: {
+    enabled: (process.env.CACHE_WARM_ENABLED || 'true').toLowerCase() !== 'false',
+    timeoutMs: parseInt(process.env.CACHE_WARM_TIMEOUT_MS, 10) || 30000,
+    entryTimeoutMs: parseInt(process.env.CACHE_WARM_ENTRY_TIMEOUT_MS, 10) || 10000,
+    maxEntries: parseInt(process.env.CACHE_WARM_MAX_ENTRIES, 10) || 500,
+    concurrency: parseInt(process.env.CACHE_WARM_CONCURRENCY, 10) || 8,
+    jitterMs: parseInt(process.env.CACHE_WARM_JITTER_MS, 10) || 0,
+    lockTtlMs: parseInt(process.env.CACHE_WARM_LOCK_TTL_MS, 10) || 60000,
+  },
+  trustProxy: (process.env.TRUST_PROXY || 'false').toLowerCase() === 'true',
+  cookies: {
+    secure: (process.env.COOKIE_SECURE || 'auto').toLowerCase(),
+    sameSite: (process.env.COOKIE_SAME_SITE || 'Strict'),
+    path: (process.env.COOKIE_PATH || '/'),
+    domain: process.env.COOKIE_DOMAIN || undefined,
   },
 };
+
+
+// #291 — Runtime config hot-reload support. When the server receives a
+// SIGHUP signal (or watches for .env file changes in development), it
+// re-reads environment variables and re-validates them via envalid, then
+// replaces the exported config values in-place so all consumers see the
+// updated config without a restart.
+function reload() {
+  require('dotenv').config({ override: true });
+  const reloaded = cleanEnv({ ...process.env }, {
+    NODE_ENV: str({ default: 'development', choices: ['development', 'test', 'production'] }),
+    PORT: port({ default: 3000 }),
+    REDIS_URL: url({ devDefault: 'redis://localhost:6379' }),
+    DATABASE_URL: url({ devDefault: databaseDevDefault }),
+    STELLAR_HORIZON_URL: url({ default: 'https://horizon.stellar.org' }),
+    SOROBAN_RPC_URL: url({ default: 'https://soroban-rpc.mainnet.stellar.gateway.fm' }),
+    USDC_ISSUER: stellarAddress({ default: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA' }),
+    COINGECKO_API_KEY: str({ default: '' }),
+    COINMARKETCAP_API_KEY: str({ default: '' }),
+    INSTANCE_ID: str({ default: '' }),
+    LEASE_TTL_MS: positiveInteger({ default: 15000 }),
+    LEASE_RENEW_INTERVAL_MS: positiveInteger({ default: 5000 }),
+    ADMIN_API_KEY: str({ default: '' }),
+    WEBHOOK_SECRET_ENCRYPTION_KEY: str({ default: '' }),
+    DB_ENCRYPTION_KEY: str({ default: '' }),
+    AIRDROP_CSV_MAX_BYTES: positiveInteger({ default: 5 * 1024 * 1024 }),
+    AIRDROP_JSON_MAX_BYTES: positiveInteger({ default: 2 * 1024 * 1024 }),
+    AIRDROP_RATELIMIT_WINDOW: positiveInteger({ default: 60 }),
+    AIRDROP_RATELIMIT_MAX: positiveInteger({ default: 10 }),
+    CORS_MAX_AGE_SECONDS: positiveInteger({ default: 86400 }),
+    STATIC_ASSETS_DIR: str({ default: 'public' }),
+    STATIC_CDN_URL: optionalHttpUrl({ default: '' }),
+    STATIC_ASSETS_MAX_AGE_SECONDS: positiveInteger({ default: 31536000 }),
+    PRICE_CACHE_TTL_SECONDS: num({ default: 60 }),
+    PRICE_REFRESH_INTERVAL_SECONDS: num({ default: 30 }),
+    PRICE_STALE_THRESHOLD_MINUTES: num({ default: 5 }),
+    PRICE_ANOMALY_THRESHOLD_PCT: num({ default: 20 }),
+    PRICE_MIN_SOURCES: num({ default: 2 }),
+    PRICE_ANOMALY_ACTION: str({ default: 'warn', choices: ['warn', 'reject'] }),
+    PRICE_SOURCE_PRIORITY: str({ default: '' }),
+    PRICE_REFRESH_MAX_CYCLE_MS: num({ default: 90000 }),
+    CIRCUIT_BREAKER_FAILURE_THRESHOLD: num({ default: 3 }),
+    CIRCUIT_BREAKER_SUCCESS_THRESHOLD: num({ default: 1 }),
+    CIRCUIT_BREAKER_TIMEOUT_MS: num({ default: 30000 }),
+    PRICE_SOURCE_CIRCUIT_COOLDOWN_MS: num({ default: 15 * 60 * 1000 }),
+    PRICE_SOURCE_CIRCUIT_REMINDER_MS: num({ default: 5 * 60 * 1000 }),
+    AIRDROP_EXPIRY_CHECK_INTERVAL_SECONDS: num({ default: 60 }),
+    AIRDROP_LEDGER_CACHE_TTL_MS: num({ default: 5000 }),
+    AIRDROP_EXPIRY_SCAN_BATCH_SIZE: num({ default: 100 }),
+    WATCHED_ASSETS: watchedAssets({ default: '' }),
+    SENTRY_DSN: str({ default: '' }),
+    LOG_LEVEL: str({ default: 'info', choices: ['debug', 'info', 'warn', 'error'] }),
+    SLOW_REQUEST_THRESHOLD_MS: num({ default: 1000 }),
+    ROUTE_TIMEOUT_MS: num({ default: 30000 }),
+    API_KEY_RATELIMIT_WINDOW_SECONDS: positiveInteger({ default: 60 }),
+  API_KEY_RATELIMIT_FREE_MAX: positiveInteger({ default: 100 }),
+  API_KEY_RATELIMIT_PRO_MAX: positiveInteger({ default: 1000 }),
+  API_KEY_RATELIMIT_ADMIN_MAX: positiveInteger({ default: 10000 }),
+  BCRYPT_ROUNDS: positiveInteger({ default: 12 }),
+  CACHE_WARM_ENABLED: str({ default: 'true' }),
+  CACHE_WARM_TIMEOUT_MS: num({ default: 30000 }),
+  CACHE_WARM_ENTRY_TIMEOUT_MS: num({ default: 10000 }),
+  CACHE_WARM_MAX_ENTRIES: num({ default: 500 }),
+  CACHE_WARM_CONCURRENCY: num({ default: 8 }),
+  CACHE_WARM_JITTER_MS: num({ default: 0 }),
+  CACHE_WARM_LOCK_TTL_MS: num({ default: 60000 }),
+});
+
+
+  const reloadedUsdcIssuer = reloaded.USDC_ISSUER;
+  const reloadedWatchedAssets = Array.isArray(reloaded.WATCHED_ASSETS)
+    ? reloaded.WATCHED_ASSETS
+    : parseWatchedAssets(reloaded.WATCHED_ASSETS);
+
+  // Update all config properties in-place so existing references see new values.
+  Object.assign(config, {
+    nodeEnv: reloaded.NODE_ENV,
+    port: reloaded.PORT,
+    apiDocs: {
+      enabled: process.env.API_DOCS_ENABLED !== 'false',
+    },
+    staticAssets: {
+      directory: path.resolve(reloaded.STATIC_ASSETS_DIR),
+      cdnBaseUrl: reloaded.STATIC_CDN_URL,
+      maxAgeSeconds: reloaded.STATIC_ASSETS_MAX_AGE_SECONDS,
+    },
+    databaseUrl: reloaded.DATABASE_URL,
+    redis: { url: reloaded.REDIS_URL },
+    stellar: {
+      horizonUrl: reloaded.STELLAR_HORIZON_URL,
+      sorobanRpcUrl: reloaded.SOROBAN_RPC_URL,
+      usdcIssuer: reloadedUsdcIssuer,
+    },
+    auth: {
+      adminApiKey: reloaded.ADMIN_API_KEY,
+      bcryptRounds: reloaded.BCRYPT_ROUNDS,
+      apiKeyRotationGraceSeconds: reloaded.API_KEY_ROTATION_GRACE_SECONDS,
+    },
+    // Issue #373: reload() already re-validated COINMARKETCAP_API_KEY above
+    // (it's in the env schema passed to validateEnv) but never applied it —
+    // config.coinmarketcap was silently left out of this Object.assign
+    // entirely, so even a caller that re-read config.coinmarketcap.apiKey
+    // fresh on every call (see coinmarketcap.js's own fix for #373) would
+    // still never see a reloaded key change without this.
+    coinmarketcap: { ...config.coinmarketcap, apiKey: reloaded.COINMARKETCAP_API_KEY },
+    sentryDsn: reloaded.SENTRY_DSN,
+    slowRequestThresholdMs: reloaded.SLOW_REQUEST_THRESHOLD_MS,
+    routeTimeoutMs: reloaded.ROUTE_TIMEOUT_MS,
+    trustProxy: parseTrustProxy(process.env.TRUST_PROXY, reloaded.NODE_ENV),
+    https: {
+      enforce: process.env.ENFORCE_HTTPS !== undefined && process.env.ENFORCE_HTTPS !== ''
+        ? process.env.ENFORCE_HTTPS === 'true'
+        : reloaded.NODE_ENV === 'production',
+      host: process.env.HTTPS_HOST || process.env.PUBLIC_HOSTNAME || '',
+      allowedHosts: (process.env.ALLOWED_HOSTS || '')
+        .split(',')
+        .map((h) => h.trim())
+        .filter(Boolean),
+      hstsMaxAge: parseInt(process.env.HSTS_MAX_AGE_SECONDS, 10) || 31536000,
+      hstsIncludeSubDomains: process.env.HSTS_INCLUDE_SUBDOMAINS !== 'false',
+      hstsPreload: process.env.HSTS_PRELOAD === 'true',
+    },
+    webhookSecretEncryptionKey: reloaded.WEBHOOK_SECRET_ENCRYPTION_KEY,
+    databaseEncryptionKey: reloaded.DB_ENCRYPTION_KEY,
+    dbEncryptionKey: reloaded.DB_ENCRYPTION_KEY,
+    corsMaxAgeSeconds: reloaded.CORS_MAX_AGE_SECONDS,
+    watchedAssets: reloadedWatchedAssets,
+    webhooks: {
+    ...config.webhooks,
+    maxAttempts: parseInt(process.env.WEBHOOK_MAX_ATTEMPTS, 10) || 3,
+    retryBaseMs: parseInt(process.env.WEBHOOK_RETRY_BASE_MS, 10) || 30000,
+    retryFactor: parseFloat(process.env.WEBHOOK_RETRY_FACTOR) || 2,
+    timeoutMs: parseInt(process.env.WEBHOOK_TIMEOUT_MS, 10) || 5000,
+  },
+  cacheWarm: {
+    ...config.cacheWarm,
+    enabled: (process.env.CACHE_WARM_ENABLED || 'true').toLowerCase() !== 'false',
+    timeoutMs: parseInt(process.env.CACHE_WARM_TIMEOUT_MS, 10) || 30000,
+    entryTimeoutMs: parseInt(process.env.CACHE_WARM_ENTRY_TIMEOUT_MS, 10) || 10000,
+    maxEntries: parseInt(process.env.CACHE_WARM_MAX_ENTRIES, 10) || 500,
+    concurrency: parseInt(process.env.CACHE_WARM_CONCURRENCY, 10) || 8,
+    jitterMs: parseInt(process.env.CACHE_WARM_JITTER_MS, 10) || 0,
+    lockTtlMs: parseInt(process.env.CACHE_WARM_LOCK_TTL_MS, 10) || 60000,
+  },
+  trustProxy: (process.env.TRUST_PROXY || 'false').toLowerCase() === 'true',
+  cookies: {
+    secure: (process.env.COOKIE_SECURE || 'auto').toLowerCase(),
+    sameSite: (process.env.COOKIE_SAME_SITE || 'Strict'),
+    path: (process.env.COOKIE_PATH || '/'),
+    domain: process.env.COOKIE_DOMAIN || undefined,
+  },
+  LOG_LEVEL: reloaded.LOG_LEVEL,
+});
+
+
+  return config;
+}
+
+// Register SIGHUP handler for production hot-reload
+if (process.env.NODE_ENV === 'production') {
+  process.on('SIGHUP', () => {
+    try {
+      reload();
+      console.log('[config] Configuration reloaded via SIGHUP');
+    } catch (err) {
+      console.error('[config] Failed to reload configuration:', err.message);
+    }
+  });
+}
+
+module.exports.reload = reload;

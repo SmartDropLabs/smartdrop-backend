@@ -78,6 +78,26 @@ describe('CoinMarketCap source', () => {
       timeout: 10000,
     });
     expect(mockGet).toHaveBeenCalledWith('/cryptocurrency/quotes/latest', {
+      headers: {},
+      params: {
+        symbol: 'XLM',
+        convert: 'USD',
+      },
+    });
+  });
+
+  test('propagates the active request ID', async () => {
+    const coinmarketcap = loadSource();
+    const { requestContext } = require('../src/middleware/requestId');
+    mockGet.mockResolvedValueOnce(quoteResponse('XLM', 0.1234));
+
+    await requestContext.run(
+      { requestId: 'req_coinmarketcap_123' },
+      () => coinmarketcap.fetchPrice('XLM')
+    );
+
+    expect(mockGet).toHaveBeenCalledWith('/cryptocurrency/quotes/latest', {
+      headers: { 'X-Request-ID': 'req_coinmarketcap_123' },
       params: {
         symbol: 'XLM',
         convert: 'USD',
@@ -106,6 +126,7 @@ describe('CoinMarketCap source', () => {
 
     expect(price).toBe(1.0003);
     expect(mockGet).toHaveBeenCalledWith('/cryptocurrency/quotes/latest', {
+      headers: {},
       params: {
         id: 3408,
         convert: 'USD',
@@ -187,6 +208,7 @@ describe('CoinMarketCap source', () => {
         source: 'coinmarketcap',
         open: true,
         openUntil: new Date('2026-01-01T00:15:00.000Z').toISOString(),
+        last_success_at: null,
       });
 
       mockGet.mockClear();
@@ -228,6 +250,7 @@ describe('CoinMarketCap source', () => {
         source: 'coinmarketcap',
         open: false,
         openUntil: null,
+        last_success_at: '2026-01-01T00:15:00.001Z',
       });
     });
 
@@ -277,6 +300,40 @@ describe('CoinMarketCap source', () => {
       expect(price).toBeNull();
       expect(mockGet).toHaveBeenCalledTimes(2);
       expect(coinmarketcap.getCircuitState().open).toBe(false);
+    });
+  });
+
+  // Issue #373: the axios client was cached forever after first use, with
+  // the API key baked into its headers, so a runtime config change to
+  // coinmarketcap.apiKey had no effect.
+  describe('getClient cache invalidation (#373)', () => {
+    test('reuses the same axios client across calls while the key is unchanged', async () => {
+      const coinmarketcap = loadSource();
+      mockGet.mockResolvedValue(quoteResponse('XLM', 0.1));
+
+      await coinmarketcap.fetchPrice('XLM');
+      await coinmarketcap.fetchPrice('XLM');
+
+      expect(mockAxiosCreate).toHaveBeenCalledTimes(1);
+    });
+
+    test('rebuilds the axios client with the new key once config.coinmarketcap.apiKey changes', async () => {
+      const coinmarketcap = loadSource();
+      const config = require('../src/config');
+      mockGet.mockResolvedValue(quoteResponse('XLM', 0.1));
+
+      await coinmarketcap.fetchPrice('XLM');
+      expect(mockAxiosCreate).toHaveBeenCalledTimes(1);
+
+      config.coinmarketcap.apiKey = 'cmc-rotated-key'; // simulates a config.reload()
+      await coinmarketcap.fetchPrice('XLM');
+
+      expect(mockAxiosCreate).toHaveBeenCalledTimes(2);
+      expect(mockAxiosCreate).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          headers: expect.objectContaining({ 'X-CMC_PRO_API_KEY': 'cmc-rotated-key' }),
+        }),
+      );
     });
   });
 

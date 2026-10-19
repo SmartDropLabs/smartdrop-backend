@@ -48,6 +48,7 @@ const crypto = require('crypto');
 const cache = require('../services/cache');
 const logger = require('../logger');
 const webhookRepository = require('./webhookRepository');
+const dataRetention = require('../services/dataRetention');
 
 const RETRY_QUEUE_KEY = 'webhooks:retries';
 const RECENT_DELIVERIES_LIMIT = 100;
@@ -162,6 +163,8 @@ async function create({ webhook_id, event_id, event_type, trace_id, request_id }
   // the ids they can actually return.
   queueIndexWrite(multi, statusIndexKey(webhook_id, record.status), score, id);
   await multi.exec();
+  // Apply data retention policy (#567)
+  await dataRetention.applyDeliveryRetention(id);
   return record;
 }
 
@@ -200,6 +203,8 @@ async function update(id, patch) {
     );
   }
   await multi.exec();
+  // Apply data retention policy (#567)
+  await dataRetention.applyDeliveryRetention(id);
   return next;
 }
 

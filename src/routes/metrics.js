@@ -1,11 +1,17 @@
 'use strict';
 
+/**
+ * Metrics Router (#467).
+ * Connects Express router with the Prometheus text exporter in src/metrics/.
+ */
+
 const express = require('express');
 const cache = require('../services/cache');
 const eventStore = require('../indexer/eventStore');
 const indexerPoller = require('../indexer/runtime');
 const webhookRepo = require('../repositories/webhookRepository');
 const deliveryRepo = require('../repositories/deliveryRepository');
+const { defaultPoolMonitor } = require('../database');
 
 const router = express.Router();
 
@@ -96,13 +102,26 @@ async function metricsHandler(_req, res) {
     lines.push('# TYPE redis_connected gauge');
     lines.push(`redis_connected ${redisConnected ? 1 : 0}`);
 
+    // Database connection pool metrics (#520)
+    const poolProm = defaultPoolMonitor.toPrometheusMetrics();
+    if (poolProm) {
+      lines.push(poolProm.trim());
+    }
+
     res.setHeader('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
     res.send(lines.join('\n') + '\n');
   } catch (err) {
     res.status(500).send('# Error generating metrics\n');
   }
-}
+);
 
 router.get('/metrics', metricsHandler);
 
-module.exports = { router, requestMetricsMiddleware, incCounter, counters };
+module.exports = {
+  router,
+  metricsHandler,
+  requestMetricsMiddleware,
+  incCounter,
+  counters,
+  registry,
+};

@@ -41,7 +41,7 @@ function isTriggered(alert, priceUsd) {
 }
 
 async function create(data) {
-  const { asset, type, threshold_usd, webhook_url, webhook_secret, repeat } = data;
+  const { asset, type, threshold_usd, webhook_url, webhook_secret, repeat, owner_ip } = data;
 
   const id = generateId();
 
@@ -59,6 +59,7 @@ async function create(data) {
     webhook_url,
     webhook_secret,
     repeat: repeat === true,
+    owner_ip: owner_ip || null,
     created_at: new Date().toISOString(),
     last_fired_at: null,
     baseline_price: baselinePrice,
@@ -102,6 +103,10 @@ async function listPaginated({ offset = 0, limit = 20 } = {}) {
     alerts: alerts.filter(Boolean),
     total,
   };
+}
+
+async function get(id) {
+  return cache.get(alertKey(id));
 }
 
 async function remove(id) {
@@ -249,5 +254,5 @@ async function backfillAssetIndex() {
 }
 
 module.exports = {
-  create, list, listPaginated, remove, evaluateForAsset, evaluateAll, backfillAssetIndex,
+  create, get, list, listPaginated, remove, evaluateForAsset, evaluateAll, backfillAssetIndex,
 };

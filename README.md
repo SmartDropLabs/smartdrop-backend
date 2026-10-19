@@ -249,7 +249,12 @@ The application reads configurations from the `.env` file at the root.
 | `PRICE_STALE_THRESHOLD` | Stale threshold in minutes | 5 | No |
 | `PRICE_ANOMALY_THRESHOLD` | Anomaly detection threshold % | 10 | No |
 | `ADMIN_API_KEY` | Bootstrap admin bearer token for API key management | undefined | Yes, for protected endpoints |
+| `API_KEY_ROTATION_GRACE_SECONDS` | How long the previous key stays valid after rotation | 0 | No |
 | `LOG_LEVEL` | Logging level | info | No |
+| `API_DOCS_ENABLED` | Serve the OpenAPI specification and Swagger UI at `/api-docs` | true | No |
+| `STATIC_ASSETS_DIR` | Directory served at `/static` when no CDN is configured | public | No |
+| `STATIC_CDN_URL` | CDN origin used to redirect `/static/*` requests | empty | No |
+| `STATIC_ASSETS_MAX_AGE_SECONDS` | Cache lifetime for locally served static assets | 31536000 | No |
 
 | `WEBHOOK_MAX_ATTEMPTS` | Total delivery attempts (initial + retries) | 3 | No |
 | `WEBHOOK_RETRY_BASE_MS` | Base backoff between retries (ms) | 30000 | No |
@@ -282,6 +287,7 @@ The application reads configurations from the `.env` file at the root.
 
 Each price source (`stellar_dex`, `coingecko`, `coinmarketcap`) gets one circuit breaker shared across every watched asset. `CIRCUIT_BREAKER_FAILURE_THRESHOLD` only counts genuine failures for an asset a source is supposed to support (network errors, unexpected empty responses) — a source being asked about an asset it doesn't support at all (e.g. CoinGecko has no mapping for anything but XLM) is filtered out before it ever reaches the breaker, so it can't trip that source offline for the other assets it does support.
 | `ADMIN_API_KEY` | Bootstrap admin bearer token for API key management | empty | Yes, for protected endpoints |
+| `API_KEY_ROTATION_GRACE_SECONDS` | How long the previous key stays valid after rotation | 0 | No |
 | `AIRDROP_CSV_MAX_BYTES` | Maximum recipient CSV upload size in bytes | 5242880 (5 MiB) | No |
 | `AIRDROP_JSON_MAX_BYTES` | Maximum JSON request body size; 2 MiB accommodates 10,000 inline recipients | 2097152 (2 MiB) | No |
 | `AIRDROP_RATELIMIT_WINDOW` | Per-IP airdrop mutation rate-limit window in seconds | 60 | No |
@@ -290,11 +296,48 @@ Each price source (`stellar_dex`, `coingecko`, `coinmarketcap`) gets one circuit
 | `LEASE_TTL_MS` | Leader lease TTL in milliseconds — how long a lease is valid without renewal | 15000 | No |
 | `LEASE_RENEW_INTERVAL_MS` | How often the leader renews its lease (and followers check to acquire) | 5000 | No |
 | `LOG_LEVEL` | Logging level: `debug`, `info`, `warn`, or `error` | info | No |
+| `API_DOCS_ENABLED` | Serve the OpenAPI specification and Swagger UI at `/api-docs` | true | No |
+| `STATIC_ASSETS_DIR` | Directory served at `/static` when no CDN is configured | public | No |
+| `STATIC_CDN_URL` | CDN origin used to redirect `/static/*` requests | empty | No |
+| `STATIC_ASSETS_MAX_AGE_SECONDS` | Cache lifetime for locally served static assets | 31536000 | No |
 | `API_KEY_RATELIMIT_WINDOW_SECONDS` | Per-API-key rate-limit window in seconds | 60 | No |
 | `API_KEY_RATELIMIT_FREE_MAX` | Requests per window for `free`-tier keys | 100 | No |
 | `API_KEY_RATELIMIT_PRO_MAX` | Requests per window for `pro`-tier keys | 1000 | No |
 | `API_KEY_RATELIMIT_ADMIN_MAX` | Requests per window for `admin`-tier keys | 10000 | No |
+| `TRUST_PROXY` | Express trust proxy setting (`true`, `false`, `loopback`, IP/subnet, or hops) | `loopback` in production, `false` otherwise | No |
+| `ENFORCE_HTTPS` | Enforce HTTPS redirects (308) and reject state-changing plain HTTP | `true` in production, `false` otherwise | No |
+| `HTTPS_HOST` | Fixed target public host for HTTPS redirection | empty | No |
+| `ALLOWED_HOSTS` | Comma-separated allowlist of valid redirection hosts | empty | No |
+| `HSTS_MAX_AGE_SECONDS` | HSTS max-age duration in seconds | 31536000 | No |
+| `HSTS_INCLUDE_SUBDOMAINS` | Include subdomains in HSTS header | true | No |
+| `HSTS_PRELOAD` | Opt-in to HSTS preloading | false | No |
+| `SESSION_ABSOLUTE_LIFETIME_SECONDS` | Absolute maximum session lifetime in seconds (activity cannot extend) | 86400 (24h) | No |
+| `SESSION_IDLE_TIMEOUT_SECONDS` | Inactivity timeout in seconds that activity extends | 1800 (30m) | No |
+| `SESSION_ACTIVITY_THROTTLE_SECONDS` | Minimum interval in seconds between session store activity writes | 60 | No |
+| `SESSION_CLOCK_SKEW_SECONDS` | Clock-skew leeway in seconds for expiry comparison | 60 | No |
+| `CSRF_SECRET` | Secret key for signing per-session CSRF tokens (HMAC-SHA256) | auto-generated | No |
+| `METRICS_ENABLED` | Enable Prometheus text exposition endpoint at `/metrics` | true | No |
+| `METRICS_AUTH_TOKEN` | Bearer token / password for authenticating `/metrics` scrapes | empty | No |
+| `METRICS_ALLOWED_IPS` | Comma-separated list of IP addresses allowed to scrape `/metrics` | empty | No |
 
+
+---
+
+## Time handling
+
+All instants are created, computed, compared and stored in **UTC**, and serialized in API responses as ISO-8601 strings with a `Z` suffix (e.g. `2026-06-30T19:00:00.000Z`). Local time is a presentation concern: clients convert a UTC value to their own zone. The server does not accept or emit local times.
+
+- Shared helpers live in `src/utils/dates.js` (`nowIso`, `toIso`, `startOfUtcDay`, `utcDayKey`).
+- Day-boundary logic (daily limits, expiries, "today" queries) must use `utcDayKey()`/`startOfUtcDay()` — never a slice of a local-time string.
+- PostgreSQL sessions are pinned to UTC (`SET TIME ZONE 'UTC'` on every pooled connection), and every timestamp column is `TIMESTAMPTZ`.
+- Log file rotation (`winston-daily-rotate-file`) uses `utc: true`, so filenames and retention are bucketed by UTC date regardless of the host's time zone.
+- `TZ` is set to `UTC` by default (in `Dockerfile`/`docker-compose`, and defensively at process start when unset). This is **not** the fix for time-zone bugs — it only provides a stable default, and the code stays correct if it is overridden. `TZ` is reported in the startup banner as `time_zone`.
+
+Regression coverage: `test/timezone.test.js` runs the date helpers under `TZ=UTC`, `TZ=America/New_York` and `TZ=Asia/Tokyo` and asserts identical UTC results.
+
+| Variable | Description | Default | Required |
+| --- | --- | --- | --- |
+| `TZ` | Process time zone. The app sets `UTC` when unset and warns if set to a non-UTC zone. | `UTC` | No |
 
 ---
 
@@ -485,6 +528,30 @@ service, and asserts that the production guard blocks destructive migrations.
 
 ---
 
+## API Documentation
+
+Interactive OpenAPI documentation is served at `/api-docs`. The raw
+specification is also available as YAML at `/api-docs/openapi.yaml` and as
+JSON at `/api-docs/openapi.json`, so clients and code generators can consume
+it without scraping the UI.
+
+Set `API_DOCS_ENABLED=false` to disable all documentation routes in
+deployments where the API surface should not be discoverable.
+
+## Static Assets
+
+Files under `STATIC_ASSETS_DIR` (default `public/`) are served at `/static`
+with a long-lived immutable cache policy. Set `STATIC_CDN_URL` to the CDN
+origin to take the application out of the asset path: requests to `/static/*`
+are then redirected to the CDN instead of being served locally. The directory
+is still used in development, where no CDN is configured.
+
+Every API response carries a restrictive `Content-Security-Policy` header that
+denies browser resources by default. The `/api-docs` route overrides it with a
+policy that permits the inline assets Swagger UI needs.
+
+---
+
 ## API Endpoints
 
 ### Pagination
@@ -569,10 +636,24 @@ The bootstrap admin key is compared using constant-time checks over fixed-length
 GET /api/v1/keys
 POST /api/v1/keys
 DELETE /api/v1/keys/:id
+POST /api/v1/keys/:id/rotate
 
 ```
 
-`POST /api/v1/keys` returns the raw `api_key` only once. Stored keys are hashed with SHA-256 and listed with metadata only (`label`, `created_at`, `last_used_at`, `scopes`, `tier`, and `key_prefix`).
+`POST /api/v1/keys` and `POST /api/v1/keys/:id/rotate` return the raw `api_key` only once. Keys are listed with metadata only (`label`, `created_at`, `last_used_at`, `scopes`, `tier`, and `key_prefix`).
+
+#### Key storage
+
+Raw API keys are never persisted. A breach of the key store exposes only digests that cannot be used to authenticate.
+
+- Each key is 32 random bytes (64 hex characters) from `crypto.randomBytes`.
+- Only the SHA-256 digest (`key_hash`) and an 8-character display prefix (`key_prefix`) are stored. The record lives in Redis under `api_key:<id>`, with a `api_key_hash:<digest>` index for lookup.
+- On each request the presented bearer token is hashed and resolved through that index; the plaintext is never compared or stored.
+- `key_hash` is stripped from every API response, including list, revoke, and rotate.
+- The `api_key_audit_logs` table records only `key_id`, never key material.
+- Rotation issues a new key and deletes the old record and its hash index in one Redis transaction, so the old key stops working immediately.
+
+A fast unsalted hash is deliberate: keys carry 256 bits of entropy, so brute-forcing a digest is infeasible, and a slow hash such as bcrypt would add cost to every authenticated request without adding protection. A lost key cannot be recovered — rotate it instead.
 
 #### Per-key rate limit tiers
 

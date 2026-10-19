@@ -1,6 +1,15 @@
 "use strict";
 
+// Issue #494 — establish a UTC default for the process before anything
+// formats a date. This is a defensive default only: every timestamp the app
+// emits is built from toISOString()/UTC math (src/utils/dates.js), so
+// behaviour must not depend on this line. The primary fix is the TZ=UTC
+// environment in Dockerfile/docker-compose; see README.md#time-handling.
+const { assertUtcTimeZone } = require("./utils/dates");
+const timeZoneState = assertUtcTimeZone();
+
 const express = require("express");
+const config = require("./config");
 const compression = require("compression");
 const helmet = require("helmet");
 const config = require("./config");
@@ -11,9 +20,10 @@ const priceOracle = require("./services/priceOracle");
 const priceRefreshJob = require("./jobs/priceRefresh");
 const webhookRetryWorker = require("./jobs/webhookRetryWorker");
 const airdropExpiryJob = require("./jobs/airdropExpiry");
+const jobQueue = require("./services/jobQueue");
 const { createLeaderElection } = require("./services/leaderElection");
 const { makeLeaderAwareJob } = require("./jobs/leaderAwareJob");
-const { warmCache } = require("./startup/cacheWarm");
+const { warmCacheInBackground, getWarmStatus } = require("./startup/cacheWarm");
 const buildCorsMiddleware = require("./middleware/cors");
 const {
   buildRateLimit,
@@ -21,14 +31,23 @@ const {
 } = require("./middleware/rateLimit");
 const { requestIdMiddleware } = require("./middleware/requestId");
 const { headerSecurityMiddleware } = require("./middleware/headerSecurity");
-const { docsCspMiddleware } = require("./middleware/csp");
+const {
+  API_CSP_DIRECTIVES,
+  docsCspMiddleware,
+} = require("./middleware/csp");
 const requestLoggerMiddleware = require("./middleware/requestLogger");
+const { createStaticAssetsMiddleware } = require("./middleware/staticAssets");
 const {
   requireApiKey,
   attachApiKey,
   auditApiKeyUsage,
 } = require("./middleware/auth");
+const {
+  csrfProtectionMiddleware,
+  csrfTokenHandler,
+} = require("./middleware/csrf");
 const { errorHandler, notFoundHandler } = require("./middleware/errorHandler");
+const { jsonReplacer } = require("./utils/serialization");
 const { checkDatabase } = require("./services/dbHealth");
 const pricesRouter = require("./routes/prices");
 const alertsRouter = require("./routes/alerts");
@@ -42,6 +61,7 @@ const {
   router: metricsRouter,
   requestMetricsMiddleware,
 } = require("./routes/metrics");
+const { httpsEnforcementMiddleware } = require("./middleware/httpsEnforcement");
 const healthRouter = require("./health");
 
 const priceWebSocket = require("./ws/priceWebSocket");
@@ -78,6 +98,14 @@ const wrappedAirdropExpiryJob = makeLeaderAwareJob({
 });
 
 const app = express();
+
+// Issue #496 — secure cookies require trust proxy to reflect original
+// protocol when behind a load balancer/reverse proxy. Default is `false`
+// (explicit, to avoid rate-limit/IP spoofing if ever used). The config
+// exposes TRUST_PROXY; enable only if the deployment is proxy-fronted.
+if (typeof config.trustProxy === 'boolean') {
+  app.set('trust proxy', config.trustProxy);
+}
 let server = {
   close(callback) {
     if (callback) callback();
@@ -88,26 +116,21 @@ app.use(headerSecurityMiddleware);
 app.use(requestIdMiddleware);
 app.use(requestLoggerMiddleware);
 app.use(requestMetricsMiddleware);
-app.use(buildRateLimit({ windowSeconds: 5, max: 10, keyPrefix: 'auth' }));
-app.use(compression({ threshold: 0 }));
-app.use(helmet());
+// #468 — Enforce HTTPS early before payload parsing or route processing.
+app.use(httpsEnforcementMiddleware);
 app.use(compression());
 app.use(
   helmet({
     contentSecurityPolicy: {
-      directives: {
-        defaultSrc: ["'self'"],
-        scriptSrc: ["'self'"],
-        styleSrc: ["'self'"],
-        imgSrc: ["'self'", "data:"],
-        objectSrc: ["'none'"],
-        baseUri: ["'self'"],
-        frameAncestors: ["'none'"],
-      },
+      useDefaults: false,
+      directives: API_CSP_DIRECTIVES,
     },
     referrerPolicy: { policy: "strict-origin-when-cross-origin" },
     xContentTypeOptions: true,
     xDownloadOptions: true,
+    // #468: HSTS is managed exclusively in httpsEnforcementMiddleware so it is
+    // sent ONLY on secure responses and matches configured max-age/subdomains/preload.
+    hsts: false,
   })
 );
 app.use(buildCorsMiddleware(config.corsAllowedOrigins));
@@ -214,6 +237,9 @@ app.get("/health", healthRateLimit, async (req, res) => {
       draining: subscriptionManager.isDraining,
       drain_stats: subscriptionManager.drainStats,
     },
+    // Issue #495 — cache warm status is an optimization, not a readiness
+    // dependency (warming runs in the background).
+    cache_warm: getWarmStatus(),
     jobs: {
       price_refresh: {
         healthy: priceRefreshHealth.healthy,
@@ -288,10 +314,16 @@ const requestValidationMiddleware = require("./middleware/requestValidation");
 
 app.use(globalRateLimit);
 app.use(requestValidationMiddleware);
+app.use("/static", createStaticAssetsMiddleware(config.staticAssets));
+
+// #465 — Global CSRF protection for state-changing requests and CSRF token endpoint
+app.get("/csrf-token", csrfTokenHandler);
+app.use(csrfProtectionMiddleware);
 
 // ==================== API ROUTING & VERSIONING (#460) ====================
 // Build the core v1 API router.
 const apiV1Router = express.Router();
+apiV1Router.get("/csrf-token", csrfTokenHandler);
 apiV1Router.use(attachApiKey());
 apiV1Router.use(auditApiKeyUsage());
 apiV1Router.use(apiKeyLimit);
@@ -389,6 +421,7 @@ function shutdown(signal) {
 
     // Stop non-leader-elected services
     await indexerPoller.stop();
+    jobQueue.stop();
 
     // Gracefully drain WebSocket connections: broadcast close frame,
     // then force-close any still open after the drain timeout (issue #248).
@@ -452,10 +485,24 @@ function logStartupBanner() {
     indexer_enabled: config.indexer.enabled,
     instance_id: config.leaderElection.instanceId,
     log_level: process.env.LOG_LEVEL || config.nodeEnv,
+    // Issue #494 — surface the process time zone so an operator can confirm
+    // the UTC default is in effect (or that they overrode it deliberately).
+    time_zone: process.env.TZ,
   });
 }
 
 async function startServer() {
+  // Issue #494 — report a deliberately overridden, non-UTC process time zone.
+  // The code stays UTC-correct regardless (all instants use ISO-8601 Z), but
+  // a non-UTC default is worth a warning: anything that later relies on the
+  // environment default rather than the shared helpers will drift.
+  if (timeZoneState.isNonUtc) {
+    logger.warn(
+      "Process time zone is not UTC; dates are still handled in UTC (issue #494)",
+      { time_zone: timeZoneState.timeZone },
+    );
+  }
+
   // Redis being unreachable at boot must not stop the process from coming up
   // (#342): everything below degrades to "no cached state" and recovers on
   // its own once ioredis reconnects. Say so once, explicitly, so an operator
@@ -480,13 +527,24 @@ async function startServer() {
     );
   }
 
-  try {
-    await warmCache(config.watchedAssets);
-  } catch (err) {
+  // Issue #495 — do NOT block listen on cache warming. Warm in the
+  // background with bounding (max entries, concurrency, per-entry timeout),
+  // Redis lock so only one replica warms at a time, jitter and TTL.
+  // The server can accept traffic immediately; /health exposes cache_warm.
+  warmCacheInBackground({
+    assets: config.watchedAssets,
+    timeoutMs: config.cacheWarm.timeoutMs,
+    entryTimeoutMs: config.cacheWarm.entryTimeoutMs,
+    maxEntries: config.cacheWarm.maxEntries,
+    concurrency: config.cacheWarm.concurrency,
+    jitterMs: config.cacheWarm.jitterMs,
+    lockTtlMs: config.cacheWarm.lockTtlMs,
+    enabled: config.cacheWarm.enabled,
+  }).catch((err) => {
     logger.warn("Cache warm failed; starting server anyway", {
       error: err.message,
     });
-  }
+  });
 
   server = app.listen(config.port, () => {
     logStartupBanner();
@@ -503,6 +561,9 @@ async function startServer() {
     // Indexer poller is not leader-elected (it uses its own cursor-based
     // persistence in Redis and is safe for multiple replicas to run).
     indexerPoller.start();
+
+    // #510 — start async job queue for background task processing
+    jobQueue.start();
   });
 
   return server;

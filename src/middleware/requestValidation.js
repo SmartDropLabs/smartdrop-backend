@@ -6,6 +6,9 @@ const AppError = require('../errors/AppError');
 // preserving legitimate whitespace: \t (0x09), \n (0x0A), \r (0x0D).
 const FORBIDDEN_CONTROL_CHARS_RE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/;
 const PATH_TRAVERSAL_RE = /(?:^|[/\\])\.\.(?:[/\\]|$)|%2e%2e|\.\.%2f|\.\.%5c/i;
+const MULTIPART_UPLOAD_PATHS = [
+  /^\/api\/v1\/airdrops\/[^/]+\/recipients\/?$/,
+];
 
 function hasForbiddenControlChars(val) {
   if (typeof val === 'string') {
@@ -69,6 +72,9 @@ function hasPathTraversal(val) {
  * 5. Guards against path traversal in route parameters and query strings
  * 6. Ensures legitimate special characters (names with apostrophes, passwords,
  *    Stellar addresses, base64 payloads, and SQL strings) survive unmodified.
+ *
+ * Multipart bodies are accepted only on the recipient upload route; every
+ * other body-bearing endpoint continues to require JSON.
  */
 function requestValidationMiddleware(req, res, next) {
   const method = req.method.toUpperCase();
@@ -89,7 +95,11 @@ function requestValidationMiddleware(req, res, next) {
       }
     } else {
       const normalizedContentType = contentType.split(';')[0].trim().toLowerCase();
-      if (normalizedContentType !== 'application/json' && normalizedContentType !== 'multipart/form-data') {
+      const isUploadPath = MULTIPART_UPLOAD_PATHS.some((pattern) => pattern.test(req.path));
+      const isAllowed = normalizedContentType === 'application/json'
+        || (normalizedContentType === 'multipart/form-data' && isUploadPath);
+
+      if (!isAllowed) {
         return next(new AppError(
           'VALIDATION_ERROR',
           `Unsupported Content-Type: ${contentType}`,

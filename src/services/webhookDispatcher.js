@@ -553,6 +553,21 @@ async function deliverToWebhook(
   sequence,
 ) {
   cacheWebhook(webhook);
+  // #509 — idempotency guard: use SET NX to ensure the same event is
+  // delivered to the same webhook at most once. Prevents duplicate
+  // processing when the same event is dispatched multiple times.
+  const idempotencyKey = `webhook:delivered:${webhook.id}:${eventId}`;
+  const redis = cache.getClient();
+  const claimed = await redis.set(idempotencyKey, Date.now(), 'EX', 86400, 'NX');
+  if (!claimed) {
+    logger.info('Skipping duplicate webhook delivery', {
+      webhook_id: webhook.id,
+      event_id: eventId,
+      event_type: eventType,
+    });
+    return null;
+  }
+
   // Propagate the originating request's id onto the delivery record so a
   // webhook that fires hours later on a retry is still traceable back to
   // the API call that caused it (issue #250).

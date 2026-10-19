@@ -11,6 +11,7 @@ const { probeReachability } = require("../services/webhook");
 const { assertPublicTarget } = require("../services/ssrfGuard");
 const { idempotencyMiddleware } = require("../services/idempotency");
 const { requireCsrfHeader } = require("../middleware/csrf");
+const { requireResourcePermission } = require("../middleware/permissions");
 const buildRateLimit = require("../middleware/rateLimit");
 const { routeTimeout } = require("../middleware/timeout");
 const AppError = require("../errors/AppError");
@@ -211,6 +212,18 @@ router.delete(
   "/webhooks/:id",
   requireCsrfHeader,
   validateRouteIdParams,
+  // #508 — verify resource ownership before deletion
+  requireResourcePermission({
+    resourceName: 'webhook',
+    getResourceOwner: async (req) => {
+      const webhook = await webhookRepo.findById(req.params.id);
+      return webhook?.owner_ip || null;
+    },
+    isAllowed: (req, ownerId) => {
+      const clientIp = clientIpFromRequest(req);
+      return clientIp === ownerId;
+    },
+  }),
   async (req, res, next) => {
     try {
       const deleted = await webhookRepo.remove(req.params.id);

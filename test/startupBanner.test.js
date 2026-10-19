@@ -20,6 +20,18 @@ jest.mock("../src/logger", () => mockLogger);
 const mockWarmCache = jest.fn();
 jest.mock("../src/startup/cacheWarm", () => ({
   warmCache: (...args) => mockWarmCache(...args),
+  warmCacheInBackground: jest.fn().mockResolvedValue({}),
+  getWarmStatus: jest.fn().mockReturnValue({
+    state: 'idle',
+    enabled: true,
+    reason: null,
+    lock_skipped: false,
+    started_at: null,
+    finished_at: null,
+    duration_ms: null,
+    summary: null,
+    error: null,
+  }),
 }));
 
 const {

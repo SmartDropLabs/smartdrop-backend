@@ -32,7 +32,12 @@ function afterCreateUtcConnection(conn, done) {
 
 function getDb(overrideConfig = {}) {
   if (!db) {
-    const pool = { min: 2, max: 10, afterCreate: afterCreateUtcConnection, ...(overrideConfig.pool || {}) };
+    const pool = {
+      min: overrideConfig.pool?.min ?? config.database.pool.min ?? 2,
+      max: overrideConfig.pool?.max ?? config.database.pool.max ?? 10,
+      afterCreate: afterCreateUtcConnection,
+      ...(overrideConfig.pool || {}),
+    };
     db = knexFactory({
       client: 'pg',
       connection: overrideConfig.connection || config.databaseUrl,

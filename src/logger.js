@@ -109,4 +109,23 @@ const logger = winston.createLogger({
   exitOnError: false
 });
 
+// #524 — Runtime log level configuration
+const VALID_LEVELS = ['debug', 'info', 'warn', 'error'];
+
+function setLogLevel(level) {
+  if (!VALID_LEVELS.includes(level)) {
+    throw new Error(`Invalid log level: ${level}. Must be one of: ${VALID_LEVELS.join(', ')}`);
+  }
+  logger.level = level;
+  logger.info(`Log level changed to ${level}`);
+  return level;
+}
+
+function getCurrentLogLevel() {
+  return logger.level;
+}
+
 module.exports = logger;
+module.exports.setLogLevel = setLogLevel;
+module.exports.getCurrentLogLevel = getCurrentLogLevel;
+module.exports.VALID_LEVELS = VALID_LEVELS;

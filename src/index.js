@@ -12,7 +12,6 @@ const express = require("express");
 const config = require("./config");
 const compression = require("compression");
 const helmet = require("helmet");
-const config = require("./config");
 const { version: appVersion } = require("../package.json");
 const logger = require("./logger");
 const cache = require("./services/cache");
@@ -65,6 +64,8 @@ const {
   requestMetricsMiddleware,
 } = require("./routes/metrics");
 const { httpsEnforcementMiddleware } = require("./middleware/httpsEnforcement");
+const { negotiateVersion } = require("./middleware/apiVersion");
+const { DataAccessAuditor } = require("./middleware/dataAccessAudit");
 const healthRouter = require("./health");
 const { registerJob } = require("./health/jobMonitor");
 
@@ -333,8 +334,10 @@ app.use(csrfProtectionMiddleware);
 // Build the core v1 API router.
 const apiV1Router = express.Router();
 apiV1Router.get("/csrf-token", csrfTokenHandler);
+apiV1Router.use(negotiateVersion);
 apiV1Router.use(attachApiKey());
 apiV1Router.use(auditApiKeyUsage());
+apiV1Router.use(DataAccessAuditor.middleware("read", (req) => req.baseUrl || req.path));
 apiV1Router.use(apiKeyLimit);
 apiV1Router.use(globalApiLimit);
 apiV1Router.use(pricesRouter);

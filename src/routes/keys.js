@@ -4,6 +4,7 @@ const { validate } = require("../middleware/validate");
 const apiKeys = require("../services/apiKeys");
 const logger = require("../logger");
 const AppError = require("../errors/AppError");
+const { routeTimeout } = require("../middleware/timeout");
 const {
   keyCreateBodySchema,
   keyRotateBodySchema,
@@ -56,6 +57,7 @@ router.delete("/keys/:id", validateRouteIdParams, async (req, res, next) => {
 
 router.post(
   "/keys/:id/rotate",
+  routeTimeout(),
   validateRouteIdParams,
   validate(keyRotateBodySchema),
   async (req, res, next) => {

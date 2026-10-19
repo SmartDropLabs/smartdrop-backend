@@ -370,6 +370,13 @@ app.use("/api/v1", apiV1Router);
 function legacyDeprecationMiddleware(req, res, next) {
   res.setHeader("Deprecation", "true");
   res.setHeader("Sunset", "Fri, 01 Jan 2027 00:00:00 GMT");
+  // #531 — Deprecation/Sunset alone say "stop using this" but not how;
+  // Link: rel="deprecation" is the standard companion header pointing
+  // callers at migration guidance instead of leaving them to guess.
+  res.setHeader(
+    "Link",
+    '<https://github.com/SmartDropLabs/smartdrop-backend/blob/main/CHANGELOG.md>; rel="deprecation"',
+  );
   logger.warn("Legacy unversioned API path accessed", {
     path: req.originalUrl,
     method: req.method,

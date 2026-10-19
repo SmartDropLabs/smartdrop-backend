@@ -1,8 +1,9 @@
 const crypto = require('crypto');
 const cache = require('./cache');
 const logger = require('../logger');
-const { Horizon } = require('stellar-sdk');
+const { Horizon } = require('@stellar/stellar-sdk');
 const config = require('../config');
+const { addRequestIdHeaderInterceptor } = require('../middleware/requestId');
 
 const IDS_KEY = 'airdrops:ids';
 
@@ -24,7 +25,9 @@ function generateId() {
   return `drop_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
 }
 
-const horizon = new Horizon.Server(config.stellar.horizonUrl);
+const horizon = addRequestIdHeaderInterceptor(
+  new Horizon.Server(config.stellar.horizonUrl)
+);
 
 // getCurrentLedger() is a live Horizon call. Callers that need to check many
 // airdrops in quick succession (the expiry reconciliation job, in
@@ -32,8 +35,14 @@ const horizon = new Horizon.Server(config.stellar.horizonUrl);
 // airdrop per cycle; cache the result briefly so bursts of calls within the
 // same window reuse one ledger read instead of hammering Horizon, the same
 // rate-limit concern already applied to CoinGecko/CoinMarketCap elsewhere.
-let cachedLedger = null;
-let cachedLedgerAt = 0;
+const { CircuitBreaker } = require('../utils/circuitBreaker');
+
+const horizonBreaker = new CircuitBreaker('stellar-horizon', {
+  failureThreshold: 3,
+  timeoutMs: 30000,
+  requestTimeoutMs: 10000,
+  windowMs: 60000,
+});
 
 async function getCurrentLedger() {
   const now = Date.now();
@@ -41,14 +50,30 @@ async function getCurrentLedger() {
     return cachedLedger;
   }
 
-  const ledger = await horizon.ledgers().order('desc').limit(1).call();
+  const ledger = await horizonBreaker.execute(() =>
+    horizon.ledgers().order('desc').limit(1).call()
+  );
   cachedLedger = ledger.records[0].sequence;
   cachedLedgerAt = now;
   return cachedLedger;
 }
 
 async function create(data) {
-  const { name, description, asset, asset_issuer, total_amount, expiry_ledger, recipients = [] } = data;
+  const { name, description, asset, asset_issuer, total_amount, expiry_ledger, contract_airdrop_id, recipients = [] } = data;
+
+  // #290 — Validate that total_amount matches the sum of recipient amounts.
+  // Without this check, an airdrop could be created with a total_amount that
+  // doesn't cover all recipients, leading to insufficient on-chain funds.
+  if (recipients.length > 0 && total_amount != null) {
+    const recipientSum = recipients.reduce((sum, r) => sum + (Number(r.amount) || 0), 0);
+    const total = Number(total_amount);
+    if (Math.abs(total - recipientSum) > 1e-7) {
+      throw new Error(
+        `total_amount (${total_amount}) does not match the sum of recipient amounts (${recipientSum})`,
+      );
+    }
+  }
+
   const id = generateId();
 
   const airdrop = {
@@ -59,19 +84,32 @@ async function create(data) {
     asset_issuer,
     total_amount,
     expiry_ledger,
+    // Linking field: once the on-chain airdrop ID is known (e.g. after the
+    // Soroban contract is invoked externally), populate this so the REST
+    // record can be correlated with indexer-observed on-chain state (#122).
+    contract_airdrop_id: contract_airdrop_id || null,
     status: 'draft',
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   };
 
   const redis = cache.getClient();
-  await cache.set(airdropKey(id), airdrop);
-  await redis.zadd(IDS_KEY, Date.now(), id);
+  // One MULTI/EXEC transaction instead of separate round trips (issue
+  // #390) — a crash between cache.set and zadd used to leave an airdrop
+  // record with no entry in IDS_KEY (invisible to list/scanIds, so it
+  // would never be found again), or an id in IDS_KEY with no backing
+  // record (a phantom entry list() would still return and try to re-read
+  // as null).
+  const multi = redis.multi();
+  multi.set(airdropKey(id), JSON.stringify(airdrop));
+  multi.zadd(IDS_KEY, Date.now(), id);
 
   if (recipients.length > 0) {
-    await redis.rpush(recipientsKey(id), ...recipients.map((r) => JSON.stringify(r)));
-    await redis.sadd(recipientAddressSetKey(id), ...recipients.map((r) => r.address));
+    multi.rpush(recipientsKey(id), ...recipients.map((r) => JSON.stringify(r)));
+    multi.sadd(recipientAddressSetKey(id), ...recipients.map((r) => r.address));
   }
+
+  await multi.exec();
 
   return airdrop;
 }
@@ -150,7 +188,10 @@ async function list(page = 1, limit = 20) {
   const start = (page - 1) * limit;
   const end = start + limit - 1;
   const paginatedIds = await redis.zrevrange(IDS_KEY, start, end);
-  const airdrops = await Promise.all(paginatedIds.map((id) => cache.get(airdropKey(id))));
+  if (paginatedIds.length === 0) {
+    return { airdrops: [], total };
+  }
+  const airdrops = await cache.mget(paginatedIds.map(airdropKey));
 
   return { airdrops: airdrops.filter(Boolean), total };
 }
@@ -163,12 +204,20 @@ async function update(id, data) {
   const airdrop = await get(id);
   if (!airdrop) return null;
 
-  const { name, description, expiry_ledger } = data;
+  // Terminal statuses cannot be updated — once completed, failed, expired,
+  // or cancelled, the airdrop's lifecycle is over (#281).
+  const terminalStatuses = ['completed', 'failed', 'expired', 'cancelled'];
+  if (terminalStatuses.includes(airdrop.status)) {
+    return airdrop;
+  }
+
+  const { name, description, expiry_ledger, contract_airdrop_id } = data;
   const updated = {
     ...airdrop,
     name: name !== undefined ? name : airdrop.name,
     description: description !== undefined ? description : airdrop.description,
     expiry_ledger: expiry_ledger !== undefined ? expiry_ledger : airdrop.expiry_ledger,
+    contract_airdrop_id: contract_airdrop_id !== undefined ? contract_airdrop_id : airdrop.contract_airdrop_id,
     updated_at: new Date().toISOString(),
   };
 
@@ -181,10 +230,18 @@ async function remove(id) {
   const existing = await get(id);
   if (!existing) return null;
 
-  await cache.del(airdropKey(id));
-  await cache.del(recipientsKey(id));
-  await cache.del(recipientAddressSetKey(id));
-  await redis.zrem(IDS_KEY, id);
+  // One MULTI/EXEC transaction instead of four separate round trips (issue
+  // #305) — a crash partway through used to leave a partially-deleted
+  // airdrop: e.g. the main record and recipients list gone but the id still
+  // in IDS_KEY (a phantom entry list() would still return and try to
+  // re-read as null), or the reverse (a dangling recipients/address-set key
+  // with no reachable parent record to ever clean it up again).
+  await redis.multi()
+    .del(airdropKey(id))
+    .del(recipientsKey(id))
+    .del(recipientAddressSetKey(id))
+    .zrem(IDS_KEY, id)
+    .exec();
   return existing;
 }
 
@@ -192,7 +249,10 @@ async function cancel(id) {
   const airdrop = await get(id);
   if (!airdrop) return null;
 
-  if (airdrop.status === 'cancelled') {
+  // Terminal statuses cannot be cancelled — once completed, failed, or
+  // expired, the airdrop's lifecycle is over (#280).
+  const terminalStatuses = ['completed', 'failed', 'expired', 'cancelled'];
+  if (terminalStatuses.includes(airdrop.status)) {
     return airdrop;
   }
 
@@ -212,23 +272,41 @@ async function addRecipients(airdropId, recipients) {
   const redis = cache.getClient();
   const addresses = recipients.map((r) => r.address);
 
-  // SADD returns 1 for each newly added member, 0 for duplicates.
-  // By comparing the added count against the total we identify which
-  // addresses were already stored from the initial POST /airdrops body
-  // or a prior POST /airdrops/:id/recipients call.
-  const addedCounts = await Promise.all(
-    addresses.map((addr) => redis.sadd(recipientAddressSetKey(airdropId), addr)),
-  );
+  // SADD returns 1 for each newly added member, 0 for duplicates. Queued on
+  // a single MULTI/EXEC (issue #312) instead of Promise.all-ing N separate
+  // SADD calls: the separate calls were each an independent round trip that
+  // could interleave with another concurrent request's SADDs on the same
+  // key, so two overlapping addRecipients() calls for the same address
+  // could each observe "newly added" (both read 1) and double-append it to
+  // the recipients list below. MULTI/EXEC runs the whole batch as one
+  // atomic, uninterleaved unit, and as a bonus is a single round trip
+  // instead of N.
+  const multi = redis.multi();
+  for (const addr of addresses) {
+    multi.sadd(recipientAddressSetKey(airdropId), addr);
+  }
+  const results = await multi.exec();
+  const addedCounts = results.map(([err, count]) => {
+    if (err) throw err;
+    return count;
+  });
 
-  const duplicates = addresses.filter((_, i) => addedCounts[i] === 0);
-  if (duplicates.length > 0) {
-    // Roll back the addresses we just added so the set stays consistent.
-    await redis.srem(recipientAddressSetKey(airdropId), ...addresses.filter((_, i) => addedCounts[i] === 1));
-    return duplicates;
+  const newAddresses = [];
+  const duplicates = [];
+
+  for (let i = 0; i < addresses.length; i++) {
+    if (addedCounts[i] === 1) {
+      newAddresses.push(recipients[i]);
+    } else {
+      duplicates.push(addresses[i]);
+    }
   }
 
-  await redis.rpush(recipientsKey(airdropId), ...recipients.map((r) => JSON.stringify(r)));
-  return [];
+  if (newAddresses.length > 0) {
+    await redis.rpush(recipientsKey(airdropId), ...newAddresses.map((r) => JSON.stringify(r)));
+  }
+
+  return duplicates;
 }
 
 // Returns { recipients, total } — see list()'s comment above.

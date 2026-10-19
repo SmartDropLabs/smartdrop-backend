@@ -2,12 +2,17 @@
 
 const express = require('express');
 const request = require('supertest');
+const { createCacheMock } = require('./helpers/cacheMock');
+
+const mockHelper = createCacheMock();
+const { reset } = mockHelper;
 
 const mockGetAirdropStatus = jest.fn();
 const mockGetAirdropRecipients = jest.fn();
 const mockGetRecipientClaims = jest.fn();
 const mockGetStats = jest.fn();
 
+jest.mock('../src/services/cache', () => mockHelper.cacheMock);
 jest.mock('../src/indexer/eventStore', () => ({
   getAirdropStatus: mockGetAirdropStatus,
   getAirdropRecipients: mockGetAirdropRecipients,
@@ -36,15 +41,18 @@ jest.mock('../src/logger', () => ({
 }));
 
 const indexerRouter = require('../src/routes/indexer');
+const { errorHandler } = require('../src/middleware/errorHandler');
 
 function buildApp() {
   const app = express();
   app.use('/api/v1', indexerRouter);
+  app.use(errorHandler);
   return app;
 }
 
 beforeEach(() => {
   jest.clearAllMocks();
+  reset();
 });
 
 describe('indexer routes', () => {
@@ -121,5 +129,18 @@ describe('indexer routes', () => {
       last_ledger: 42,
       events_count: 7,
     });
+  });
+
+  test('rate limits indexer status to 1 request per second per IP', async () => {
+    mockGetStats.mockResolvedValue({ last_ledger: 42, events_count: 7 });
+
+    const app = buildApp();
+    const first = await request(app).get('/api/v1/indexer/status');
+    const second = await request(app).get('/api/v1/indexer/status');
+
+    expect(first.status).toBe(200);
+    expect(first.headers['x-ratelimit-limit']).toBe('1');
+    expect(second.status).toBe(429);
+    expect(second.body.error.code).toBe('RATE_LIMITED');
   });
 });

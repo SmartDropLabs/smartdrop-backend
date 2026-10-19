@@ -1,6 +1,7 @@
 const express = require('express');
 const config = require('../config');
 const { requireApiKey } = require('../middleware/auth');
+const { routeTimeout } = require('../middleware/timeout');
 const { validate } = require('../middleware/validate');
 const buildRateLimit = require('../middleware/rateLimit');
 const priceOracle = require('../services/priceOracle');
@@ -42,7 +43,7 @@ router.get('/prices/:asset_code', validatePriceParams, validatePriceQuery, async
   }
 });
 
-router.get('/prices/:asset_code/refresh', requireApiKey(), validatePriceParams, validatePriceQuery, async (req, res, next) => {
+router.get('/prices/:asset_code/refresh', routeTimeout(), requireApiKey(), validatePriceParams, validatePriceQuery, async (req, res, next) => {
   try {
     const { asset_code: normalizedCode } = req.validated.params;
     const { issuer } = req.query;

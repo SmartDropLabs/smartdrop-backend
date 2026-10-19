@@ -3,16 +3,18 @@
 const express = require('express');
 const request = require('supertest');
 const buildCorsMiddleware = require('../src/middleware/cors');
+const { errorHandler } = require('../src/middleware/errorHandler');
 
 const ALLOWED = ['http://localhost:3000', 'https://app.smartdrop.io'];
+
+// Must match config.js's CORS_MAX_AGE_SECONDS default.
+const DEFAULT_MAX_AGE_SECONDS = 86400;
 
 function buildApp(allowedOrigins) {
   const app = express();
   app.use(buildCorsMiddleware(allowedOrigins));
   app.get('/test', (req, res) => res.json({ ok: true }));
-  app.use((err, req, res, _next) => {
-    res.status(err.status || 500).json({ error: err.message });
-  });
+  app.use(errorHandler);
   return app;
 }
 
@@ -72,6 +74,16 @@ describe('CORS rejected origins', () => {
     expect(res.status).toBe(403);
   });
 
+  test('rejected origin includes the offending origin in the error message', async () => {
+    const res = await request(app)
+      .get('/test')
+      .set('Origin', 'https://evil.com');
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBeDefined();
+    expect(res.body.error.message).toContain('https://evil.com');
+    expect(res.body.error.message).toContain('not allowed');
+  });
+
   test('rejected origin does not receive Access-Control-Allow-Origin', async () => {
     const res = await request(app)
       .get('/test')
@@ -95,6 +107,48 @@ describe('CORS no-origin requests (server-to-server, curl)', () => {
     const res = await request(app).get('/test');
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true });
+  });
+});
+
+describe('CORS preflight caching (#344)', () => {
+  let app;
+  beforeAll(() => { app = buildApp(ALLOWED); });
+
+  test('a cross-origin POST preflight advertises a cache window', async () => {
+    const res = await request(app)
+      .options('/test')
+      .set('Origin', 'http://localhost:3000')
+      .set('Access-Control-Request-Method', 'POST')
+      .set('Access-Control-Request-Headers', 'content-type,authorization');
+
+    expect(res.status).toBe(204);
+    // Without Access-Control-Max-Age the browser re-sends this preflight for
+    // every cross-origin POST; with it, the response is reusable for the
+    // advertised number of seconds.
+    expect(res.headers['access-control-max-age']).toBe(String(DEFAULT_MAX_AGE_SECONDS));
+    expect(res.headers['access-control-allow-methods']).toMatch(/POST/);
+  });
+
+  test('the cache window is configurable via CORS_MAX_AGE_SECONDS', async () => {
+    const original = process.env.CORS_MAX_AGE_SECONDS;
+    process.env.CORS_MAX_AGE_SECONDS = '600';
+    jest.resetModules();
+    const buildCors = require('../src/middleware/cors');
+    const configurableApp = express();
+    configurableApp.use(buildCors(ALLOWED));
+    configurableApp.get('/test', (req, res) => res.json({ ok: true }));
+
+    try {
+      const res = await request(configurableApp)
+        .options('/test')
+        .set('Origin', 'http://localhost:3000')
+        .set('Access-Control-Request-Method', 'POST');
+      expect(res.headers['access-control-max-age']).toBe('600');
+    } finally {
+      if (original === undefined) delete process.env.CORS_MAX_AGE_SECONDS;
+      else process.env.CORS_MAX_AGE_SECONDS = original;
+      jest.resetModules();
+    }
   });
 });
 

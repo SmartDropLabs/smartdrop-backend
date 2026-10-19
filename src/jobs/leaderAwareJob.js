@@ -31,10 +31,24 @@ function makeLeaderAwareJob({ job, jobName, leaderElection, logger }) {
   let manualStop = false;
   let leadershipLostWhileRunning = false;
 
+  // Capture the true originals once at construction so start()/stop() cycles
+  // never layer wrappers on top of previous wrappers (#119).
+  const trueTryAcquire = leaderElection.tryAcquire.bind(leaderElection);
+  const trueRenew = leaderElection.renew.bind(leaderElection);
+  const trueStartRenewLoop = leaderElection.startRenewLoop.bind(leaderElection);
+  const trueStopRenewLoop = leaderElection.stopRenewLoop.bind(leaderElection);
+
+  // Local state for start()/stop() cycle (#399, #400)
+  let checkInterval = null;
+  let wrappedStartRenewLoop = null;
+  let wrappedStopRenewLoop = null;
+  let wrappedTryAcquire = null;
+  let wrappedRenew = null;
+
   /**
    * Handle acquiring leadership: start the underlying job.
    */
-  function onLeadershipAcquired() {
+   function onLeadershipAcquired() {
     if (manualStop) return;
     if (!underlyingStarted) {
       logger.info('Acting as leader — starting scheduled job', { job: jobName });
@@ -72,13 +86,7 @@ function makeLeaderAwareJob({ job, jobName, leaderElection, logger }) {
     manualStop = false;
     leadershipLostWhileRunning = false;
 
-    // Register a callback on the leader election to react to state changes.
-    // We wrap the original startRenewLoop to also monitor transitions.
-    const origIsLeader = leaderElection.isLeader;
-    const origTryAcquire = leaderElection.tryAcquire;
-    const origRenew = leaderElection.renew;
-
-    // Patch the leaderElection to notify us on state changes
+    // Track leadership state locally
     let wasLeader = false;
 
     const checkLeader = () => {
@@ -91,30 +99,41 @@ function makeLeaderAwareJob({ job, jobName, leaderElection, logger }) {
       wasLeader = isLeaderNow;
     };
 
-    // Override isLeader to include our reactivity
-    const originalStartRenewLoop = leaderElection.startRenewLoop.bind(leaderElection);
-    const originalStopRenewLoop = leaderElection.stopRenewLoop.bind(leaderElection);
-
-    // Start the renewal loop (which will call tryAcquire immediately)
-    leaderElection.startRenewLoop = () => {
-      originalStartRenewLoop();
-
-      // Also poll periodically to detect leadership transitions
-      // (the renewal loop already does this, but we hook into it)
+    // Create wrapped methods locally, not on the leaderElection object (#399)
+    wrappedStartRenewLoop = () => {
+      trueStartRenewLoop();
       logger.info('Leader-aware job started — awaiting leadership', { job: jobName, instanceId: leaderElection.instanceId });
     };
 
-    leaderElection.stopRenewLoop = async () => {
-      await originalStopRenewLoop();
+    wrappedStopRenewLoop = async () => {
+      await trueStopRenewLoop();
       if (underlyingStarted) {
         job.stop();
         underlyingStarted = false;
       }
     };
 
+    wrappedTryAcquire = async (...args) => {
+      const result = await trueTryAcquire(...args);
+      checkLeader();
+      return result;
+    };
+
+    wrappedRenew = async (...args) => {
+      const result = await trueRenew(...args);
+      checkLeader();
+      return result;
+    };
+
+    // Install the wrapped methods
+    leaderElection.startRenewLoop = wrappedStartRenewLoop;
+    leaderElection.stopRenewLoop = wrappedStopRenewLoop;
+    leaderElection.tryAcquire = wrappedTryAcquire;
+    leaderElection.renew = wrappedRenew;
+
     // Check leadership state on a short interval to react quickly
     // to transitions detected by the renewal loop
-    const checkInterval = setInterval(() => {
+    checkInterval = setInterval(() => {
       checkLeader();
     }, Math.min(leaderElection.renewIntervalMs || 5000, 2000));
 
@@ -122,48 +141,46 @@ function makeLeaderAwareJob({ job, jobName, leaderElection, logger }) {
       checkInterval.unref();
     }
 
-    // Store cleanup
-    leaderElection._checkInterval = checkInterval;
-
     // Initial check after a short delay to let the first acquire complete
     setTimeout(() => checkLeader(), 500);
 
-    // Also call startRenewLoop
-    leaderElection.startRenewLoop();
-
-    // Patch the tryAcquire to trigger our callback
-    const superTryAcquire = leaderElection.tryAcquire;
-    leaderElection.tryAcquire = async (...args) => {
-      const result = await superTryAcquire(...args);
-      checkLeader();
-      return result;
-    };
-
-    const superRenew = leaderElection.renew;
-    leaderElection.renew = async (...args) => {
-      const result = await superRenew(...args);
-      checkLeader();
-      return result;
-    };
+    // Call the wrapped startRenewLoop
+    wrappedStartRenewLoop();
   }
 
   /**
-   * Stop the leader-election loop and the underlying job.
+   * Stop the leader-election loop and restore original methods so a
+   * subsequent start() wraps from a clean baseline (#119).
    */
   async function stop() {
     manualStop = true;
-    if (leaderElection._checkInterval) {
-      clearInterval(leaderElection._checkInterval);
-      leaderElection._checkInterval = null;
+    if (checkInterval) {
+      clearInterval(checkInterval);
+      checkInterval = null;
     }
+
+    // Restore original methods before stopping the renewal loop
+    leaderElection.tryAcquire = trueTryAcquire;
+    leaderElection.renew = trueRenew;
+    leaderElection.startRenewLoop = trueStartRenewLoop;
+    leaderElection.stopRenewLoop = trueStopRenewLoop;
 
     // Release the lease and stop the renewal loop
-    await leaderElection.stopRenewLoop();
+    await trueStopRenewLoop();
 
     if (underlyingStarted) {
-      job.stop();
+      const result = job.stop();
+      if (result && typeof result.then === 'function') {
+        await result;
+      }
       underlyingStarted = false;
     }
+
+    // Clear wrapper references
+    wrappedStartRenewLoop = null;
+    wrappedStopRenewLoop = null;
+    wrappedTryAcquire = null;
+    wrappedRenew = null;
 
     logger.info('Leader-aware job stopped', { job: jobName });
   }

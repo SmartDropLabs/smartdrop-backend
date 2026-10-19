@@ -20,6 +20,18 @@ describe('webhook event registry', () => {
     expect(events.isValidSubscription(['*'])).toBe(true);
   });
 
+  test('isValidSubscription rejects mixed wildcard and explicit events', () => {
+    expect(events.isValidSubscription(['*', 'pool.assets_locked'])).toBe(false);
+  });
+
+  test('isValidSubscription rejects oversized explicit subscriptions', () => {
+    const oversized = Array.from(
+      { length: events.MAX_EXPLICIT_SUBSCRIPTIONS + 1 },
+      (_, i) => `pool.fake_${i}`,
+    );
+    expect(events.isValidSubscription(oversized)).toBe(false);
+  });
+
   test('isValidSubscription rejects empty arrays and bad inputs', () => {
     expect(events.isValidSubscription([])).toBe(false);
     expect(events.isValidSubscription(null)).toBe(false);

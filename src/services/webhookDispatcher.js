@@ -11,6 +11,7 @@ const webhookRepo = require("../repositories/webhookRepository");
 const deliveryRepo = require("../repositories/deliveryRepository");
 const { requestContext } = require("../middleware/requestId");
 const { assertPublicTarget } = require("./ssrfGuard");
+const { encryptPayload } = require("./webhookEncryption");
 
 const USER_AGENT = "SmartDrop-Webhooks/1.0";
 const WEBHOOK_CACHE_TTL_MS = 60_000;
@@ -413,8 +414,19 @@ async function attempt(deliveryId, sequence) {
       delivery_id: delivery.id,
       occurred_at: delivery.created_at,
     };
-    const body = JSON.stringify(payload);
+    let body = JSON.stringify(payload);
     const seq = sequence ?? delivery.sequence;
+
+    let encryptedPayload = null;
+    try {
+      encryptedPayload = encryptPayload(body, webhook.secret);
+    } catch (err) {
+      logger.error('Failed to encrypt webhook payload', {
+        webhook_id: webhook.id,
+        error: err.message,
+      });
+    }
+
     const headers = buildHeaders(
       webhook.secret,
       body,
@@ -423,6 +435,11 @@ async function attempt(deliveryId, sequence) {
       delivery.request_id,
       seq,
     );
+
+    if (encryptedPayload) {
+      body = encryptedPayload;
+      headers['X-Webhook-Encrypted'] = 'aes-256-gcm';
+    }
 
     const attempts = delivery.attempts + 1;
     let responseStatus = null;

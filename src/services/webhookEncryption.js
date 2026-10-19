@@ -95,4 +95,66 @@ function isEncrypted(value) {
   return typeof value === 'string' && !value.startsWith('whsec_') && value.split('.').length === 3;
 }
 
-module.exports = { encryptSecret, decryptSecret, isEncrypted };
+/**
+ * Encrypts a webhook payload using AES-256-GCM with a key derived from
+ * the webhook secret. The receiver can decrypt using the same webhook secret.
+ *
+ * Returns `<iv>.<ciphertext>.<authTag>`, each base64-encoded.
+ * Issue #572 - webhook payload encryption.
+ */
+function encryptPayload(plaintext, webhookSecret) {
+  if (typeof plaintext !== 'string' || plaintext.length === 0) {
+    throw new Error('webhook payload to encrypt must be a non-empty string');
+  }
+  if (typeof webhookSecret !== 'string' || webhookSecret.length === 0) {
+    throw new Error('webhook secret must be a non-empty string');
+  }
+  const key = crypto.createHash('sha256').update(webhookSecret).digest();
+  const iv = crypto.randomBytes(IV_BYTES);
+  const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
+  const ciphertext = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  return [iv.toString('base64'), ciphertext.toString('base64'), authTag.toString('base64')].join('.');
+}
+
+/**
+ * Decrypts a webhook payload encrypted with {@link encryptPayload}.
+ * @throws if the payload is malformed, or the auth tag doesn't verify.
+ */
+function decryptPayload(packed, webhookSecret) {
+  if (typeof packed !== 'string') {
+    throw new Error('encrypted webhook payload must be a string');
+  }
+  if (typeof webhookSecret !== 'string' || webhookSecret.length === 0) {
+    throw new Error('webhook secret must be a non-empty string');
+  }
+  const parts = packed.split('.');
+  if (parts.length !== 3) {
+    throw new Error('malformed encrypted webhook payload');
+  }
+  const [ivB64, ciphertextB64, authTagB64] = parts;
+  const key = crypto.createHash('sha256').update(webhookSecret).digest();
+  const decipher = crypto.createDecipheriv(ALGORITHM, key, Buffer.from(ivB64, 'base64'));
+  decipher.setAuthTag(Buffer.from(authTagB64, 'base64'));
+  const plaintext = Buffer.concat([
+    decipher.update(Buffer.from(ciphertextB64, 'base64')),
+    decipher.final(),
+  ]);
+  return plaintext.toString('utf8');
+}
+
+/**
+ * Checks if a value is an encrypted payload (three base64 segments joined by `.`).
+ */
+function isPayloadEncrypted(value) {
+  return typeof value === 'string' && value.split('.').length === 3;
+}
+
+module.exports = {
+  encryptSecret,
+  decryptSecret,
+  isEncrypted,
+  encryptPayload,
+  decryptPayload,
+  isPayloadEncrypted,
+};

@@ -66,6 +66,7 @@ const {
 } = require("./routes/metrics");
 const { httpsEnforcementMiddleware } = require("./middleware/httpsEnforcement");
 const healthRouter = require("./health");
+const { registerJob } = require("./health/jobMonitor");
 
 const priceWebSocket = require("./ws/priceWebSocket");
 const subscriptionManager = require("./ws/PriceSubscriptionManager");
@@ -572,6 +573,11 @@ async function startServer() {
     wrappedPriceRefreshJob.start();
     wrappedWebhookRetryWorker.start();
     wrappedAirdropExpiryJob.start();
+
+    // Register jobs for health monitoring (#575)
+    registerJob('price_refresh', wrappedPriceRefreshJob);
+    registerJob('webhook_retry', wrappedWebhookRetryWorker);
+    registerJob('airdrop_expiry', wrappedAirdropExpiryJob);
 
     // Indexer poller is not leader-elected (it uses its own cursor-based
     // persistence in Redis and is safe for multiple replicas to run).

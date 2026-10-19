@@ -33,7 +33,13 @@ const CSV_PARSE_CHUNK_BYTES = 64 * 1024;
 const MAX_REPORTED_INVALID_ROWS = 20;
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: config.airdrops.csvMaxBytes },
+  limits: {
+    fileSize: config.airdrops.csvMaxBytes,
+    files: 1,
+    fields: 10,
+    parts: 12,
+    fieldSize: 64 * 1024,
+  },
 });
 const validateRouteIdParams = validate(routeIdParamsSchema, "params");
 const validatePaginationQuery = validate(paginationQuerySchema, "query");
@@ -65,13 +71,24 @@ const addRecipientsLimit = buildRateLimit({
 
 function uploadRecipientsFile(req, res, next) {
   upload.single("file")(req, res, (err) => {
-    if (err instanceof multer.MulterError && err.code === "LIMIT_FILE_SIZE") {
+    if (err instanceof multer.MulterError) {
+      if (err.code === "LIMIT_FILE_SIZE") {
+        return next(
+          new AppError(
+            "PAYLOAD_TOO_LARGE",
+            `CSV file cannot exceed ${config.airdrops.csvMaxBytes} bytes`,
+            413,
+            { max_bytes: config.airdrops.csvMaxBytes },
+          ),
+        );
+      }
+
       return next(
         new AppError(
-          "PAYLOAD_TOO_LARGE",
-          `CSV file cannot exceed ${config.airdrops.csvMaxBytes} bytes`,
-          413,
-          { max_bytes: config.airdrops.csvMaxBytes },
+          "VALIDATION_ERROR",
+          "Upload does not match the expected form structure",
+          400,
+          { reason: err.code },
         ),
       );
     }

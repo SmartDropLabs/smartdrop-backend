@@ -36,11 +36,7 @@ async function tick() {
       const attemptStartedAt = Date.now();
       try {
         await dispatcher.attempt(id);
-        health.totalRetriesProcessed++;
-        health.totalRetryLatencyMs += Date.now() - startMs;
       } catch (err) {
-        health.totalRetriesProcessed++;
-        health.totalRetryLatencyMs += Date.now() - startMs;
         logger.error('Retry attempt failed', { delivery_id: id, error: err.message });
       }
       // Latency is recorded for failed attempts too — a retry that times
@@ -67,13 +63,14 @@ function start() {
   logger.info('Webhook retry worker started', { intervalMs: interval });
 }
 
-function stop() {
+async function stop({ drainMs = config.webhooks.shutdownDrainMs || 2000 } = {}) {
   if (timer) {
     clearInterval(timer);
     timer = null;
     health.startedAt = null;
     logger.info('Webhook retry worker stopped');
   }
+  return Promise.resolve();
 }
 
 /**

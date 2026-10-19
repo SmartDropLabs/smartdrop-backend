@@ -1,8 +1,15 @@
+const http = require('http');
+const https = require('https');
 const axios = require('axios');
 const config = require('../../config');
 const logger = require('../../logger');
 const { createCircuitBreaker } = require('./circuitBreaker');
 const { getRequestIdHeaders } = require('../../middleware/requestId');
+
+const keepAliveAgents = {
+  http: new http.Agent({ keepAlive: true }),
+  https: new https.Agent({ keepAlive: true }),
+};
 
 const STELLAR_COINGECKO_MAP = {
   XLM: 'stellar',
@@ -30,6 +37,8 @@ function getClient() {
     baseURL: config.coingecko.baseUrl,
     headers,
     timeout: 10000,
+    httpAgent: keepAliveAgents.http,
+    httpsAgent: keepAliveAgents.https,
   });
   lastApiKey = currentKey;
   return apiClient;
@@ -84,8 +93,11 @@ async function fetchPrice(assetCode) {
       // permanent misconfiguration, not something that self-heals on
       // retry. Distinct from 403 (CDN/firewall block) and 429 (rate
       // limit), neither of which indicate a bad key.
+      // #370 — use a 10x longer cooldown for auth failures vs transient
+      // errors: a bad API key won't self-heal, so hammering the endpoint
+      // wastes quota and triggers rate limits.
       err.nonRetryable = true;
-      circuit.open({ assetCode });
+      circuit.open({ assetCode, cooldownMs: config.priceSources.circuitCooldownMs * 10 });
       logger.warn('CoinGecko authentication failed', { assetCode });
       throw err;
     }

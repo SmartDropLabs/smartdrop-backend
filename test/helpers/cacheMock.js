@@ -162,6 +162,13 @@ function createCacheMock() {
       const entry = getLive(key);
       return entry ? entry.value : null;
     }),
+    // Issue #357 — one MGET for N keys, mirroring real ioredis's
+    // mget(...keys): values come back in the same order as the input, with
+    // null for absent or expired keys.
+    mget: jest.fn(async (...keys) => keys.map((k) => {
+      const entry = getLive(k);
+      return entry ? entry.value : null;
+    })),
     del: jest.fn(async (key) => {
       const had = getLive(key) !== null || hashes.has(key) || sets.has(key) || zsets.has(key) || lists.has(key);
       rawStore.delete(key);
@@ -195,6 +202,33 @@ function createCacheMock() {
       if (!h) return {};
       return Object.fromEntries(h.entries());
     }),
+    // Issue #343 (webhookDispatcher metrics persistence): HINCRBY is the
+    // write-through primitive for the durable delivery counters.
+    hincrby: jest.fn(async (key, field, by) => {
+      const h = getHash(key);
+      const next = (Number(h.get(field)) || 0) + Number(by);
+      h.set(field, String(next));
+      return next;
+    }),
+    // Issue #343: SCAN over the whole keyspace (all key types), matching a
+    // Redis glob pattern. Returns the lot in one pass (cursor '0'), which is
+    // all callers iterating until cursor === '0' need.
+    scan: jest.fn(async (cursor, ...args) => {
+      const matchIdx = args.indexOf('MATCH');
+      const pattern = matchIdx === -1 ? '*' : String(args[matchIdx + 1]);
+      const regex = new RegExp(
+        `^${pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`,
+      );
+      const allKeys = new Set([
+        ...rawStore.keys(),
+        ...hashes.keys(),
+        ...sets.keys(),
+        ...zsets.keys(),
+        ...lists.keys(),
+      ]);
+      const matches = [...allKeys].filter((key) => regex.test(key));
+      return ['0', matches];
+    }),
     pexpire: jest.fn(async (key, ms) => {
       const entry = getLive(key);
       if (!entry) return 0;
@@ -226,6 +260,30 @@ function createCacheMock() {
             .map(([m]) => m);
           ids.forEach((id) => z.delete(id));
           return ids;
+        });
+        return;
+      }
+      if (name === 'advanceLastLedger') {
+        // Mirrors ADVANCE_LAST_LEDGER_LUA (issue #341): compare-and-set
+        // (expected === '' means "key must be absent") plus monotonicity —
+        // never store a lower ledger than the one already stored. Reads and
+        // the write below are uninterrupted, matching Redis running the
+        // script to completion.
+        redis.advanceLastLedger = jest.fn(async (key, expected, nextValue) => {
+          const cursor = getLive(key) ? getLive(key).value : null;
+          if (expected === '') {
+            if (cursor !== null) return 0;
+          } else if (cursor === null || cursor !== expected) {
+            return 0;
+          }
+          const nextNumber = Number(nextValue);
+          if (!Number.isFinite(nextNumber)) return 0;
+          if (cursor !== null) {
+            const cursorNumber = Number(cursor);
+            if (Number.isFinite(cursorNumber) && nextNumber < cursorNumber) return 0;
+          }
+          rawStore.set(key, { value: String(nextValue), expiresAt: null });
+          return 1;
         });
         return;
       }
@@ -271,6 +329,19 @@ function createCacheMock() {
         return null;
       }
     }),
+    // Issue #357 — batched sibling of get(), same parsing rules as get():
+    // one MGET for the whole batch, null for misses and unparsable values.
+    mget: jest.fn(async (keys) => {
+      const raws = await redis.mget(...(Array.isArray(keys) ? keys : []));
+      return raws.map((raw) => {
+        if (raw === null || raw === undefined) return null;
+        try {
+          return JSON.parse(raw);
+        } catch {
+          return null;
+        }
+      });
+    }),
     set: jest.fn(async (key, value, ttlSeconds) => {
       const serialized = JSON.stringify(value);
       if (ttlSeconds) await redis.set(key, serialized, 'EX', ttlSeconds);
@@ -306,6 +377,7 @@ function createCacheMock() {
     rawStore.clear();
     Object.values(redis).forEach((fn) => fn.mockClear?.());
     cacheMock.get.mockClear();
+    cacheMock.mget.mockClear();
     cacheMock.set.mockClear();
     cacheMock.del.mockClear();
   }

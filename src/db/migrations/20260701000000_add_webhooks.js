@@ -4,7 +4,7 @@
  */
 exports.up = async function(knex) {
   await knex.raw(`
-    CREATE TABLE webhooks (
+    CREATE TABLE IF NOT EXISTS webhooks (
       id           TEXT PRIMARY KEY,
       url          TEXT NOT NULL,
       events       TEXT[] NOT NULL,
@@ -15,7 +15,7 @@ exports.up = async function(knex) {
       updated_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
-    CREATE TABLE webhook_deliveries (
+    CREATE TABLE IF NOT EXISTS webhook_deliveries (
       id               TEXT PRIMARY KEY,
       webhook_id       TEXT NOT NULL REFERENCES webhooks(id) ON DELETE CASCADE,
       event_id         TEXT NOT NULL,
@@ -29,10 +29,10 @@ exports.up = async function(knex) {
       created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
-    CREATE INDEX idx_webhook_deliveries_webhook_created
+    CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_webhook_created
       ON webhook_deliveries (webhook_id, created_at DESC);
 
-    CREATE INDEX idx_webhook_deliveries_next_retry
+    CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_next_retry
       ON webhook_deliveries (next_retry_at)
       WHERE next_retry_at IS NOT NULL;
   `);

@@ -1,15 +1,31 @@
 'use strict';
 
 /**
+ * Content-Security-Policy for API responses.
+ *
+ * The API returns JSON, never HTML, so it needs no script, style, image, or
+ * network permissions at all. Denying everything by default removes the
+ * browser-side attack surface entirely instead of relying on the permissive
+ * defaults that make sense for an HTML application.
+ */
+const API_CSP_DIRECTIVES = {
+  'default-src': ["'none'"],
+  'base-uri': ["'none'"],
+  'form-action': ["'none'"],
+  'frame-ancestors': ["'none'"],
+  'object-src': ["'none'"],
+};
+
+/**
  * Content-Security-Policy override for the Swagger UI docs route (/api-docs).
  *
- * helmet() applies a strict default CSP to every response (good for the API),
- * but swagger-ui-express renders by injecting inline <script>/<style> tags and
- * data:-URL assets that the default CSP blocks, leaving a broken docs page in
- * development. This middleware relaxes the CSP *only* for the docs route
- * (mounted immediately before the apiDocs router) by overwriting the header
- * helmet set. It is scoped to /api-docs so the strict default still protects
- * the real API surface. See #129.
+ * helmet() applies the strict API policy to every response, but
+ * swagger-ui-express renders by injecting inline <script>/<style> tags and
+ * data:-URL assets that the API policy blocks, leaving a broken docs page.
+ * This middleware relaxes the policy *only* for the docs route (mounted
+ * immediately before the apiDocs router) by overwriting the header helmet
+ * set. It is scoped to /api-docs so the strict policy still protects the
+ * real API surface.
  */
 const DOCS_CSP_DIRECTIVES = [
   "default-src 'self'",
@@ -18,6 +34,9 @@ const DOCS_CSP_DIRECTIVES = [
   "img-src 'self' data: https:",
   "font-src 'self' data:",
   "connect-src 'self'",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
   "frame-ancestors 'none'",
 ].join('; ');
 
@@ -26,4 +45,8 @@ function docsCspMiddleware(_req, res, next) {
   next();
 }
 
-module.exports = { docsCspMiddleware, DOCS_CSP_DIRECTIVES };
+module.exports = {
+  API_CSP_DIRECTIVES,
+  DOCS_CSP_DIRECTIVES,
+  docsCspMiddleware,
+};

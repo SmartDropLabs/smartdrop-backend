@@ -15,6 +15,16 @@ function alertKey(id) {
   return `alert:${id}`;
 }
 
+// Secondary index (issue #310): evaluateForAsset only ever needs the alerts
+// for one asset, but used to ZREVRANGE the *entire* IDS_KEY sorted set and
+// fetch + filter every alert in the system on every price tick, regardless
+// of how many assets it actually watches. Kept in sync with IDS_KEY by
+// create()/remove() so evaluateForAssetInner can look up just this asset's
+// ids directly instead of scanning everything.
+function assetIdsKey(asset) {
+  return `alerts:asset:${asset.toUpperCase()}`;
+}
+
 function generateId() {
   return `alrt_${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`;
 }
@@ -31,7 +41,7 @@ function isTriggered(alert, priceUsd) {
 }
 
 async function create(data) {
-  const { asset, type, threshold_usd, webhook_url, webhook_secret, repeat } = data;
+  const { asset, type, threshold_usd, webhook_url, webhook_secret, repeat, owner_ip } = data;
 
   const id = generateId();
 
@@ -49,14 +59,23 @@ async function create(data) {
     webhook_url,
     webhook_secret,
     repeat: repeat === true,
+    owner_ip: owner_ip || null,
     created_at: new Date().toISOString(),
     last_fired_at: null,
     baseline_price: baselinePrice,
   };
 
   const redis = cache.getClient();
-  await cache.set(alertKey(id), alert);
-  await redis.zadd(IDS_KEY, Date.now(), id);
+  // One MULTI/EXEC transaction instead of two separate round trips (issue
+  // #303) — both writes are freshly computed above, so a crash between them
+  // used to leave either an alert record with no entry in IDS_KEY (invisible
+  // to list()/evaluateAll(), so it would never fire), or an id in IDS_KEY
+  // with no backing record (a phantom entry list() would still return).
+  await redis.multi()
+    .set(alertKey(id), JSON.stringify(alert))
+    .zadd(IDS_KEY, Date.now(), id)
+    .sadd(assetIdsKey(alert.asset), id)
+    .exec();
 
   return alert;
 }
@@ -66,8 +85,9 @@ const MAX_LIST_LIMIT = 1000;
 
 async function list() {
   const redis = cache.getClient();
-  const ids = await redis.zrevrange(IDS_KEY, 0, MAX_LIST_LIMIT - 1);
-  const alerts = await Promise.all(ids.map((id) => cache.get(alertKey(id))));
+  const ids = await redis.zrevrange(IDS_KEY, 0, -1);
+  if (ids.length === 0) return [];
+  const alerts = await cache.mget(ids.map(alertKey));
   return alerts.filter(Boolean);
 }
 
@@ -75,21 +95,37 @@ async function listPaginated({ offset = 0, limit = 20 } = {}) {
   const redis = cache.getClient();
   const total = await redis.zcard(IDS_KEY);
   const paginatedIds = await redis.zrevrange(IDS_KEY, offset, offset + limit - 1);
-  const alerts = await Promise.all(
-    paginatedIds.map((id) => cache.get(alertKey(id)))
-  );
+  if (paginatedIds.length === 0) {
+    return {
+      alerts: [],
+      total,
+    };
+  }
+  const alerts = await cache.mget(paginatedIds.map(alertKey));
   return {
     alerts: alerts.filter(Boolean),
-    total
+    total,
   };
+}
+
+async function get(id) {
+  return cache.get(alertKey(id));
 }
 
 async function remove(id) {
   const redis = cache.getClient();
   const existing = await cache.get(alertKey(id));
   if (!existing) return null;
-  await cache.del(alertKey(id));
-  await redis.zrem(IDS_KEY, id);
+  // One MULTI/EXEC transaction instead of two separate round trips (issue
+  // #304) — a crash between them used to leave either a dangling id in
+  // IDS_KEY with no backing record (a phantom entry list() would still
+  // return), or a deleted-but-still-indexed alert that evaluateAll() would
+  // try to re-read as null.
+  await redis.multi()
+    .del(alertKey(id))
+    .zrem(IDS_KEY, id)
+    .srem(assetIdsKey(existing.asset), id)
+    .exec();
   return existing;
 }
 
@@ -132,10 +168,13 @@ async function evaluateForAsset(asset, priceUsd) {
 
 async function evaluateForAssetInner(asset, priceUsd) {
   const redis = cache.getClient();
-  const ids = await redis.zrevrange(IDS_KEY, 0, MAX_LIST_LIMIT - 1);
+  const ids = await redis.smembers(assetIdsKey(asset));
 
   for (const id of ids) {
     const alert = await cache.get(alertKey(id));
+    // Index and record can drift (e.g. a record written by an older
+    // version before this index existed) — fall back to the asset check
+    // rather than trusting the index blindly.
     if (!alert || alert.asset !== asset.toUpperCase()) continue;
 
     if (!isTriggered(alert, priceUsd)) continue;
@@ -196,4 +235,27 @@ async function evaluateAll() {
   }
 }
 
-module.exports = { create, list, listPaginated, remove, evaluateForAsset, evaluateAll };
+// One-time backfill for the assetIdsKey() index (issue #310): populates it
+// for alerts that were created before this index existed, so
+// evaluateForAssetInner doesn't silently stop seeing them. Safe to run
+// repeatedly (SADD is idempotent); not wired into any automatic startup
+// path since it's an O(n) full scan — meant to be run once, manually, by an
+// operator against an existing deployment's pre-existing alert set.
+async function backfillAssetIndex() {
+  const redis = cache.getClient();
+  const ids = await redis.zrevrange(IDS_KEY, 0, -1);
+  const multi = redis.multi();
+  let queued = 0;
+  for (const id of ids) {
+    const alert = await cache.get(alertKey(id));
+    if (!alert) continue;
+    multi.sadd(assetIdsKey(alert.asset), id);
+    queued += 1;
+  }
+  if (queued > 0) await multi.exec();
+  return queued;
+}
+
+module.exports = {
+  create, get, list, listPaginated, remove, evaluateForAsset, evaluateAll, backfillAssetIndex,
+};

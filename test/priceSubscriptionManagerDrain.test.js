@@ -44,10 +44,6 @@ class FakeSocket {
     this.readyState = CLOSED;
   }
 }
-// `ws.readyState !== ws.constructor.OPEN` is how the real code checks
-// openness — give the fake the same static shape.
-FakeSocket.OPEN = OPEN;
-
 function req(ip) {
   return { socket: { remoteAddress: ip }, headers: {} };
 }
@@ -74,6 +70,15 @@ describe('PriceSubscriptionManager.drain (#364)', () => {
     expect(accepted).toBe(false);
     expect(closeSpy).toHaveBeenCalledWith(1013, 'Server shutting down');
     expect(manager.connectionCount).toBe(0);
+  });
+
+  test('sends to an open socket without relying on constructor.OPEN', () => {
+    const ws = new FakeSocket();
+
+    manager.add(ws, req('10.0.0.9'));
+    manager._send(ws, { type: 'test' });
+
+    expect(ws.sent).toEqual([{ type: 'test' }]);
   });
 
   test('warns every pre-drain client, then closes them after the grace delay', () => {

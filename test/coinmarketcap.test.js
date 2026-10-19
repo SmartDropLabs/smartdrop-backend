@@ -303,6 +303,40 @@ describe('CoinMarketCap source', () => {
     });
   });
 
+  // Issue #373: the axios client was cached forever after first use, with
+  // the API key baked into its headers, so a runtime config change to
+  // coinmarketcap.apiKey had no effect.
+  describe('getClient cache invalidation (#373)', () => {
+    test('reuses the same axios client across calls while the key is unchanged', async () => {
+      const coinmarketcap = loadSource();
+      mockGet.mockResolvedValue(quoteResponse('XLM', 0.1));
+
+      await coinmarketcap.fetchPrice('XLM');
+      await coinmarketcap.fetchPrice('XLM');
+
+      expect(mockAxiosCreate).toHaveBeenCalledTimes(1);
+    });
+
+    test('rebuilds the axios client with the new key once config.coinmarketcap.apiKey changes', async () => {
+      const coinmarketcap = loadSource();
+      const config = require('../src/config');
+      mockGet.mockResolvedValue(quoteResponse('XLM', 0.1));
+
+      await coinmarketcap.fetchPrice('XLM');
+      expect(mockAxiosCreate).toHaveBeenCalledTimes(1);
+
+      config.coinmarketcap.apiKey = 'cmc-rotated-key'; // simulates a config.reload()
+      await coinmarketcap.fetchPrice('XLM');
+
+      expect(mockAxiosCreate).toHaveBeenCalledTimes(2);
+      expect(mockAxiosCreate).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          headers: expect.objectContaining({ 'X-CMC_PRO_API_KEY': 'cmc-rotated-key' }),
+        }),
+      );
+    });
+  });
+
   describe('isSupported', () => {
     test('is true for an asset with no issuer required (XLM)', () => {
       const coinmarketcap = loadSource();

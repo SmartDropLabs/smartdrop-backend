@@ -3,6 +3,7 @@ const DailyRotateFile = require('winston-daily-rotate-file');
 const { name: serviceName, version } = require('../package.json');
 const { requestContext } = require('./middleware/requestId');
 const { redactFormat } = require('./services/logRedaction');
+const { nowIso } = require('./utils/dates');
 
 // ==================== LOG LEVEL ====================
 const getLogLevel = () => {
@@ -22,12 +23,15 @@ const useJsonFormat = logFormat === 'json';
 
 // ==================== REQUEST CONTEXT ====================
 const requestIdFormat = winston.format((info) => {
-  const requestId = requestContext.getStore()?.requestId ?? 'system';
+  const store = requestContext.getStore();
+  const requestId = store?.requestId || store?.correlationId || 'system';
   info.requestId = requestId;
   // snake_case alias so structured log output matches the request_id field
   // name used on delivery records and in API responses (issue #250).
   // `requestId` is kept for existing dashboards and queries.
   if (info.request_id === undefined) info.request_id = requestId;
+  if (info.correlationId === undefined) info.correlationId = requestId;
+  if (info.correlation_id === undefined) info.correlation_id = requestId;
   return info;
 });
 
@@ -42,7 +46,7 @@ const errorTrackerFormat = winston.format((info) => {
 
 // ==================== BASE FORMATS ====================
 const baseFormats = [
-  winston.format.timestamp({ format: () => new Date().toISOString() }),
+  winston.format.timestamp({ format: () => nowIso() }),
   winston.format.errors({ stack: true }),
   requestIdFormat(),
   redactFormat(),
@@ -84,6 +88,11 @@ if (process.env.LOG_FILE_PATH) {
     new DailyRotateFile({
       filename: `${process.env.LOG_FILE_PATH}/application-%DATE%.log`,
       datePattern: 'YYYY-MM-DD',
+      // Issue #494 — winston-daily-rotate-file resolves %DATE% from the host
+      // wall clock by default, so two servers in different time zones named
+      // (and rotated) the same UTC log window differently. utc: true pins the
+      // filename/rotation date to UTC.
+      utc: true,
       zippedArchive: true,
       maxSize: '20m',
       maxFiles: '14d',
@@ -100,4 +109,23 @@ const logger = winston.createLogger({
   exitOnError: false
 });
 
+// #524 — Runtime log level configuration
+const VALID_LEVELS = ['debug', 'info', 'warn', 'error'];
+
+function setLogLevel(level) {
+  if (!VALID_LEVELS.includes(level)) {
+    throw new Error(`Invalid log level: ${level}. Must be one of: ${VALID_LEVELS.join(', ')}`);
+  }
+  logger.level = level;
+  logger.info(`Log level changed to ${level}`);
+  return level;
+}
+
+function getCurrentLogLevel() {
+  return logger.level;
+}
+
 module.exports = logger;
+module.exports.setLogLevel = setLogLevel;
+module.exports.getCurrentLogLevel = getCurrentLogLevel;
+module.exports.VALID_LEVELS = VALID_LEVELS;

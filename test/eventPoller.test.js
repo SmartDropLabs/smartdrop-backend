@@ -55,7 +55,7 @@ describe('EventPoller', () => {
       getLastLedger: jest.fn(async () => null),
       saveEvent: jest.fn(async () => {}),
         saveEvents: jest.fn(async () => {}),
-      setLastLedger: jest.fn(async () => {}),
+      advanceLastLedger: jest.fn(async () => true),
     };
     const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };
 
@@ -80,7 +80,7 @@ describe('EventPoller', () => {
       event_name: 'airdrop_created',
       data: expect.objectContaining({ airdrop_id: 'drop-1', total_amount: '1000' }),
     })]);
-    expect(store.setLastLedger).toHaveBeenCalledWith(25);
+    expect(store.advanceLastLedger).toHaveBeenCalledWith(null, 25);
     expect(result).toMatchObject({ indexed_events: 1, latest_ledger: 25 });
     expect(poller.getStatus()).toMatchObject({ latest_ledger: 25, last_error: null });
   });
@@ -93,7 +93,7 @@ describe('EventPoller', () => {
       getLastLedger: jest.fn(async () => 19),
       saveEvent: jest.fn(async () => {}),
         saveEvents: jest.fn(async () => {}),
-      setLastLedger: jest.fn(async () => {}),
+      advanceLastLedger: jest.fn(async () => true),
     };
 
     const poller = new EventPoller({
@@ -107,6 +107,9 @@ describe('EventPoller', () => {
     await poller.pollOnce();
 
     expect(server.getEvents.mock.calls[0][0].startLedger).toBe(20);
+    // The cursor advance is conditional on the ledger that was actually read
+    // (#341), not a blind overwrite.
+    expect(store.advanceLastLedger).toHaveBeenCalledWith(19, 25);
   });
 
   test('skips polling when no contract id is configured', async () => {
@@ -132,7 +135,7 @@ describe('EventPoller', () => {
         getLastLedger: jest.fn(async () => null),
         saveEvent: jest.fn(async () => {}),
         saveEvents: jest.fn(async () => {}),
-        setLastLedger: jest.fn(async () => {}),
+        advanceLastLedger: jest.fn(async () => true),
       };
       const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };
 
@@ -150,7 +153,7 @@ describe('EventPoller', () => {
 
       // Not 500 (response.latestLedger) — that would permanently skip
       // whatever exists between ledger 24 and the tip.
-      expect(store.setLastLedger).toHaveBeenCalledWith(24);
+      expect(store.advanceLastLedger).toHaveBeenCalledWith(null, 24);
       expect(result).toMatchObject({ truncated: true, indexed_events: pollLimit });
       expect(logger.warn).toHaveBeenCalledWith(
         'SmartDrop event poll truncated by pollLimit; more events pending next cycle',
@@ -179,8 +182,14 @@ describe('EventPoller', () => {
         getLastLedger: jest.fn(async () => lastLedger),
         saveEvent: jest.fn(async () => {}),
         saveEvents: jest.fn(async () => {}),
-        setLastLedger: jest.fn(async (ledger) => {
-          lastLedger = ledger;
+        advanceLastLedger: jest.fn(async (expected, next) => {
+          // Same contract as eventStore.advanceLastLedger: refuse the write
+          // if the cursor no longer matches what the caller read, and never
+          // move it backwards.
+          if (expected !== lastLedger) return false;
+          if (lastLedger !== null && next < lastLedger) return false;
+          lastLedger = next;
+          return true;
         }),
       };
 
@@ -218,7 +227,7 @@ describe('EventPoller', () => {
         getLastLedger: jest.fn(async () => null),
         saveEvent: jest.fn(async () => {}),
         saveEvents: jest.fn(async () => {}),
-        setLastLedger: jest.fn(async () => {}),
+        advanceLastLedger: jest.fn(async () => true),
       };
       const logger = { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() };
 
@@ -234,9 +243,95 @@ describe('EventPoller', () => {
 
       const result = await poller.pollOnce();
 
-      expect(store.setLastLedger).toHaveBeenCalledWith(500);
+      expect(store.advanceLastLedger).toHaveBeenCalledWith(null, 500);
       expect(result.truncated).toBe(false);
       expect(logger.warn).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('concurrent cursor advance (#341)', () => {
+    function buildPoller({ store, server, logger }) {
+      return new EventPoller({
+        enabled: true,
+        contractId: 'CCONTRACT',
+        startLedger: 10,
+        pollLimit: 5,
+        server,
+        store,
+        logger,
+      });
+    }
+
+    test('saves the batch before touching the cursor', async () => {
+      const server = {
+        getEvents: jest.fn(async () => ({
+          latestLedger: 25,
+          events: [contractEvent()],
+        })),
+      };
+      const store = {
+        getLastLedger: jest.fn(async () => null),
+        saveEvents: jest.fn(async () => {}),
+        advanceLastLedger: jest.fn(async () => true),
+      };
+
+      const poller = buildPoller({
+        store,
+        server,
+        logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
+      });
+      await poller.pollOnce();
+
+      // If the cursor moved first and the process died mid-save, those
+      // events would be gone for good — hence save-then-advance.
+      expect(store.saveEvents.mock.invocationCallOrder[0]).toBeLessThan(
+        store.advanceLastLedger.mock.invocationCallOrder[0],
+      );
+    });
+
+    test('refusing the write still persists events and reports a skip', async () => {
+      const server = {
+        getEvents: jest.fn(async () => ({
+          latestLedger: 150,
+          events: [contractEvent({ ledger: 105, id: 'evt-105' })],
+        })),
+      };
+      const store = {
+        getLastLedger: jest.fn(async () => 100),
+        saveEvents: jest.fn(async () => {}),
+        // Another instance moved the cursor between our read and our write.
+        advanceLastLedger: jest.fn(async () => false),
+      };
+      const logger = {
+        info: jest.fn(),
+        warn: jest.fn(),
+        error: jest.fn(),
+        debug: jest.fn(),
+      };
+
+      const poller = buildPoller({ store, server, logger });
+      const result = await poller.pollOnce();
+
+      expect(store.advanceLastLedger).toHaveBeenCalledWith(100, 150);
+      expect(store.saveEvents).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({
+        skipped: true,
+        reason: 'concurrent cursor advance',
+      });
+      expect(logger.warn).toHaveBeenCalledWith(
+        'Ledger cursor changed concurrently; leaving the other writer in place',
+        expect.objectContaining({
+          expected_ledger: 100,
+          attempted_ledger: 150,
+        }),
+      );
+      expect(poller.getMetrics()).toMatchObject({
+        polls_attempted: 1,
+        polls_skipped: 1,
+        polls_succeeded: 0,
+      });
+      // The loser of the race must not claim the progress it did not make.
+      expect(poller.lastIndexedLedger).toBeNull();
     });
   });
 });

@@ -8,8 +8,10 @@ const deliveryRepo = require("../repositories/deliveryRepository");
 const dispatcher = require("../services/webhookDispatcher");
 const signatureService = require("../services/webhookSignature");
 const { probeReachability } = require("../services/webhook");
+const { assertPublicTarget } = require("../services/ssrfGuard");
 const { idempotencyMiddleware } = require("../services/idempotency");
 const { requireCsrfHeader } = require("../middleware/csrf");
+const { requireResourcePermission } = require("../middleware/permissions");
 const buildRateLimit = require("../middleware/rateLimit");
 const { routeTimeout } = require("../middleware/timeout");
 const AppError = require("../errors/AppError");
@@ -122,6 +124,14 @@ router.post(
         );
       }
 
+      // Issue #313: probeReachability makes a real outbound HTTP request to
+      // the caller-supplied URL — used to happen here before the URL had
+      // been validated at all (webhookRepo.create()'s SSRF check only runs
+      // *after* this point), making the probe itself an SSRF oracle against
+      // internal/private targets. Validate (format, protocol, and resolved
+      // address) before probing, the same guard used at delivery time.
+      await assertPublicTarget(body.url);
+
       const secret = body.secret || signatureService.generateSecret();
       const reachability = await probeReachability(body.url);
       const webhook = await webhookRepo.create({
@@ -202,6 +212,18 @@ router.delete(
   "/webhooks/:id",
   requireCsrfHeader,
   validateRouteIdParams,
+  // #508 — verify resource ownership before deletion
+  requireResourcePermission({
+    resourceName: 'webhook',
+    getResourceOwner: async (req) => {
+      const webhook = await webhookRepo.findById(req.params.id);
+      return webhook?.owner_ip || null;
+    },
+    isAllowed: (req, ownerId) => {
+      const clientIp = clientIpFromRequest(req);
+      return clientIp === ownerId;
+    },
+  }),
   async (req, res, next) => {
     try {
       const deleted = await webhookRepo.remove(req.params.id);

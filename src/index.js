@@ -1,6 +1,15 @@
 "use strict";
 
+// Issue #494 — establish a UTC default for the process before anything
+// formats a date. This is a defensive default only: every timestamp the app
+// emits is built from toISOString()/UTC math (src/utils/dates.js), so
+// behaviour must not depend on this line. The primary fix is the TZ=UTC
+// environment in Dockerfile/docker-compose; see README.md#time-handling.
+const { assertUtcTimeZone } = require("./utils/dates");
+const timeZoneState = assertUtcTimeZone();
+
 const express = require("express");
+const config = require("./config");
 const compression = require("compression");
 const helmet = require("helmet");
 const config = require("./config");
@@ -11,22 +20,36 @@ const priceOracle = require("./services/priceOracle");
 const priceRefreshJob = require("./jobs/priceRefresh");
 const webhookRetryWorker = require("./jobs/webhookRetryWorker");
 const airdropExpiryJob = require("./jobs/airdropExpiry");
+const jobQueue = require("./services/jobQueue");
 const { createLeaderElection } = require("./services/leaderElection");
 const { makeLeaderAwareJob } = require("./jobs/leaderAwareJob");
-const { warmCache } = require("./startup/cacheWarm");
+const { warmCacheInBackground, getWarmStatus } = require("./startup/cacheWarm");
 const buildCorsMiddleware = require("./middleware/cors");
 const {
   buildRateLimit,
   buildApiKeyRateLimit,
 } = require("./middleware/rateLimit");
 const { requestIdMiddleware } = require("./middleware/requestId");
+const { headerSecurityMiddleware } = require("./middleware/headerSecurity");
+const {
+  API_CSP_DIRECTIVES,
+  docsCspMiddleware,
+} = require("./middleware/csp");
 const requestLoggerMiddleware = require("./middleware/requestLogger");
+const { createStaticAssetsMiddleware } = require("./middleware/staticAssets");
 const {
   requireApiKey,
   attachApiKey,
   auditApiKeyUsage,
 } = require("./middleware/auth");
+const {
+  csrfProtectionMiddleware,
+  csrfTokenHandler,
+} = require("./middleware/csrf");
 const { errorHandler, notFoundHandler } = require("./middleware/errorHandler");
+const { jsonReplacer } = require("./utils/serialization");
+const { sqlSanitize } = require("./middleware/sqlSanitize");
+const { cdnCache } = require("./middleware/cdnCache");
 const { checkDatabase } = require("./services/dbHealth");
 const pricesRouter = require("./routes/prices");
 const alertsRouter = require("./routes/alerts");
@@ -40,10 +63,13 @@ const {
   router: metricsRouter,
   requestMetricsMiddleware,
 } = require("./routes/metrics");
+const { httpsEnforcementMiddleware } = require("./middleware/httpsEnforcement");
+const healthRouter = require("./health");
 
 const priceWebSocket = require("./ws/priceWebSocket");
 const subscriptionManager = require("./ws/PriceSubscriptionManager");
 const webhookDispatcher = require("./services/webhookDispatcher");
+const { getAllBreakerStates } = require("./utils/circuitBreaker");
 
 // Wrap background jobs with leader-election coordination so that only one
 // replica across the deployment runs each job at any given time.
@@ -74,22 +100,50 @@ const wrappedAirdropExpiryJob = makeLeaderAwareJob({
 });
 
 const app = express();
+
+// Issue #496 — secure cookies require trust proxy to reflect original
+// protocol when behind a load balancer/reverse proxy. Default is `false`
+// (explicit, to avoid rate-limit/IP spoofing if ever used). The config
+// exposes TRUST_PROXY; enable only if the deployment is proxy-fronted.
+if (typeof config.trustProxy === 'boolean') {
+  app.set('trust proxy', config.trustProxy);
+}
 let server = {
   close(callback) {
     if (callback) callback();
   },
 };
 
+app.use(headerSecurityMiddleware);
 app.use(requestIdMiddleware);
 app.use(requestLoggerMiddleware);
 app.use(requestMetricsMiddleware);
+// #468 — Enforce HTTPS early before payload parsing or route processing.
+app.use(httpsEnforcementMiddleware);
 app.use(compression());
-app.use(helmet());
+// #583 — CDN cache headers
+app.use(cdnCache());
+// #581 — SQL input sanitization
+app.use(sqlSanitize());
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      useDefaults: false,
+      directives: API_CSP_DIRECTIVES,
+    },
+    referrerPolicy: { policy: "strict-origin-when-cross-origin" },
+    xContentTypeOptions: true,
+    xDownloadOptions: true,
+    // #468: HSTS is managed exclusively in httpsEnforcementMiddleware so it is
+    // sent ONLY on secure responses and matches configured max-age/subdomains/preload.
+    hsts: false,
+  })
+);
 app.use(buildCorsMiddleware(config.corsAllowedOrigins));
 // Apply a global body size limit to protect all routes from oversized payloads.
 // Individual routes with stricter limits (e.g. airdrops) override this via
 // their own express.json({ limit }) middleware (#287).
-const DEFAULT_BODY_LIMIT = '1mb';
+const DEFAULT_BODY_LIMIT = "1mb";
 app.use(express.json({ limit: DEFAULT_BODY_LIMIT }));
 
 const EMPTY_QUEUE_STATS = {
@@ -112,6 +166,10 @@ async function readWebhookRetryQueueStats() {
   }
 }
 
+// #455 — Mount healthRouter for unauthenticated, rate-limit-exempt
+// lightweight liveness (/health/live) and dependency readiness (/health/ready) checks.
+app.use("/health", healthRouter);
+
 const healthRateLimit = buildRateLimit({
   windowSeconds: Math.floor(config.rateLimit.windowMs / 1000),
   max: config.rateLimit.max,
@@ -126,6 +184,7 @@ app.get("/health", healthRateLimit, async (req, res) => {
   const webhookWorkerHealth = wrappedWebhookRetryWorker.getHealth();
   const airdropExpiryHealth = wrappedAirdropExpiryJob.getHealth();
   const database = await checkDatabase();
+  const wsHealth = priceWebSocket.getHealth();
   // Queue depth for the retry worker (issue #235) — "the worker is alive"
   // says nothing about whether retries are piling up behind it. Health must
   // still answer if this telemetry read fails, so a failure degrades to
@@ -171,16 +230,22 @@ app.get("/health", healthRateLimit, async (req, res) => {
     redis_connected: redisConnected,
     redis_unavailable: !redisConnected,
     circuits: priceOracle.getCircuitStates(),
+    circuit_breakers: getAllBreakerStates(),
     redis: {
       connected: redisConnected,
       command_queue_depth: redisQueueDepth,
       concurrency: redisConcurrency,
     },
     websocket: {
-      connections: subscriptionManager.connectionCount,
+      healthy: wsHealth.healthy,
+      connections: wsHealth.connections,
+      error: wsHealth.error,
       draining: subscriptionManager.isDraining,
       drain_stats: subscriptionManager.drainStats,
     },
+    // Issue #495 — cache warm status is an optimization, not a readiness
+    // dependency (warming runs in the background).
+    cache_warm: getWarmStatus(),
     jobs: {
       price_refresh: {
         healthy: priceRefreshHealth.healthy,
@@ -241,22 +306,99 @@ const globalApiLimit = buildRateLimit({
   keyPrefix: "api",
 });
 
-// Resolve any presented API key first so the per-key limiter can meter it,
-// then fall through to the IP-keyed limiter for unauthenticated callers.
-// Authentication itself is still enforced per-route by requireApiKey.
-app.use("/api/v1", attachApiKey());
-app.use("/api/v1", auditApiKeyUsage());
-app.use("/api/v1", apiKeyLimit);
-app.use("/api/v1", globalApiLimit);
-app.use("/api/v1", pricesRouter);
-app.use("/api/v1", keysRouter);
-app.use("/api/v1/alerts", requireApiKey({ scopes: ["alerts"] }));
-app.use("/api/v1", alertsRouter);
-app.use("/api/v1", indexerRouter);
-app.use("/api/v1/webhooks", requireApiKey({ scopes: ["webhooks"] }));
-app.use("/api/v1", webhooksRouter);
-app.use("/api/v1", airdropsRouter);
+// #451 — Global rate limit applied to ALL requests, not just /api/v1.
+// This prevents abuse of non-API routes (health, docs, etc.) as well.
+const globalRateLimit = buildRateLimit({
+  windowSeconds: Math.floor(config.rateLimit.windowMs / 1000),
+  max: config.rateLimit.max * 2, // More generous for non-API routes
+  keyPrefix: "global",
+});
+
+// #450 — Request validation middleware: rejects requests with invalid
+// Content-Type for POST/PUT/PATCH, and validates JSON body size limits.
+const requestValidationMiddleware = require("./middleware/requestValidation");
+
+app.use(globalRateLimit);
+app.use(requestValidationMiddleware);
+app.use("/static", createStaticAssetsMiddleware(config.staticAssets));
+
+// #465 — Global CSRF protection for state-changing requests and CSRF token endpoint
+app.get("/csrf-token", csrfTokenHandler);
+app.use(csrfProtectionMiddleware);
+
+// ==================== API ROUTING & VERSIONING (#460) ====================
+// Build the core v1 API router.
+const apiV1Router = express.Router();
+apiV1Router.get("/csrf-token", csrfTokenHandler);
+apiV1Router.use(attachApiKey());
+apiV1Router.use(auditApiKeyUsage());
+apiV1Router.use(apiKeyLimit);
+apiV1Router.use(globalApiLimit);
+apiV1Router.use(pricesRouter);
+apiV1Router.use(keysRouter);
+apiV1Router.use("/alerts", requireApiKey({ scopes: ["alerts"] }));
+apiV1Router.use(alertsRouter);
+apiV1Router.use(indexerRouter);
+apiV1Router.use("/webhooks", requireApiKey({ scopes: ["webhooks"] }));
+apiV1Router.use(webhooksRouter);
+apiV1Router.use(airdropsRouter);
+
+// Unknown version rejection: return clear 404 for unsupported versions (e.g. /v99/..., /api/v99/...)
+app.use((req, res, next) => {
+  const versionMatch = req.path.match(/^\/(?:api\/)?v(\d+)(?:\/|$)/i);
+  if (versionMatch && versionMatch[1] !== "1") {
+    const requestedVersion = `v${versionMatch[1]}`;
+    return next(
+      new AppError(
+        "NOT_FOUND",
+        `API version '${requestedVersion}' is not supported. Supported versions: v1`,
+        404,
+        { requested_version: requestedVersion, supported_versions: ["v1"] },
+      ),
+    );
+  }
+  next();
+});
+
+// Primary versioned path: /v1/...
+app.use("/v1", apiV1Router);
+
+// Versioned path alias: /api/v1/... (preserves existing API clients)
+app.use("/api/v1", apiV1Router);
+
+// Deprecation signal for legacy unversioned paths (Deprecation and Sunset headers + warn log)
+function legacyDeprecationMiddleware(req, res, next) {
+  res.setHeader("Deprecation", "true");
+  res.setHeader("Sunset", "Fri, 01 Jan 2027 00:00:00 GMT");
+  // #531 — Deprecation/Sunset alone say "stop using this" but not how;
+  // Link: rel="deprecation" is the standard companion header pointing
+  // callers at migration guidance instead of leaving them to guess.
+  res.setHeader(
+    "Link",
+    '<https://github.com/SmartDropLabs/smartdrop-backend/blob/main/CHANGELOG.md>; rel="deprecation"',
+  );
+  logger.warn("Legacy unversioned API path accessed", {
+    path: req.originalUrl,
+    method: req.method,
+    suggestion: "Please migrate to versioned endpoints under /v1 or /api/v1",
+  });
+  next();
+}
+
+// Backward-compatible unversioned API mounts: /api/... and direct resource paths
+const legacyApiRouter = express.Router();
+legacyApiRouter.use(legacyDeprecationMiddleware);
+legacyApiRouter.use(apiV1Router);
+
+app.use("/api", legacyApiRouter);
+app.use(
+  ["/prices", "/keys", "/alerts", "/airdrops", "/webhooks", "/recipients", "/indexer"],
+  legacyDeprecationMiddleware,
+  apiV1Router,
+);
+
 app.use("/api-docs", globalApiLimit);
+app.use("/api-docs", docsCspMiddleware);
 app.use("/api-docs", apiDocsRouter);
 app.use(metricsRouter);
 
@@ -271,6 +413,9 @@ function shutdown(signal) {
       in_flight_webhook_deliveries: inFlightDeliveries,
       ws_connections: wsConnections,
     });
+
+    // Stop accepting new connections immediately.
+    if (server) server.close();
 
     // Stop leader-aware jobs (releases leases gracefully)
     await wrappedPriceRefreshJob.stop();
@@ -289,12 +434,26 @@ function shutdown(signal) {
 
     // Stop non-leader-elected services
     await indexerPoller.stop();
+    jobQueue.stop();
 
     // Gracefully drain WebSocket connections: broadcast close frame,
     // then force-close any still open after the drain timeout (issue #248).
     await subscriptionManager.drain(5000);
 
-    if (server) server.close();
+    // Wait for in-flight requests to complete (max 10s) before force-closing.
+    await new Promise((resolve) => {
+      const timeout = setTimeout(resolve, 10_000);
+      if (server) {
+        server.close(() => {
+          clearTimeout(timeout);
+          resolve();
+        });
+      } else {
+        clearTimeout(timeout);
+        resolve();
+      }
+    });
+
     await cache.disconnect();
     process.exit(0);
   };
@@ -339,11 +498,66 @@ function logStartupBanner() {
     indexer_enabled: config.indexer.enabled,
     instance_id: config.leaderElection.instanceId,
     log_level: process.env.LOG_LEVEL || config.nodeEnv,
+    // Issue #494 — surface the process time zone so an operator can confirm
+    // the UTC default is in effect (or that they overrode it deliberately).
+    time_zone: process.env.TZ,
   });
 }
 
 async function startServer() {
-  await warmCache(config.watchedAssets);
+  // Issue #494 — report a deliberately overridden, non-UTC process time zone.
+  // The code stays UTC-correct regardless (all instants use ISO-8601 Z), but
+  // a non-UTC default is worth a warning: anything that later relies on the
+  // environment default rather than the shared helpers will drift.
+  if (timeZoneState.isNonUtc) {
+    logger.warn(
+      "Process time zone is not UTC; dates are still handled in UTC (issue #494)",
+      { time_zone: timeZoneState.timeZone },
+    );
+  }
+
+  // Redis being unreachable at boot must not stop the process from coming up
+  // (#342): everything below degrades to "no cached state" and recovers on
+  // its own once ioredis reconnects. Say so once, explicitly, so an operator
+  // reading the logs can tell a degraded boot from a healthy one.
+  const redisConnectedAtBoot = cache.isConnected();
+  if (!redisConnectedAtBoot) {
+    logger.warn(
+      "Redis unavailable at startup; starting in degraded mode (no cached state, rate limits, or leader lease until it reconnects)",
+      { redis_connected: false },
+    );
+  }
+
+  // Restore historical delivery counters before we accept traffic (#343).
+  // Best-effort: if Redis is unreachable the server still starts with empty
+  // counters rather than failing startup (#342).
+  try {
+    await webhookDispatcher.hydrateMetrics();
+  } catch (err) {
+    logger.warn(
+      "Could not load persisted webhook delivery metrics; starting with empty counters",
+      { error: err.message },
+    );
+  }
+
+  // Issue #495 — do NOT block listen on cache warming. Warm in the
+  // background with bounding (max entries, concurrency, per-entry timeout),
+  // Redis lock so only one replica warms at a time, jitter and TTL.
+  // The server can accept traffic immediately; /health exposes cache_warm.
+  warmCacheInBackground({
+    assets: config.watchedAssets,
+    timeoutMs: config.cacheWarm.timeoutMs,
+    entryTimeoutMs: config.cacheWarm.entryTimeoutMs,
+    maxEntries: config.cacheWarm.maxEntries,
+    concurrency: config.cacheWarm.concurrency,
+    jitterMs: config.cacheWarm.jitterMs,
+    lockTtlMs: config.cacheWarm.lockTtlMs,
+    enabled: config.cacheWarm.enabled,
+  }).catch((err) => {
+    logger.warn("Cache warm failed; starting server anyway", {
+      error: err.message,
+    });
+  });
 
   server = app.listen(config.port, () => {
     logStartupBanner();
@@ -360,6 +574,9 @@ async function startServer() {
     // Indexer poller is not leader-elected (it uses its own cursor-based
     // persistence in Redis and is safe for multiple replicas to run).
     indexerPoller.start();
+
+    // #510 — start async job queue for background task processing
+    jobQueue.start();
   });
 
   return server;

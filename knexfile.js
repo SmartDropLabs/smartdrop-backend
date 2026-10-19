@@ -21,40 +21,39 @@ const path = require('path');
 const migrations = {
   directory: path.join(__dirname, 'src', 'db', 'migrations'),
   extension: 'js',
+  disableTransactions: false,
 };
 
 function connectionFor(fallback) {
   return process.env.DATABASE_URL || fallback;
 }
 
-// Enable SSL for database connections in production (issue #529).
-// Encrypts data in transit to prevent interception and meet compliance
-// requirements. Set DB_SSL=false to disable if the database doesn't support it.
-function sslConfig() {
-  if (process.env.DB_SSL === 'false') return false;
-  return { rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false' };
+// Issue #494 — migrations and ad-hoc knex CLI queries must render timestamps
+// in UTC too, not in the database server's local zone. Runs per pooled
+// connection.
+function afterCreateUtcConnection(conn, done) {
+  conn.query("SET TIME ZONE 'UTC'", (err) => done(err, conn));
 }
 
 module.exports = {
   development: {
     client: 'pg',
     connection: connectionFor('postgres://localhost/smartdrop'),
+    pool: { min: 2, max: 10, afterCreate: afterCreateUtcConnection },
     migrations,
   },
 
   test: {
     client: 'pg',
     connection: connectionFor('postgres://localhost/smartdrop_test'),
+    pool: { min: 2, max: 10, afterCreate: afterCreateUtcConnection },
     migrations,
   },
 
   production: {
     client: 'pg',
-    connection: {
-      connectionString: connectionFor(undefined),
-      ssl: sslConfig(),
-    },
-    pool: { min: 2, max: 10 },
+    connection: connectionFor(undefined),
+    pool: { min: 2, max: 10, afterCreate: afterCreateUtcConnection },
     migrations,
   },
 };

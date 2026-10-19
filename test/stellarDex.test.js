@@ -205,6 +205,39 @@ describe('Stellar DEX source', () => {
     expect(mockAddRequestIdHeaderInterceptor).toHaveBeenCalledWith(mockServer);
   });
 
+  // Issue #372: the Horizon server was cached forever after first use, so
+  // a runtime config.reload() changing horizonUrl had no effect.
+  describe('getServer cache invalidation (#372)', () => {
+    const originalHorizonUrl = config.stellar.horizonUrl;
+
+    afterEach(() => {
+      config.stellar.horizonUrl = originalHorizonUrl;
+    });
+
+    test('reuses the same Horizon server across calls while the URL is unchanged', async () => {
+      queueOrderBook({ bids: [{ price: '1' }], asks: [{ price: '1' }] });
+      await stellarDex.fetchPrice('XLM');
+      queueOrderBook({ bids: [{ price: '1' }], asks: [{ price: '1' }] });
+      await stellarDex.fetchPrice('XLM');
+
+      expect(mockServerConstructor).toHaveBeenCalledTimes(1);
+    });
+
+    test('rebuilds the Horizon server once config.stellar.horizonUrl changes', async () => {
+      queueOrderBook({ bids: [{ price: '1' }], asks: [{ price: '1' }] });
+      await stellarDex.fetchPrice('XLM');
+      expect(mockServerConstructor).toHaveBeenCalledTimes(1);
+
+      config.stellar.horizonUrl = 'https://horizon.stellar.org'; // simulates a config.reload()
+
+      queueOrderBook({ bids: [{ price: '1' }], asks: [{ price: '1' }] });
+      await stellarDex.fetchPrice('XLM');
+
+      expect(mockServerConstructor).toHaveBeenCalledTimes(2);
+      expect(mockServerConstructor).toHaveBeenLastCalledWith('https://horizon.stellar.org');
+    });
+  });
+
   describe('isSupported', () => {
     test('is true for XLM regardless of issuer', () => {
       expect(stellarDex.isSupported('XLM')).toBe(true);

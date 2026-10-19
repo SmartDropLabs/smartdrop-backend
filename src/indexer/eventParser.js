@@ -50,7 +50,9 @@ function dataFromValue(eventName, value, topicHintCount = 0) {
     return Object.fromEntries(valueFields.map((field, index) => [field, value[index] ?? null]));
   }
 
-  return { value };
+  // For non-array non-object values (strings, numbers, bigints, etc.),
+  // return the value directly instead of wrapping in { value } (#412).
+  return value;
 }
 
 function mergeTopicHints(eventName, data, topics) {

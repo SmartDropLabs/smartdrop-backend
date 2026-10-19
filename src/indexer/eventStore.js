@@ -1,8 +1,35 @@
-const cache = require('../services/cache');
+const cache = require("../services/cache");
 
-const EVENT_IDS_KEY = 'indexer:contract_events:ids';
-const LAST_LEDGER_KEY = 'indexer:last_ledger';
-const AIRDROP_IDS_KEY = 'indexer:airdrops:ids';
+const EVENT_IDS_KEY = "indexer:contract_events:ids";
+const LAST_LEDGER_KEY = "indexer:last_ledger";
+const AIRDROP_IDS_KEY = "indexer:airdrops:ids";
+
+/**
+ * CAS + monotonic advance for the cursor key. ARGV[1] is the value the
+ * caller observed ('' = key absent), ARGV[2] the value it wants to store.
+ * Returns 1 only if both conditions hold and the write happened.
+ */
+const ADVANCE_LAST_LEDGER_LUA = `
+local cursor = redis.call('GET', KEYS[1])
+local expected = ARGV[1]
+local nextValue = ARGV[2]
+
+if expected == '' then
+  if cursor then return 0 end
+elseif not cursor or cursor ~= expected then
+  return 0
+end
+
+local nextNumber = tonumber(nextValue)
+if not nextNumber then return 0 end
+if cursor then
+  local cursorNumber = tonumber(cursor)
+  if cursorNumber and nextNumber < cursorNumber then return 0 end
+end
+
+redis.call('SET', KEYS[1], nextValue)
+return 1
+`;
 
 function eventKey(id) {
   return `indexer:contract_event:${id}`;
@@ -38,7 +65,8 @@ function getRecipient(event) {
 
 async function getLastLedger(defaultLedger = 0) {
   const saved = await cache.get(LAST_LEDGER_KEY);
-  if (saved === null || saved === undefined || saved === '') return defaultLedger;
+  if (saved === null || saved === undefined || saved === "")
+    return defaultLedger;
   const parsed = Number(saved);
   return Number.isFinite(parsed) ? parsed : defaultLedger;
 }
@@ -47,20 +75,71 @@ async function setLastLedger(ledger) {
   await cache.set(LAST_LEDGER_KEY, Number(ledger));
 }
 
+/**
+ * Compare-and-set advance of the indexer cursor (issue #341).
+ *
+ * Reading `indexer:last_ledger` and writing it back are two separate Redis
+ * round trips, so two overlapping pollers can both read the same cursor and
+ * both write their own answer — the slower one silently rewinds the indexer
+ * (or, on a lagging response, a plain SET can move the cursor backwards even
+ * single-threaded). Both hazards are handled here in one Lua script, which
+ * Redis runs to completion with no interleaving:
+ *
+ *   - ARGV[1] is the value the caller read ('' = "the cursor was unset").
+ *     If the stored cursor no longer matches it, nothing is written and the
+ *     caller gets 0 (false).
+ *   - The cursor is only ever moved forwards; a lower next value is refused
+ *     (0) rather than applied.
+ *
+ * Returns true when this caller's write landed.
+ *
+ * @param {number|null} expectedLedger ledger the caller last read (null = unset)
+ * @param {number} nextLedger ledger to advance to
+ * @returns {Promise<boolean>} whether the cursor was advanced
+ */
+async function advanceLastLedger(expectedLedger, nextLedger) {
+  const redis = cache.getClient();
+  if (typeof redis.advanceLastLedger !== "function") {
+    redis.defineCommand("advanceLastLedger", {
+      numberOfKeys: 1,
+      lua: ADVANCE_LAST_LEDGER_LUA,
+    });
+  }
+
+  const expected =
+    expectedLedger === null || expectedLedger === undefined
+      ? ""
+      : String(Number(expectedLedger));
+  const next = String(Number(nextLedger));
+  const applied = await redis.advanceLastLedger(LAST_LEDGER_KEY, expected, next);
+  return Number(applied) === 1;
+}
+
 async function upsertAirdrop(event) {
   const airdropId = getAirdropId(event);
   if (!airdropId) return;
 
-  const existing = (await cache.get(airdropKey(airdropId))) || { airdrop_id: airdropId };
+  // Validate required event data before writing (#406)
+  if (event.event_name === "airdrop_created") {
+    if (!event.data.creator || !event.data.token ||
+        event.data.total_amount === null || event.data.total_amount === undefined ||
+        event.data.expiry_ledger === null || event.data.expiry_ledger === undefined) {
+      return;
+    }
+  }
+
+  const existing = (await cache.get(airdropKey(airdropId))) || {
+    airdrop_id: airdropId,
+  };
   const next = {
     ...existing,
     updated_ledger: event.ledger,
     updated_at: event.ledger_closed_at,
   };
 
-  if (event.event_name === 'airdrop_created') {
+  if (event.event_name === "airdrop_created") {
     Object.assign(next, {
-      status: 'created',
+      status: "created",
       creator: event.data.creator ?? existing.creator ?? null,
       token: event.data.token ?? existing.token ?? null,
       total_amount: event.data.total_amount ?? existing.total_amount ?? null,
@@ -70,13 +149,13 @@ async function upsertAirdrop(event) {
     });
   }
 
-  if (event.event_name === 'token_claimed') {
-    next.status = existing.status === 'expired' ? 'expired' : 'active';
+  if (event.event_name === "token_claimed") {
+    next.status = existing.status === "expired" ? "expired" : "active";
   }
 
-  if (event.event_name === 'airdrop_expired') {
+  if (event.event_name === "airdrop_expired") {
     Object.assign(next, {
-      status: 'expired',
+      status: "expired",
       unclaimed_amount: event.data.unclaimed_amount ?? null,
       expired_ledger: event.ledger,
       expired_at: event.ledger_closed_at,
@@ -87,7 +166,9 @@ async function upsertAirdrop(event) {
   // round trips — a crash between them used to leave an airdrop record
   // with no entry in AIRDROP_IDS_KEY (invisible to anything that scans the
   // id set) or vice versa (an id with no backing record).
-  await cache.getClient().multi()
+  await cache
+    .getClient()
+    .multi()
     .set(airdropKey(airdropId), JSON.stringify(next))
     .sadd(AIRDROP_IDS_KEY, airdropId)
     .exec();
@@ -107,7 +188,7 @@ async function upsertAirdrop(event) {
 async function migrateRecipientsListToHashIfNeeded(key) {
   const redis = cache.getClient();
   const type = await redis.type(key);
-  if (type !== 'string') return;
+  if (type !== "string") return;
 
   const list = await getJsonList(key);
   await redis.del(key);
@@ -141,13 +222,13 @@ async function upsertRecipient(event) {
     updated_at: event.ledger_closed_at,
   };
 
-  if (event.event_name === 'recipient_added') {
-    next.status = existing.status || 'pending';
+  if (event.event_name === "recipient_added") {
+    next.status = existing.status || "pending";
     next.added_ledger = event.ledger;
   }
 
-  if (event.event_name === 'token_claimed') {
-    next.status = 'claimed';
+  if (event.event_name === "token_claimed") {
+    next.status = "claimed";
     next.claimed_ledger = event.data.ledger ?? event.ledger;
     next.claimed_at = event.ledger_closed_at;
   }
@@ -158,11 +239,16 @@ async function upsertRecipient(event) {
 async function appendClaim(event) {
   const recipient = getRecipient(event);
   const airdropId = getAirdropId(event);
-  if (event.event_name !== 'token_claimed' || !recipient || !airdropId) return;
+  if (event.event_name !== "token_claimed" || !recipient || !airdropId) return;
 
   const key = claimsKey(recipient);
   const claims = await getJsonList(key);
-  if (!claims.some((claim) => claim.event_id === event.id)) {
+  // Issue #407: use a composite key of event_id + airdrop_id for dedup
+  // instead of event_id alone — event IDs are not globally unique across
+  // different airdrops, so two claims from different airdrops could share
+  // the same event_id and one would be silently dropped.
+  const dedupKey = `${event.id}:${airdropId}`;
+  if (!claims.some((claim) => `${claim.event_id}:${claim.airdrop_id}` === dedupKey)) {
     claims.push({
       event_id: event.id,
       airdrop_id: airdropId,
@@ -184,13 +270,15 @@ async function saveEvent(event) {
   // separate keys (their prior values determine what gets written), so
   // they can't join this same transaction — see #354 and #353 for their
   // own atomicity/scalability fixes.
-  await cache.getClient().multi()
+  await cache
+    .getClient()
+    .multi()
     .set(eventKey(event.id), JSON.stringify(event))
     .sadd(EVENT_IDS_KEY, event.id)
     .exec();
   await upsertAirdrop(event);
   await upsertRecipient(event);
-  await appendClaim(event);
+  if (event.event_name === "token_claimed") await appendClaim(event);
 }
 
 /**
@@ -215,7 +303,7 @@ async function saveEvents(events) {
   for (const event of events) {
     await upsertAirdrop(event);
     await upsertRecipient(event);
-    await appendClaim(event);
+    if (event.event_name === "token_claimed") await appendClaim(event);
   }
 }
 
@@ -224,7 +312,9 @@ async function getAirdropStatus(airdropId) {
   if (!status) return null;
 
   const recipients = await getAirdropRecipients(airdropId);
-  const claimed_count = recipients.filter((recipient) => recipient.status === 'claimed').length;
+  const claimed_count = recipients.filter(
+    (recipient) => recipient.status === "claimed",
+  ).length;
 
   return {
     ...status,
@@ -258,8 +348,8 @@ async function getRecipientClaims(address) {
 }
 
 async function getEventCount() {
-  const ids = await cache.getClient().smembers(EVENT_IDS_KEY);
-  return ids.length;
+  // #368 — scard returns the set size without loading all members into memory.
+  return Number(await cache.getClient().scard(EVENT_IDS_KEY)) || 0;
 }
 
 async function getStats() {
@@ -275,6 +365,7 @@ async function getStats() {
 }
 
 module.exports = {
+  advanceLastLedger,
   getAirdropRecipients,
   getAirdropStatus,
   getLastLedger,

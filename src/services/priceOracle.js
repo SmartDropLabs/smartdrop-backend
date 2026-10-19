@@ -125,9 +125,7 @@ async function detectAnomaly(currentPrice, assetCode, issuer) {
 }
 
 async function fetchFromAllSources(assetCode, issuer) {
-  const results = [];
-
-  for (const source of SOURCES) {
+  const sourceResults = await Promise.allSettled(SOURCES.map(async (source) => {
     // A source that cannot serve this asset at all (e.g. CoinGecko has no
     // mapping for a non-XLM asset) is a permanent, per-asset condition, not
     // a source failure — skip the breaker-wrapped call entirely so it never
@@ -135,20 +133,28 @@ async function fetchFromAllSources(assetCode, issuer) {
     // source asked about even one asset it doesn't support would eventually
     // trip its circuit open for every asset it *does* support (#130).
     if (typeof source.isSupported === 'function' && !source.isSupported(assetCode, issuer)) {
-      continue;
+      return null;
     }
 
-    try {
-      const price = await source.breaker.call(() => source.fetch(assetCode, issuer));
-      if (price !== null && price > 0) {
-        results.push({ source: source.name, price });
-      }
-    } catch (err) {
-      logger.warn('Source fetch failed', { source: source.name, assetCode, error: err.message });
+    const price = await source.breaker.call(() => source.fetch(assetCode, issuer));
+    if (price !== null && price > 0) {
+      return { source: source.name, price };
     }
-  }
+    return null;
+  }));
 
-  return results;
+  return sourceResults.flatMap((result, index) => {
+    if (result.status === 'rejected') {
+      const source = SOURCES[index];
+      logger.warn('Source fetch failed', {
+        source: source.name,
+        assetCode,
+        error: result.reason.message,
+      });
+      return [];
+    }
+    return result.value ? [result.value] : [];
+  });
 }
 
 function getCircuitStates() {
@@ -329,6 +335,11 @@ async function doFetchFreshPrice(assetCode, issuer = null, redisUnavailable = fa
  * Single-flight wrapper around doFetchFreshPrice. Concurrent calls for the
  * same assetCode:issuer pair while a fetch is already in-flight will await
  * the same promise instead of each independently hitting all upstream sources.
+ *
+ * Uses a wrapper promise pattern to ensure concurrent callers receive
+ * independent promise instances. This prevents the issue where a rejection
+ * from the original promise would propagate to all waiting callers, causing
+ * them to share the same rejection error.
  */
 async function fetchFreshPrice(assetCode, issuer = null, redisUnavailable = false) {
   const normalisedIssuer = issuer || null;
@@ -342,23 +353,29 @@ async function fetchFreshPrice(assetCode, issuer = null, redisUnavailable = fals
       issuer: normalisedIssuer,
       coalesced: coalescedCount,
     });
-    return existing;
+    return existing.promise;
   }
 
-  // Wrap the promise to handle rejections cleanly: on rejection, remove from
-  // inFlight and re-throw so concurrent callers see the same error (#286).
-  const promise = doFetchFreshPrice(assetCode, issuer, redisUnavailable)
-    .catch((err) => {
-      inFlight.delete(key);
-      throw err;
-    })
-    .then((result) => {
-      inFlight.delete(key);
-      return result;
-    });
+  // Each coalesced caller is handed its own wrapper promise (#417) so a
+  // rejection of the underlying fetch is forwarded into every waiter
+  // without the waiters sharing one rejection object. The single-flight
+  // entry is still removed exactly once when the underlying fetch settles
+  // (#286), whether it resolves or rejects.
+  let resolve;
+  let reject;
+  const wrapperPromise = new Promise((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
 
-  inFlight.set(key, promise);
-  return promise;
+  const actualPromise = doFetchFreshPrice(assetCode, issuer, redisUnavailable);
+
+  actualPromise
+    .then(resolve, reject)
+    .finally(() => inFlight.delete(key));
+
+  inFlight.set(key, { promise: wrapperPromise, actual: actualPromise });
+  return wrapperPromise;
 }
 
 async function refreshAllCachedPrices() {
@@ -398,6 +415,10 @@ async function refreshAllCachedPrices() {
 
   const refreshPromises = keys
     .map(async (key) => {
+      // Second line of defence behind the MATCH pattern above: a history key
+      // must never be refreshed as if it were an asset called "history".
+      if (key.startsWith(HISTORY_PREFIX)) return;
+
       const suffix = key.replace(CACHE_PREFIX, '');
       const parts = suffix.split(':');
       const assetCode = parts[0];

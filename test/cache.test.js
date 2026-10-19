@@ -17,6 +17,7 @@ jest.mock('ioredis', () => jest.fn(() => ({
   on: jest.fn(),
   connect: jest.fn().mockResolvedValue(undefined),
   get: jest.fn().mockResolvedValue(null),
+  mget: jest.fn().mockResolvedValue([]),
   set: jest.fn().mockResolvedValue('OK'),
   setex: jest.fn().mockResolvedValue('OK'),
   del: jest.fn().mockResolvedValue(1),
@@ -103,5 +104,44 @@ describe('getClient health check (#366)', () => {
     const next = cache.getClient();
 
     expect(next).toBe(redis);
+  });
+});
+
+// Issue #357: repository hot paths that hydrate a whole page of ids used to
+// pay one round trip per key; mget() collapses them into a single MGET.
+describe('mget batched reads (#357)', () => {
+  test('returns parsed values in key order, with null for misses', async () => {
+    const { cache, redis } = loadCache();
+    redis.mget.mockResolvedValue([JSON.stringify({ id: 'a' }), null, JSON.stringify({ id: 'c' })]);
+
+    expect(await cache.mget(['ka', 'kb', 'kc'])).toEqual([{ id: 'a' }, null, { id: 'c' }]);
+    expect(redis.mget).toHaveBeenCalledWith('ka', 'kb', 'kc');
+    expect(redis.get).not.toHaveBeenCalled();
+  });
+
+  test('an empty key list never reaches Redis', async () => {
+    const { cache, redis } = loadCache();
+
+    expect(await cache.mget([])).toEqual([]);
+    expect(await cache.mget(undefined)).toEqual([]);
+    expect(redis.mget).not.toHaveBeenCalled();
+  });
+
+  test('a corrupt value is reported as a cache miss, exactly like get()', async () => {
+    const { cache, redis } = loadCache();
+    redis.mget.mockResolvedValue(['not-json']);
+
+    expect(await cache.mget(['bad'])).toEqual([null]);
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      'Cached value failed JSON.parse, treating as a cache miss',
+      expect.objectContaining({ key: 'bad' }),
+    );
+  });
+
+  test('a failing MGET rejects so callers keep their own error handling', async () => {
+    const { cache, redis } = loadCache();
+    redis.mget.mockRejectedValue(new Error('connection refused'));
+
+    await expect(cache.mget(['k'])).rejects.toThrow('connection refused');
   });
 });

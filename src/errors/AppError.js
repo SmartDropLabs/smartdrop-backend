@@ -35,6 +35,7 @@ const ERROR_CODES = Object.freeze({
   // ── Airdrops ─────────────────────────────────────────────────────────
   AIRDROP_NOT_FOUND: { statusCode: 404 },
   AIRDROP_NOT_INDEXED: { statusCode: 404 },
+  INVALID_STATE_TRANSITION: { statusCode: 409 },
   RECIPIENT_LIMIT_EXCEEDED: { statusCode: 400 },
   CSV_INVALID_ENCODING: { statusCode: 400 },
   CSV_MISSING_COLUMNS: { statusCode: 400 },

@@ -386,6 +386,91 @@ describe('POST /api/v1/airdrops/:id/recipients', () => {
     expect(addResponse.body.added).toBe(2);
   });
 
+  // --- issue #134: strict amount parsing ---
+
+  test('rejects a CSV row with a missing amount field', async () => {
+    const createResponse = await request(app)
+      .post('/api/v1/airdrops')
+      .send({
+        name: 'Test Airdrop',
+        asset: 'USDC',
+        asset_issuer: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA',
+        total_amount: 100,
+        expiry_ledger: 123456,
+      });
+
+    // Row 1 has an empty amount cell; row 2 is valid — the whole upload must be rejected.
+    const csvContent = `address,amount\n${validAddress1},\n${validAddress2},50\n`;
+    const response = await request(app)
+      .post(`/api/v1/airdrops/${createResponse.body.id}/recipients`)
+      .attach('file', Buffer.from(csvContent), 'recipients.csv');
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe('CSV_MALFORMED');
+    expect(response.body.error.details.invalid_rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ line: 2, reason: 'amount is missing or invalid' }),
+      ]),
+    );
+    expect(mockRedis.rpush).not.toHaveBeenCalled();
+  });
+
+  test('rejects a CSV row with a comma-formatted amount (e.g. "1,000") rather than silently truncating to 1', async () => {
+    const createResponse = await request(app)
+      .post('/api/v1/airdrops')
+      .send({
+        name: 'Test Airdrop',
+        asset: 'USDC',
+        asset_issuer: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA',
+        total_amount: 1000,
+        expiry_ledger: 123456,
+      });
+
+    // A spreadsheet-exported CSV that uses thousands-separator commas — was silently becoming 1.
+    const csvContent = `address,amount\n${validAddress1},"1,000"\n`;
+    const response = await request(app)
+      .post(`/api/v1/airdrops/${createResponse.body.id}/recipients`)
+      .attach('file', Buffer.from(csvContent), 'recipients.csv');
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe('CSV_MALFORMED');
+    expect(response.body.error.details.invalid_rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ line: 2, reason: 'amount is missing or invalid' }),
+      ]),
+    );
+    expect(mockRedis.rpush).not.toHaveBeenCalled();
+  });
+
+  test('rejects a CSV row with trailing non-numeric garbage in the amount (e.g. "100USD") rather than silently truncating to 100', async () => {
+    const createResponse = await request(app)
+      .post('/api/v1/airdrops')
+      .send({
+        name: 'Test Airdrop',
+        asset: 'USDC',
+        asset_issuer: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA',
+        total_amount: 100,
+        expiry_ledger: 123456,
+      });
+
+    // e.g. "100USD", "50 units" — was silently becoming 100 / 50 via parseFloat.
+    const csvContent = `address,amount\n${validAddress1},100USD\n`;
+    const response = await request(app)
+      .post(`/api/v1/airdrops/${createResponse.body.id}/recipients`)
+      .attach('file', Buffer.from(csvContent), 'recipients.csv');
+
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe('CSV_MALFORMED');
+    expect(response.body.error.details.invalid_rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ line: 2, reason: 'amount is missing or invalid' }),
+      ]),
+    );
+    expect(mockRedis.rpush).not.toHaveBeenCalled();
+  });
+
+  // --- end issue #134 ---
+
   test('rejects a CSV larger than the configured upload limit', async () => {
     const createResponse = await request(app)
       .post('/api/v1/airdrops')
@@ -582,7 +667,7 @@ ${validAddress1},not-a-number`);
     expect(res.status).toBe(400);
     expect(res.body.error.code).toBe('CSV_MALFORMED');
     expect(res.body.error.details.invalid_rows).toEqual([
-      { line: 2, reason: 'amount is not a number' },
+      { line: 2, reason: 'amount is missing or invalid' },
     ]);
   });
 
@@ -618,7 +703,7 @@ ${validAddress2},bad`,
     );
 
     expect(res.body.error.details.invalid_rows).toEqual([
-      { line: 3, reason: 'amount is not a number' },
+      { line: 3, reason: 'amount is missing or invalid' },
     ]);
   });
 

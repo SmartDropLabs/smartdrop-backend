@@ -90,7 +90,7 @@ describe('indexer routes', () => {
   test('returns recipient claims in the canonical pagination envelope (#131)', async () => {
     mockGetRecipientClaims.mockResolvedValue([{ airdrop_id: 'drop-1', amount: '25' }]);
 
-    const res = await request(buildApp()).get('/api/v1/recipients/GRECIPIENT12345/claims');
+    const res = await request(buildApp()).get('/api/v1/recipients/GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H/claims');
 
     expect(res.status).toBe(200);
     expect(res.body.data).toEqual([{ airdrop_id: 'drop-1', amount: '25' }]);
@@ -103,7 +103,7 @@ describe('indexer routes', () => {
     );
 
     const res = await request(buildApp()).get(
-      '/api/v1/recipients/GRECIPIENT12345/claims?page=1&limit=2',
+      '/api/v1/recipients/GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H/claims?page=1&limit=2',
     );
 
     expect(res.status).toBe(200);
@@ -116,6 +116,40 @@ describe('indexer routes', () => {
       has_next: true,
       has_prev: false,
     });
+  });
+
+  // #602 — the indexer param schemas were not exported, so validate() got
+  // `undefined` and these routes threw before reaching the handler.
+  test('validates the airdrop id instead of crashing (#602)', async () => {
+    const res = await request(buildApp()).get('/api/v1/airdrops/bad%20id!/status');
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('VALIDATION_ERROR');
+    expect(mockGetAirdropStatus).not.toHaveBeenCalled();
+  });
+
+  // #603 — only a Stellar account (G…) or contract (C…) strkey reaches the store.
+  test.each([
+    ['GRECIPIENT12345'],
+    ['SBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H'],
+    ['gbrpyhil2ci3fnq4bxlfmndlfjunpu2hy3zmfshonuceoasw7qc7ox2h'],
+    ['GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX20'],
+  ])('rejects recipient address %p (#603)', async (address) => {
+    const res = await request(buildApp()).get(`/api/v1/recipients/${address}/claims`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('VALIDATION_ERROR');
+    expect(mockGetRecipientClaims).not.toHaveBeenCalled();
+  });
+
+  test('passes the validated contract address to the store (#603)', async () => {
+    mockGetRecipientClaims.mockResolvedValue([]);
+    const contract = 'CBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H';
+
+    const res = await request(buildApp()).get(`/api/v1/recipients/${contract}/claims`);
+
+    expect(res.status).toBe(200);
+    expect(mockGetRecipientClaims).toHaveBeenCalledWith(contract);
   });
 
   test('returns indexer status with ledger and event counts', async () => {

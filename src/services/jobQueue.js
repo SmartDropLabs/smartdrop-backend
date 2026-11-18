@@ -22,6 +22,12 @@ const DEFAULT_CONCURRENCY = 5;
 const DEFAULT_POLL_INTERVAL_MS = 1000;
 const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 5000;
+// Jobs that exhaust their retries are kept here for manual review (#623)
+// instead of being dropped. Capped and expiring so the list can't grow
+// without bound if a downstream provider is down for a long time.
+const DEAD_LETTER_KEY = 'jobs:dead';
+const DEAD_LETTER_MAX = 1000;
+const DEAD_LETTER_TTL_SECONDS = 30 * 24 * 60 * 60;
 
 class JobQueue {
   constructor() {
@@ -35,6 +41,7 @@ class JobQueue {
       processed: 0,
       failed: 0,
       retried: 0,
+      deadLettered: 0,
     };
   }
 
@@ -159,8 +166,52 @@ class JobQueue {
           type: job.type,
           error: err.message,
         });
+        await this._deadLetter(job, err);
       }
     }
+  }
+
+  /**
+   * Record a permanently failed job in the dead-letter list (#623).
+   * Never throws: losing the DLQ entry must not crash the worker.
+   */
+  async _deadLetter(job, err) {
+    try {
+      const redis = cache.getClient();
+      const entry = {
+        job,
+        error: err && err.message ? err.message : String(err),
+        failedAt: new Date().toISOString(),
+      };
+      await redis.lpush(DEAD_LETTER_KEY, JSON.stringify(entry));
+      await redis.ltrim(DEAD_LETTER_KEY, 0, DEAD_LETTER_MAX - 1);
+      await redis.expire(DEAD_LETTER_KEY, DEAD_LETTER_TTL_SECONDS);
+      this.stats.deadLettered++;
+    } catch (dlqErr) {
+      logger.error('Failed to dead-letter job', { jobId: job.id, error: dlqErr.message });
+    }
+  }
+
+  /**
+   * Most recent dead-lettered jobs, newest first, optionally filtered by type.
+   * @param {Object} [options]
+   * @param {string} [options.type] - Only return jobs of this type
+   * @param {number} [options.limit=100] - Maximum entries to return
+   */
+  async getDeadLetters({ type, limit = 100 } = {}) {
+    const redis = cache.getClient();
+    const raw = await redis.lrange(DEAD_LETTER_KEY, 0, DEAD_LETTER_MAX - 1);
+    const entries = [];
+    for (const item of raw) {
+      try {
+        const entry = JSON.parse(item);
+        if (!type || entry.job?.type === type) entries.push(entry);
+      } catch {
+        // Skip a corrupt entry rather than failing the whole listing.
+      }
+      if (entries.length >= limit) break;
+    }
+    return entries;
   }
 
   /**
@@ -174,3 +225,5 @@ class JobQueue {
 // Singleton instance
 const jobQueue = new JobQueue();
 module.exports = jobQueue;
+module.exports.DEAD_LETTER_KEY = DEAD_LETTER_KEY;
+module.exports.DEAD_LETTER_MAX = DEAD_LETTER_MAX;

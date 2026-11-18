@@ -8,6 +8,8 @@ const {
   dummyVerify,
   validatePasswordLength,
   validatePasswordComplexity,
+  validatePasswordHistory,
+  PASSWORD_HISTORY_DEPTH,
 } = require('./password');
 const { defaultLockout } = require('./accountLockout');
 
@@ -155,9 +157,13 @@ async function loginUser(identifier, password, userStore) {
  * @param {string} currentPassword
  * @param {string} newPassword
  * @param {Object} userStore
+ * @param {Object} [historyStore] - Password history (#617):
+ *   `getRecent(userId, n)` returns up to n previous hashes, newest first, and
+ *   `add(userId, hash)` records a retired hash. Without one, only the current
+ *   password is rejected.
  * @returns {Promise<Object>} Sanitized user record
  */
-async function changePassword(userId, currentPassword, newPassword, userStore) {
+async function changePassword(userId, currentPassword, newPassword, userStore, historyStore) {
   const user = await userStore.findById(userId);
   if (!user) {
     throw new AppError('NOT_FOUND', 'User not found', 404);
@@ -170,12 +176,29 @@ async function changePassword(userId, currentPassword, newPassword, userStore) {
 
   validatePasswordLength(newPassword);
   validatePasswordComplexity(newPassword);
+
+  // #617 — the new password must differ from the current one and from the
+  // most recent PASSWORD_HISTORY_DEPTH previous ones.
+  const previousHashes =
+    historyStore && typeof historyStore.getRecent === 'function'
+      ? (await historyStore.getRecent(userId, PASSWORD_HISTORY_DEPTH)) || []
+      : [];
+  await validatePasswordHistory(newPassword, [user.password_hash, ...previousHashes]);
+
   const newHash = await hashPassword(newPassword);
 
   const updated = await userStore.update(userId, {
     password_hash: newHash,
     updated_at: new Date().toISOString(),
   });
+
+  if (historyStore && typeof historyStore.add === 'function') {
+    try {
+      await historyStore.add(userId, user.password_hash);
+    } catch (err) {
+      logger.warn('Failed to record password history', { userId, error: err.message });
+    }
+  }
 
   // Invalidate all sessions so any compromised session can no longer be used (#554).
   try {

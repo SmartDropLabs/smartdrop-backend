@@ -270,6 +270,63 @@ async function invalidateAllUserSessions(userId) {
 }
 
 /**
+ * Rotate a session (#616): mint a fresh session id for the same user and
+ * revoke the old one, so a session id issued before a privilege change can
+ * no longer be presented afterwards. Returns the new session, or null when
+ * the old session is missing or expired (nothing to rotate).
+ */
+async function rotateSession(oldSessionId, metadata = {}) {
+  const current = await validateSession(oldSessionId, { touch: false });
+  if (!current) return null;
+
+  const fresh = await createSession(current.user_id, {
+    ipAddress: metadata.ipAddress ?? current.ip_address,
+    userAgent: metadata.userAgent ?? current.user_agent,
+  });
+  await invalidateSession(oldSessionId);
+  return fresh;
+}
+
+/**
+ * Call whenever a user's roles or permissions change (#616). Every existing
+ * session for the user is revoked, since each carries authorization decided
+ * under the old privileges. When the change is made from one of the user's
+ * own requests, pass that session id to get a rotated replacement so the user
+ * is not logged out of the tab that made the change.
+ *
+ * @returns {Promise<{ revoked: number, session: Object|null }>}
+ */
+async function handlePrivilegeChange(userId, { currentSessionId = null, metadata = {} } = {}) {
+  if (!userId) {
+    throw new Error('handlePrivilegeChange: userId is required');
+  }
+
+  const presented = currentSessionId
+    ? await validateSession(currentSessionId, { touch: false })
+    : null;
+  // Only the user's own session is rotated; an admin changing someone else's
+  // role keeps their session untouched.
+  const current = presented && presented.user_id === userId ? presented : null;
+
+  const revoked = await invalidateAllUserSessions(userId);
+  if (current) {
+    // Also covers a session missing from the per-user index.
+    await invalidateSession(currentSessionId);
+  }
+
+  let session = null;
+  if (current) {
+    session = await createSession(userId, {
+      ipAddress: metadata.ipAddress ?? current.ip_address,
+      userAgent: metadata.userAgent ?? current.user_agent,
+    });
+  }
+
+  logger.info('Sessions revoked after privilege change', { userId, revoked });
+  return { revoked, session };
+}
+
+/**
  * Scheduled cleanup of expired sessions from active index.
  */
 async function cleanupExpiredSessions({ limit = 500, nowMs = Date.now() } = {}) {
@@ -418,6 +475,8 @@ module.exports = {
   validateSession,
   invalidateSession,
   invalidateAllUserSessions,
+  rotateSession,
+  handlePrivilegeChange,
   cleanupExpiredSessions,
   startCleanupTimer,
   stopCleanupTimer,

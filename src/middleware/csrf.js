@@ -21,6 +21,7 @@ const crypto = require('crypto');
 const AppError = require('../errors/AppError');
 const logger = require('../logger');
 const config = require('../config');
+const { setCookie } = require('../auth/cookies');
 
 const CSRF_SECRET = process.env.CSRF_SECRET || 'smartdrop-csrf-token-hmac-secret-key-32b';
 
@@ -268,12 +269,29 @@ function createCsrfProtectionMiddleware(options = {}) {
   };
 }
 
+const CSRF_COOKIE_NAME = 'csrf-token';
+const CSRF_COOKIE_MAX_AGE_MS = 2 * 60 * 60 * 1000;
+
 /**
  * Express handler to obtain a new CSRF token bound to the current session.
+ *
+ * The token is returned in the body (clients echo it in X-CSRF-Token, which
+ * is what the middleware validates) and also set as a cookie (#618). The
+ * cookie always carries SameSite=Strict and HttpOnly, and Secure on HTTPS /
+ * in production, via the shared cookie helper, so browsers never attach it to
+ * a cross-site request.
  */
 function csrfTokenHandler(req, res) {
   const sessionId = extractSessionId(req);
   const token = generateCsrfToken(sessionId);
+  if (typeof res.cookie === 'function') {
+    setCookie(res, CSRF_COOKIE_NAME, token, {
+      req,
+      sameSite: 'Strict',
+      httpOnly: true,
+      maxAgeMs: CSRF_COOKIE_MAX_AGE_MS,
+    });
+  }
   res.json({ csrf_token: token });
 }
 
@@ -297,6 +315,7 @@ module.exports = {
   createCsrfProtectionMiddleware,
   csrfProtectionMiddleware: createCsrfProtectionMiddleware(),
   csrfTokenHandler,
+  CSRF_COOKIE_NAME,
   generateCsrfToken,
   verifyCsrfToken,
   isAllowedOrigin,

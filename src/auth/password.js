@@ -134,6 +134,30 @@ function validatePasswordComplexity(password) {
   }
 }
 
+/** How many previous passwords a new password must differ from (#617). */
+const PASSWORD_HISTORY_DEPTH = 5;
+
+/**
+ * Reject a new password that matches any of the user's recent password
+ * hashes (#617). Hashes are checked newest-first with the same constant-time
+ * verifier used at login, so legacy formats are covered too. Only the most
+ * recent PASSWORD_HISTORY_DEPTH hashes are considered.
+ *
+ * @param {string} newPassword
+ * @param {string[]} recentHashes - newest first
+ * @throws {AppError} VALIDATION_ERROR when the password was used recently
+ */
+async function validatePasswordHistory(newPassword, recentHashes) {
+  if (!Array.isArray(recentHashes)) return;
+  for (const hash of recentHashes.slice(0, PASSWORD_HISTORY_DEPTH)) {
+    if (typeof hash !== 'string' || hash.length === 0) continue;
+    const { valid } = await verifyPassword(newPassword, hash);
+    if (valid) {
+      throw new AppError('VALIDATION_ERROR', 'Cannot reuse a recent password', 400);
+    }
+  }
+}
+
 /**
  * Hash a password using bcrypt (or fallback crypto adapter).
  *
@@ -253,6 +277,7 @@ async function dummyVerify(password = 'dummy-password') {
 
 module.exports = {
   BCRYPT_MAX_BYTES,
+  PASSWORD_HISTORY_DEPTH,
   PASSWORD_MIN_LENGTH,
   constantTimeCompare,
   dummyVerify,
@@ -261,6 +286,7 @@ module.exports = {
   hashPassword,
   isBcryptHash,
   validatePasswordComplexity,
+  validatePasswordHistory,
   validatePasswordLength,
   verifyPassword,
 };

@@ -245,7 +245,28 @@ async function disconnect() {
   }
 }
 
+/**
+ * Read-through cache with stampede protection (#614).
+ *
+ * A bare get() → miss → fetch → set() lets every concurrent request that
+ * misses an expired key hit the database at once. getOrSet() routes the miss
+ * through src/cache/stampede.js: in-process calls for the same key share one
+ * fetch, and across processes a short Redis lock lets one caller refresh
+ * while the others wait briefly and re-read. Prefer it over hand-rolled
+ * get/set pairs for anything expensive to recompute.
+ *
+ * @param {string} key
+ * @param {() => Promise<*>} fetchFn - Loads the value on a miss
+ * @param {number} [ttlSeconds=60]
+ * @param {Object} [options] - Passed through to fetchWithLock
+ */
+async function getOrSet(key, fetchFn, ttlSeconds = 60, options = {}) {
+  // Required lazily: stampede.js itself requires this module.
+  const { fetchWithLock } = require('../cache/stampede');
+  return fetchWithLock(key, fetchFn, { ...options, ttlSeconds });
+}
+
 module.exports = {
   get, mget, set, del, delMany, disconnect, getClient, isConnected,
-  getCommandQueueLength, getConcurrencyStats,
+  getCommandQueueLength, getConcurrencyStats, getOrSet,
 };

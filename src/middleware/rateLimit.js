@@ -6,9 +6,46 @@ const logger = require('../logger');
 const AppError = require('../errors/AppError');
 
 /**
- * Fixed-window rate limiter backed by Redis INCR + EXPIRE.
+ * Sliding-window rate limiter backed by Redis INCR + EXPIRE (#613).
+ *
+ * A plain fixed window lets a client send `max` requests at the end of one
+ * window and another `max` at the start of the next — a 2x burst at every
+ * boundary. Each request is still counted in a fixed per-window bucket, but
+ * the limit is checked against a sliding estimate: the current bucket plus
+ * the previous bucket weighted by how much of it still overlaps the last
+ * `windowSeconds`. Buckets live for two windows so the previous one is still
+ * readable.
+ *
  * Fails open if Redis is unreachable so a cache outage cannot lock out users.
  */
+async function slidingWindowCount(redis, baseKey, windowSeconds) {
+  const nowMs = Date.now();
+  const windowMs = windowSeconds * 1000;
+  const bucket = Math.floor(nowMs / windowMs);
+  const key = `${baseKey}:${bucket}`;
+
+  const current = await redis.incr(key);
+  if (current === 1) {
+    await redis.expire(key, windowSeconds * 2);
+  }
+  const previous = await readPreviousCount(redis, `${baseKey}:${bucket - 1}`);
+  const elapsed = (nowMs - bucket * windowMs) / windowMs;
+  const weighted = current + previous * (1 - elapsed);
+
+  return { weighted, resetAt: (bucket + 1) * windowSeconds };
+}
+
+// A missing or unreadable previous bucket only loses the boundary smoothing;
+// it must not turn into a fail-open for the request itself.
+async function readPreviousCount(redis, key) {
+  if (typeof redis.get !== 'function') return 0;
+  try {
+    const n = Number(await redis.get(key));
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
 // Track consecutive Redis failures per keyPrefix to escalate log severity.
 // Entries are timestamped and cleaned up periodically to prevent unbounded
 // memory growth from keyPrefixes that stop receiving traffic (#284).
@@ -52,25 +89,20 @@ function buildRateLimit({ windowSeconds, max, keyPrefix }) {
 
   return async function rateLimit(req, res, next) {
     const identifier = req.ip || req.connection?.remoteAddress || 'unknown';
-    const bucket = Math.floor(Date.now() / 1000 / windowSeconds);
-    const key = `ratelimit:${keyPrefix}:${identifier}:${bucket}`;
+    const baseKey = `ratelimit:${keyPrefix}:${identifier}`;
 
     try {
       const redis = cache.getClient();
-      const count = await redis.incr(key);
-      if (count === 1) {
-        await redis.expire(key, windowSeconds);
-      }
+      const { weighted, resetAt } = await slidingWindowCount(redis, baseKey, windowSeconds);
       // Reset failure counter on success.
       consecutiveFailures.delete(keyPrefix);
 
-      const remaining = Math.max(0, max - count);
-      const resetAt = (bucket + 1) * windowSeconds;
+      const remaining = Math.max(0, Math.floor(max - weighted));
       const retryAfterSeconds = Math.max(1, resetAt - Math.floor(Date.now() / 1000));
       res.setHeader('X-RateLimit-Limit', String(max));
       res.setHeader('X-RateLimit-Remaining', String(remaining));
       res.setHeader('X-RateLimit-Reset', String(resetAt));
-      if (count > max) {
+      if (weighted > max) {
         res.setHeader('Retry-After', String(retryAfterSeconds));
         return next(new AppError(
           'RATE_LIMITED',
@@ -119,7 +151,7 @@ function resolveTier(apiKey) {
 }
 
 /**
- * Per-API-key fixed-window rate limiter (issue #251).
+ * Per-API-key sliding-window rate limiter (issues #251, #613).
  *
  * The generic `buildRateLimit` above meters every caller of a route into a
  * single IP-keyed bucket, so one abusive API key consumes the capacity of
@@ -145,27 +177,22 @@ function buildApiKeyRateLimit({ keyPrefix = 'apikey' } = {}) {
 
     const windowSeconds = config.apiKeyRateLimit.windowSeconds;
     const { tier, max } = resolveTier(apiKey);
-    const bucket = Math.floor(Date.now() / 1000 / windowSeconds);
-    const key = `ratelimit:${keyPrefix}:${apiKey.id}:${bucket}`;
+    const baseKey = `ratelimit:${keyPrefix}:${apiKey.id}`;
     const failureKey = `${keyPrefix}:by-key`;
 
     try {
       const redis = cache.getClient();
-      const count = await redis.incr(key);
-      if (count === 1) {
-        await redis.expire(key, windowSeconds);
-      }
+      const { weighted, resetAt } = await slidingWindowCount(redis, baseKey, windowSeconds);
       consecutiveFailures.delete(failureKey);
 
-      const remaining = Math.max(0, max - count);
-      const resetAt = (bucket + 1) * windowSeconds;
+      const remaining = Math.max(0, Math.floor(max - weighted));
       const retryAfterSeconds = Math.max(1, resetAt - Math.floor(Date.now() / 1000));
       res.setHeader('X-RateLimit-Limit', String(max));
       res.setHeader('X-RateLimit-Remaining', String(remaining));
       res.setHeader('X-RateLimit-Reset', String(resetAt));
       res.setHeader('X-RateLimit-Tier', tier);
 
-      if (count > max) {
+      if (weighted > max) {
         res.setHeader('Retry-After', String(retryAfterSeconds));
         // key_id, not the key itself — the raw key never reaches logs.
         logger.warn('API key rate limit exceeded', {

@@ -179,3 +179,44 @@ describe('Auth Password Hashing and Legacy Migration (#456)', () => {
     expect(nonExistentError.message).toBe('Invalid credentials');
   });
 });
+
+describe('email case normalization (#612)', () => {
+  const password = 'CorrectHorseBatteryStaple123!';
+
+  test('registration rejects an email that differs only by case or whitespace', async () => {
+    const stored = new Map();
+    const userStore = {
+      findByEmail: jest.fn(async (email) => stored.get(email) || null),
+      create: jest.fn(async (data) => {
+        const user = { id: `usr_${stored.size + 1}`, ...data };
+        stored.set(data.email, user);
+        return user;
+      }),
+    };
+
+    const first = await registerUser({ email: '  User@Example.COM ', password }, userStore);
+    expect(first.email).toBe('user@example.com');
+
+    await expect(
+      registerUser({ email: 'user@example.com', password }, userStore),
+    ).rejects.toMatchObject({ statusCode: 409 });
+    expect(userStore.create).toHaveBeenCalledTimes(1);
+    expect(userStore.findByEmail).toHaveBeenLastCalledWith('user@example.com');
+  });
+
+  test('login looks up the normalized email', async () => {
+    const hash = await hashPassword(password);
+    const userStore = {
+      findByEmail: jest.fn(async (email) => (
+        email === 'mixed@example.com'
+          ? { id: 'usr_mixed', email, password_hash: hash }
+          : null
+      )),
+    };
+
+    const user = await loginUser('Mixed@Example.com', password, userStore);
+
+    expect(user.id).toBe('usr_mixed');
+    expect(userStore.findByEmail).toHaveBeenCalledWith('mixed@example.com');
+  });
+});

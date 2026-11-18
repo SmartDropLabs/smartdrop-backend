@@ -159,6 +159,10 @@ function createCacheMock() {
       return 'OK';
     }),
     get: jest.fn(async (key) => {
+      // INCR counters share the string keyspace in real Redis, so GET on a
+      // counter key returns its value (used by the sliding-window rate
+      // limiter to read the previous bucket, #613).
+      if (counters.has(key)) return String(counters.get(key));
       const entry = getLive(key);
       return entry ? entry.value : null;
     }),

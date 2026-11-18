@@ -81,8 +81,21 @@ function isTransientProbeError(err) {
   ].includes(code);
 }
 
+const PROBE_RETRY_MAX_DELAY_MS = parseInt(process.env.WEBHOOK_PROBE_RETRY_MAX_DELAY_MS, 10) || 2000;
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Delay before probe retry number `attempt` (0-based) (#615): exponential
+ * from `baseMs`, capped at `maxMs`, plus up to 10% jitter so receivers that
+ * are failing together aren't re-probed in lockstep. A fixed interval kept
+ * hammering a struggling endpoint at the same rate on every retry.
+ */
+function probeRetryDelayMs(attempt, baseMs = PROBE_RETRY_DELAY_MS, maxMs = PROBE_RETRY_MAX_DELAY_MS) {
+  const delay = Math.min(baseMs * 2 ** attempt, maxMs);
+  return Math.round(delay + delay * 0.1 * Math.random());
 }
 
 // Issue #311: probeReachability previously gave up on the very first
@@ -96,6 +109,7 @@ async function probeReachability(webhookUrl, options = {}) {
   const timeoutMs = options.timeoutMs || 3000;
   const retryAttempts = options.retryAttempts ?? PROBE_RETRY_ATTEMPTS;
   const retryDelayMs = options.retryDelayMs ?? PROBE_RETRY_DELAY_MS;
+  const retryMaxDelayMs = options.retryMaxDelayMs ?? PROBE_RETRY_MAX_DELAY_MS;
   const lastError = { message: 'No response received' };
 
   for (const method of ['head', 'get']) {
@@ -116,7 +130,7 @@ async function probeReachability(webhookUrl, options = {}) {
       } catch (err) {
         lastError.message = err?.message || 'Request failed';
         if (attempt < retryAttempts && isTransientProbeError(err)) {
-          await sleep(retryDelayMs);
+          await sleep(probeRetryDelayMs(attempt, retryDelayMs, retryMaxDelayMs));
           continue;
         }
         break;
@@ -149,5 +163,6 @@ module.exports = {
   buildSignatureHeaders,
   deliver,
   probeReachability,
+  probeRetryDelayMs,
   sendSignedRequest,
 };

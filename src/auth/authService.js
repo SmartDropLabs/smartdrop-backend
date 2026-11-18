@@ -37,9 +37,23 @@ function sanitizeUser(user) {
  * @param {Object} userStore - Storage repository with findByEmail, findByUsername, create
  * @returns {Promise<Object>} Sanitized user record
  */
-async function registerUser({ email, username, password }, userStore) {
+/**
+ * Emails are compared case-insensitively (#612): `User@Example.com` and
+ * `user@example.com` are the same mailbox, so they must be the same account.
+ * Usernames (identifiers without an `@`) are left as typed.
+ */
+function normalizeEmail(value) {
+  return typeof value === 'string' ? value.trim().toLowerCase() : value;
+}
+
+function normalizeIdentifier(value) {
+  return typeof value === 'string' && value.includes('@') ? normalizeEmail(value) : value;
+}
+
+async function registerUser({ email: rawEmail, username, password }, userStore) {
   validatePasswordLength(password);
   validatePasswordComplexity(password);
+  const email = normalizeEmail(rawEmail);
 
   if (userStore.findByEmail && (await userStore.findByEmail(email))) {
     throw new AppError('CONFLICT', 'User already exists', 409);
@@ -77,7 +91,10 @@ async function registerUser({ email, username, password }, userStore) {
  * @param {Object} userStore - Storage repository with findByIdentifier / findByEmail and update
  * @returns {Promise<Object>} Sanitized user record
  */
-async function loginUser(identifier, password, userStore) {
+async function loginUser(rawIdentifier, password, userStore) {
+  // Same normalization as registration, so the lookup matches the stored
+  // email and the lockout counter can't be sidestepped by changing case.
+  const identifier = normalizeIdentifier(rawIdentifier);
   // Generic error to avoid account enumeration
   const invalidCredentialsError = new AppError(
     'UNAUTHORIZED',

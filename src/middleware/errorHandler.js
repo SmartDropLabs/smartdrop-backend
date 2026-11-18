@@ -39,6 +39,27 @@ function sanitizeMessage(msg) {
   return cleaned.trim() || 'An unexpected error occurred';
 }
 
+/**
+ * Deep-copy error details for the client with every `stack` property removed
+ * and string values sanitized (#619). Details are caller-supplied and can
+ * carry nested error objects whose stacks would otherwise be serialized.
+ */
+function sanitizeDetails(value, depth = 0) {
+  if (typeof value === 'string') return sanitizeMessage(value);
+  if (!value || typeof value !== 'object' || depth > 5) return value;
+  if (Array.isArray(value)) return value.map((v) => sanitizeDetails(v, depth + 1));
+  const out = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (k === 'stack') continue;
+    out[k] = sanitizeDetails(v, depth + 1);
+  }
+  return out;
+}
+
+function isProduction() {
+  return process.env.NODE_ENV === 'production';
+}
+
 function notFoundHandler(req, _res, next) {
   next(new AppError('NOT_FOUND', 'Resource does not exist', 404, { path: req.originalUrl }));
 }
@@ -94,16 +115,18 @@ function errorHandler(err, req, res, _next) {
   // #449 — Sanitize the message before sending to the client to prevent
   // stack traces, file paths, or other internal details from leaking.
   // #571 — Localize standard error messages based on the client's language preference.
-  const safeMessage = sanitizeMessage(message);
+  // #619 — in production a 5xx never echoes its own message or details: those
+  // describe internals (query text, file paths, upstream errors). The full
+  // error and stack are still logged and sent to the error tracker above.
+  const hideInternals = isProduction() && status >= 500;
+  const safeMessage = hideInternals
+    ? translate('INTERNAL_ERROR', locale)
+    : sanitizeMessage(message);
   const localizedMessage = translate(code, locale) !== code ? translate(code, locale) : safeMessage;
   const error = { code, message: localizedMessage, request_id: req.id };
-  if (isAppError && err.details && Object.keys(err.details).length > 0) {
+  if (!hideInternals && isAppError && err.details && Object.keys(err.details).length > 0) {
     // Also sanitize details to prevent stack traces in nested fields.
-    const safeDetails = {};
-    for (const [k, v] of Object.entries(err.details)) {
-      safeDetails[k] = typeof v === 'string' ? sanitizeMessage(v) : v;
-    }
-    error.details = safeDetails;
+    error.details = sanitizeDetails(err.details);
   }
 
   const { renderSafeErrorHtml } = require('../utils/htmlEscape');
@@ -121,4 +144,4 @@ function errorHandler(err, req, res, _next) {
   res.status(status).json({ error });
 }
 
-module.exports = { errorHandler, notFoundHandler, sendError };
+module.exports = { errorHandler, notFoundHandler, sendError, sanitizeDetails };

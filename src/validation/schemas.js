@@ -18,6 +18,17 @@ const assetCodeSchema = z
   .regex(/^[A-Za-z0-9]+$/, "Asset code must be alphanumeric")
   .transform((value) => value.toUpperCase());
 
+// Upper bounds for free-text and secret fields. The columns behind them are
+// unbounded TEXT, so without a cap one request can store megabytes per row
+// and every later list/read pays for it.
+const MAX_NAME_LENGTH = 200;
+const MAX_DESCRIPTION_LENGTH = 2000;
+const MAX_SECRET_LENGTH = 256;
+
+const descriptionSchema = z
+  .string()
+  .max(MAX_DESCRIPTION_LENGTH, `description must be ${MAX_DESCRIPTION_LENGTH} characters or fewer`);
+
 const optionalIssuerSchema = z.preprocess(
   (value) => (value === "" ? undefined : value),
   stellarPublicKeySchema.optional(),
@@ -275,8 +286,8 @@ function expiryLedgerSchema(currentLedger) {
 function airdropCreateBodySchema(currentLedger) {
   return z
     .object({
-      name: z.string().trim().min(1),
-      description: z.string().optional(),
+      name: z.string().trim().min(1).max(MAX_NAME_LENGTH),
+      description: descriptionSchema.optional(),
       asset: assetCodeSchema,
       asset_issuer: stellarPublicKeySchema,
       total_amount: z
@@ -311,8 +322,8 @@ function airdropCreateBodySchema(currentLedger) {
 
 function airdropUpdateBodySchema(currentLedger) {
   return z.object({
-    name: z.string().trim().min(1).optional(),
-    description: z.string().optional(),
+    name: z.string().trim().min(1).max(MAX_NAME_LENGTH).optional(),
+    description: descriptionSchema.optional(),
     expiry_ledger: expiryLedgerSchema(currentLedger).optional(),
   });
 }
@@ -340,22 +351,30 @@ const indexerAirdropIdParamsSchema = z.object({
     .regex(/^[A-Za-z0-9:_-]+$/, "Invalid airdrop id"),
 });
 
+// A recipient is a Stellar account (G…) or contract (C…) strkey: 56
+// characters of base32 (A-Z, 2-7). The old "any 10-80 uppercase/digit
+// string" check let arbitrary values reach the event-store lookup.
 const indexerAddressParamsSchema = z.object({
   address: z
     .string()
     .trim()
-    .min(10)
-    .max(80)
-    .regex(/^[A-Z0-9]+$/, "Invalid recipient address"),
+    .regex(/^[GC][A-Z2-7]{55}$/, "Must be a Stellar account (G…) or contract (C…) address"),
 });
 
 module.exports = {
+  MAX_DESCRIPTION_LENGTH,
+  MAX_NAME_LENGTH,
+  MAX_SECRET_LENGTH,
   airdropCreateBodySchema,
   airdropRecipientsBodySchema,
   airdropUpdateBodySchema,
   alertCreateBodySchema,
   assetCodeSchema,
   httpUrlSchema,
+  // Imported by routes/indexer.js; without these exports validate() received
+  // `undefined` and every indexer request failed with a 500.
+  indexerAddressParamsSchema,
+  indexerAirdropIdParamsSchema,
   isPrivateTarget,
   keyCreateBodySchema,
   keyRotateBodySchema,

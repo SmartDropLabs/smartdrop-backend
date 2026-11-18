@@ -60,7 +60,8 @@ router.get('/airdrops/:id/onchain-recipients', validateAirdropId, validatePagina
 
 router.get('/recipients/:address/claims', validateAddress, validatePagination, async (req, res, next) => {
   try {
-    const allClaims = await eventStore.getRecipientClaims(req.params.address);
+    const { address } = req.validated.params;
+    const allClaims = await eventStore.getRecipientClaims(address);
     const { page, limit } = req.validated.query;
     const start = (page - 1) * limit;
     const pageClaims = allClaims.slice(start, start + limit);

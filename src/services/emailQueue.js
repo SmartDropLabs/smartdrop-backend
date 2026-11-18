@@ -45,8 +45,21 @@ async function queueEmail(options) {
   return jobQueue.enqueue(EMAIL_JOB_TYPE, { to, subject, html, text, metadata });
 }
 
+/**
+ * Emails that failed every retry (#623). They are moved to the job queue's
+ * dead-letter list instead of being dropped, so they can be reviewed and
+ * re-sent manually.
+ *
+ * @param {number} [limit=100]
+ * @returns {Promise<Array<{job: Object, error: string, failedAt: string}>>}
+ */
+async function getFailedEmails(limit = 100) {
+  return jobQueue.getDeadLetters({ type: EMAIL_JOB_TYPE, limit });
+}
+
 module.exports = {
   queueEmail,
   registerEmailHandler,
+  getFailedEmails,
   EMAIL_JOB_TYPE,
 };

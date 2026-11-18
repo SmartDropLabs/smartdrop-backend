@@ -22,7 +22,7 @@ router.post('/alerts', validate(alertCreateBodySchema), async (req, res, next) =
 
 router.get('/alerts', validate(paginationQuerySchema, 'query'), async (req, res, next) => {
   try {
-    const pagination = parsePagination(req.query);
+    const pagination = parsePagination(req.validated.query);
     const result = await alertsService.listPaginated(pagination);
     return res.json(
       paginateResponse(

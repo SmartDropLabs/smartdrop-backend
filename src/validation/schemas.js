@@ -34,6 +34,14 @@ const optionalIssuerSchema = z.preprocess(
   stellarPublicKeySchema.optional(),
 );
 
+// Upper bounds for free-form request fields (#599, #600, #601). Unbounded
+// strings and arrays let one request write an arbitrarily large row.
+const MAX_SCOPE_LENGTH = 64;
+const MAX_SCOPES_PER_KEY = 20;
+const MAX_SECRET_LENGTH = 256;
+const MAX_DESCRIPTION_LENGTH = 500;
+const MAX_ALERT_THRESHOLD_USD = 1e12;
+
 const paginationQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(100).default(20),
@@ -127,7 +135,13 @@ const priceQuerySchema = z.object({
 
 const keyCreateBodySchema = z.object({
   label: z.string().trim().min(1).max(80),
-  scopes: z.array(z.string().trim().min(1)).nonempty().optional(),
+  // Bounded so a single request cannot store an arbitrarily large key record
+  // (#599): a scope is a short identifier, and no key needs dozens of them.
+  scopes: z
+    .array(z.string().trim().min(1).max(MAX_SCOPE_LENGTH))
+    .nonempty()
+    .max(MAX_SCOPES_PER_KEY)
+    .optional(),
   // Sizes the key's own rate limit bucket (issue #251). Enumerated from
   // configuration so adding a tier does not require touching validation.
   tier: z.enum(Object.keys(config.apiKeyRateLimit.tiers)).optional(),
@@ -146,7 +160,9 @@ const alertCreateBodySchema = z.object({
     { message: "Asset code is not in the list of watched Stellar assets" },
   ),
   type: z.enum(["above", "below", "change_pct"]),
-  threshold_usd: z.number().positive(),
+  // Finite and bounded (#600): an absurd threshold can never fire and only
+  // wastes an evaluation slot on every price tick.
+  threshold_usd: z.number().positive().finite().max(MAX_ALERT_THRESHOLD_USD),
   webhook_url: httpUrlSchema,
   webhook_secret: z.string().min(8).max(MAX_SECRET_LENGTH),
   repeat: z.boolean().optional(),
@@ -204,7 +220,7 @@ const webhookCreateBodySchema = z.object({
   url: httpUrlSchema,
   events: webhookSubscriptionSchema,
   secret: z.string().min(16).max(MAX_SECRET_LENGTH).optional(),
-  description: descriptionSchema.optional(),
+  description: z.string().trim().max(MAX_DESCRIPTION_LENGTH).optional(),
   filters: webhookFiltersSchema.optional(),
 });
 
@@ -213,7 +229,7 @@ const webhookPatchBodySchema = z.object({
   events: webhookSubscriptionSchema.optional(),
   secret: z.string().min(16).max(MAX_SECRET_LENGTH).optional(),
   active: z.boolean().optional(),
-  description: descriptionSchema.optional(),
+  description: z.string().trim().max(MAX_DESCRIPTION_LENGTH).optional(),
   filters: webhookFiltersSchema.optional(),
 });
 

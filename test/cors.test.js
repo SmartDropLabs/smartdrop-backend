@@ -176,3 +176,43 @@ describe('CORS_ALLOWED_ORIGINS config parsing', () => {
     else delete process.env.CORS_ALLOWED_ORIGINS;
   });
 });
+
+describe('production CORS allowlist guard (#621)', () => {
+  const { resolveAllowedOrigins } = buildCorsMiddleware;
+  const DEV_DEFAULTS = ['http://localhost:3000', 'http://localhost:3001'];
+
+  test('non-production keeps the configured origins', () => {
+    expect(resolveAllowedOrigins(DEV_DEFAULTS, { nodeEnv: 'development', explicit: undefined }))
+      .toEqual(DEV_DEFAULTS);
+  });
+
+  test('production without CORS_ALLOWED_ORIGINS allows no cross-origin callers', () => {
+    expect(resolveAllowedOrigins(DEV_DEFAULTS, { nodeEnv: 'production', explicit: undefined }))
+      .toEqual([]);
+    expect(resolveAllowedOrigins(DEV_DEFAULTS, { nodeEnv: 'production', explicit: '  ' }))
+      .toEqual([]);
+  });
+
+  test('production drops localhost origins even when listed explicitly', () => {
+    const origins = ['https://app.smartdrop.io', 'http://localhost:3000', 'http://127.0.0.1:8080'];
+    expect(resolveAllowedOrigins(origins, { nodeEnv: 'production', explicit: origins.join(',') }))
+      .toEqual(['https://app.smartdrop.io']);
+  });
+
+  test('a wildcard origin is never honoured', () => {
+    expect(resolveAllowedOrigins(['*', 'https://a.example'], { nodeEnv: 'development' }))
+      .toEqual(['https://a.example']);
+    expect(resolveAllowedOrigins(['*'], { nodeEnv: 'production', explicit: '*' })).toEqual([]);
+  });
+
+  test('a production app built from the dev defaults rejects the dev origin', async () => {
+    const app = express();
+    app.use(buildCorsMiddleware(DEV_DEFAULTS, { nodeEnv: 'production', explicit: undefined }));
+    app.get('/test', (req, res) => res.json({ ok: true }));
+    app.use(errorHandler);
+
+    const res = await request(app).get('/test').set('Origin', 'http://localhost:3000');
+    expect(res.status).toBe(403);
+    expect(res.headers['access-control-allow-origin']).toBeUndefined();
+  });
+});

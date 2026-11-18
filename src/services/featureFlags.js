@@ -14,6 +14,7 @@
  *   }
  */
 
+const cache = require('./cache');
 const logger = require('../logger');
 
 // In-memory flag store. In production, back this with Redis or a DB.
@@ -48,7 +49,7 @@ function initFromEnv() {
 }
 
 /**
- * Set or update a feature flag.
+ * Set or update a feature flag, invalidating cache (#625).
  * @param {string} name - Flag name
  * @param {Object} config - Flag configuration
  */
@@ -60,6 +61,43 @@ function setFlag(name, config) {
     denylist: config.denylist ?? [],
     updatedAt: Date.now(),
   });
+  // Fire-and-forget cache invalidation
+  try {
+    cache.del(`flag:${name}`).catch?.(() => {});
+    cache.del('flags:all').catch?.(() => {});
+  } catch {
+    // Ignore cache errors
+  }
+}
+
+/**
+ * Update a feature flag and invalidate cache (#625).
+ * @param {string} name - Flag name
+ * @param {Object|boolean} value - Flag configuration or boolean
+ */
+async function updateFlag(name, value) {
+  const config = typeof value === 'boolean' ? { enabled: value } : (value || {});
+  setFlag(name, config);
+  try {
+    await cache.del(`flag:${name}`);
+    await cache.del('flags:all');
+  } catch (err) {
+    logger.warn(`Failed to invalidate cache for flag:${name}`, { error: err.message });
+  }
+}
+
+/**
+ * Remove a feature flag and invalidate cache (#625).
+ * @param {string} name - Flag name
+ */
+async function removeFlag(name) {
+  flags.delete(name);
+  try {
+    await cache.del(`flag:${name}`);
+    await cache.del('flags:all');
+  } catch (err) {
+    logger.warn(`Failed to invalidate cache for flag:${name}`, { error: err.message });
+  }
 }
 
 /**
@@ -116,6 +154,8 @@ function hashCode(str) {
 module.exports = {
   initFromEnv,
   setFlag,
+  updateFlag,
+  removeFlag,
   isEnabled,
   getAllFlags,
 };

@@ -30,6 +30,32 @@ const RETRY_DELAY_MS = 5000;
 const DEAD_LETTER_KEY = 'jobs:dead';
 const DEAD_LETTER_MAX = 1000;
 const DEAD_LETTER_TTL_SECONDS = 30 * 24 * 60 * 60;
+// A handler that runs longer than this is treated as failed. The job then goes
+// through the normal retry path, and its concurrency slot is freed (#699).
+const DEFAULT_JOB_TIMEOUT_MS = 60 * 1000;
+
+class JobTimeoutError extends Error {
+  constructor(type, ms) {
+    super(`Job ${type} timed out after ${ms}ms`);
+    this.name = 'JobTimeoutError';
+  }
+}
+
+/**
+ * Reject if `promise` has not settled within `ms`. A value of 0 or less
+ * disables the timeout. The timer is cleared once the promise settles.
+ * Note: a timed-out handler is not cancelled; it may still finish in the
+ * background, so handlers should be idempotent.
+ */
+function withTimeout(promise, ms, type) {
+  if (!(ms > 0)) return promise;
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new JobTimeoutError(type, ms)), ms);
+    if (timer.unref) timer.unref();
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 class JobQueue {
   constructor() {
@@ -37,6 +63,7 @@ class JobQueue {
     this.running = false;
     this.timer = null;
     this.concurrency = DEFAULT_CONCURRENCY;
+    this.defaultTimeoutMs = DEFAULT_JOB_TIMEOUT_MS;
     this.activeJobs = 0;
     this.stats = {
       enqueued: 0,
@@ -58,6 +85,17 @@ class JobQueue {
   }
 
   /**
+   * Set the timeout applied to jobs that do not set their own (#699).
+   * @param {number} ms - Milliseconds; 0 disables the default timeout
+   */
+  setDefaultTimeout(ms) {
+    if (typeof ms !== 'number' || !Number.isFinite(ms) || ms < 0) {
+      throw new Error('setDefaultTimeout expects a non-negative number of milliseconds');
+    }
+    this.defaultTimeoutMs = ms;
+  }
+
+  /**
    * Enqueue a job for background processing with optional priority support (#624).
    * @param {string} type - Job type
    * @param {Object} data - Job payload
@@ -68,12 +106,14 @@ class JobQueue {
     const priority = typeof options === 'number'
       ? options
       : (options?.priority ?? data?.priority ?? 0);
+    const timeoutMs = options && typeof options === 'object' ? options.timeoutMs : undefined;
     const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const job = {
       id: jobId,
       type,
       data,
       priority,
+      timeoutMs,
       attempts: 0,
       maxRetries: MAX_RETRIES,
       enqueuedAt: new Date().toISOString(),
@@ -168,7 +208,7 @@ class JobQueue {
     }
 
     try {
-      await handler(job);
+      await withTimeout(handler(job), job.timeoutMs ?? this.defaultTimeoutMs, job.type);
       this.stats.processed++;
       logger.debug(`Job completed: ${job.type} (${job.id})`);
     } catch (err) {

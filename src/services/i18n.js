@@ -5,6 +5,11 @@
  *
  * Supports error message localization based on Accept-Language header.
  * Currently supports: English (en), Spanish (es), French (fr).
+ *
+ * Missing-translation tracking (#692): when a key has no translation for the
+ * requested locale, the (key, locale) pair is recorded once per process in a
+ * bounded in-memory tracker. Tracking never throws and never changes the
+ * value returned by translate().
  */
 
 const translations = {
@@ -49,6 +54,53 @@ const translations = {
   },
 };
 
+const DEFAULT_LOCALE = 'en';
+
+// Maximum number of distinct (locale, key) pairs kept in memory.
+const MAX_TRACKED_MISSING = 500;
+
+// Insertion-ordered Set: oldest entry is first, so it can be evicted cheaply.
+const missingTranslations = new Set();
+
+function hasOwn(obj, prop) {
+  return obj != null && Object.prototype.hasOwnProperty.call(obj, prop);
+}
+
+/**
+ * Record a (key, locale) pair that had no translation. Each pair is stored
+ * once per process; when the tracker is full the oldest pair is evicted.
+ * Never throws.
+ *
+ * @param {string} key
+ * @param {string} locale
+ */
+function trackMissingTranslation(key, locale) {
+  try {
+    const id = `${String(locale)}\u0000${String(key)}`;
+    if (missingTranslations.has(id)) return;
+    if (missingTranslations.size >= MAX_TRACKED_MISSING) {
+      const oldest = missingTranslations.values().next().value;
+      missingTranslations.delete(oldest);
+    }
+    missingTranslations.add(id);
+  } catch (err) {
+    // Tracking must never break translation.
+  }
+}
+
+/**
+ * Snapshot of tracked missing translations as { locale, key } objects.
+ * Returns a fresh array; mutating it does not affect the tracker.
+ *
+ * @returns {Array<{locale: string, key: string}>}
+ */
+function getMissingTranslations() {
+  return Array.from(missingTranslations, (id) => {
+    const sep = id.indexOf('\u0000');
+    return { locale: id.slice(0, sep), key: id.slice(sep + 1) };
+  });
+}
+
 function parseAcceptLanguage(header) {
   if (!header) return 'en';
   const parts = header.split(',').map((part) => {
@@ -63,13 +115,32 @@ function parseAcceptLanguage(header) {
 function getLocale(req) {
   const acceptLanguage = req.get('accept-language');
   const preferred = parseAcceptLanguage(acceptLanguage);
-  return Object.prototype.hasOwnProperty.call(translations, preferred) ? preferred : 'en';
+  return hasOwn(translations, preferred) ? preferred : 'en';
 }
 
-const DEFAULT_LOCALE = 'en';
-
+/**
+ * Translate an error message key.
+ * Lookup order: requested locale -> English fallback -> the key itself.
+ * A missing requested-locale entry is tracked via trackMissingTranslation.
+ *
+ * @param {string} key
+ * @param {string} [locale]
+ * @returns {string}
+ */
 function translate(key, locale = DEFAULT_LOCALE) {
-  return translations[locale]?.[key] || translations[DEFAULT_LOCALE]?.[key] || key;
+  const localized = hasOwn(translations, locale) && hasOwn(translations[locale], key)
+    ? translations[locale][key]
+    : undefined;
+  if (localized) return localized;
+
+  try {
+    trackMissingTranslation(key, locale);
+  } catch (err) {
+    // Ignore: tracking failures must not affect translation.
+  }
+
+  const fallback = hasOwn(translations[DEFAULT_LOCALE], key) ? translations[DEFAULT_LOCALE][key] : undefined;
+  return fallback || key;
 }
 
 module.exports = {
@@ -77,4 +148,6 @@ module.exports = {
   getLocale,
   translations,
   DEFAULT_LOCALE,
+  // Additive (#692): read-only view of tracked missing translations.
+  getMissingTranslations,
 };

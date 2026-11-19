@@ -2,6 +2,52 @@ const { getDb } = require('../database');
 const logger = require('../logger');
 const { nowIso } = require('../utils/dates');
 
+// IP geolocation is opt-in: nothing is looked up until a provider is set with
+// setGeoLookup(). The lookup has a short timeout and never blocks or fails the
+// audit write.
+const GEO_LOOKUP_TIMEOUT_MS = 500;
+let geoLookup = null;
+
+/**
+ * Set the IP geolocation provider (#697). The function receives an IP address
+ * and resolves to `{ country }` with an ISO 3166-1 alpha-2 code, or null.
+ * Pass null to disable lookups.
+ * @param {((ip: string) => Promise<{country?: string} | null>) | null} fn
+ */
+function setGeoLookup(fn) {
+  if (fn !== null && typeof fn !== 'function') {
+    throw new Error('setGeoLookup expects a function or null');
+  }
+  geoLookup = fn;
+}
+
+/**
+ * Resolve the country for an IP. Returns null when no provider is set, the
+ * lookup fails, or it takes longer than GEO_LOOKUP_TIMEOUT_MS.
+ * @param {string} ipAddress
+ * @returns {Promise<string|null>}
+ */
+async function resolveCountry(ipAddress) {
+  if (!geoLookup || !ipAddress) return null;
+  let timer;
+  try {
+    const geo = await Promise.race([
+      geoLookup(ipAddress),
+      new Promise((resolve) => {
+        timer = setTimeout(() => resolve(null), GEO_LOOKUP_TIMEOUT_MS);
+        if (timer.unref) timer.unref();
+      }),
+    ]);
+    const code = geo && typeof geo.country === 'string' ? geo.country.trim() : '';
+    return /^[A-Za-z]{2}$/.test(code) ? code.toUpperCase() : null;
+  } catch (err) {
+    logger.warn('IP geolocation lookup failed', { error: err.message });
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Log API key usage to audit trail
  * 
@@ -19,8 +65,10 @@ async function logUsage({ keyId, endpoint, ipAddress, statusCode, responseTimeMs
       return;
     }
 
+    const country = await resolveCountry(ipAddress);
     const client = trx || getDb();
     await client('api_key_audit_logs').insert({
+      country,
       key_id: keyId,
       endpoint,
       ip_address: ipAddress,
@@ -116,6 +164,8 @@ async function pruneAuditLogs(retentionDays = DEFAULT_RETENTION_DAYS, trx) {
 
 module.exports = {
   logUsage,
+  setGeoLookup,
+  resolveCountry,
   getKeyAuditLog,
   getAllAuditLogs,
   pruneAuditLogs,

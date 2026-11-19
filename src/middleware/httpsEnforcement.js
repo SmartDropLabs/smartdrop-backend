@@ -148,9 +148,14 @@ function createHttpsEnforcementMiddleware(customConfig) {
     const targetHost = resolveRedirectHost(req, httpsConfig);
     const redirectUrl = `https://${targetHost}${req.originalUrl || req.url}`;
 
-    logger.info('Redirecting plain HTTP request to HTTPS', {
-      originalUrl: req.originalUrl || req.url,
+    // Issue #659: Log HTTP-to-HTTPS redirects for security monitoring
+    logger.warn('[HTTPS] Redirecting HTTP request to HTTPS', {
+      ip: req.ip,
+      url: req.originalUrl || req.url,
+      method: req.method,
+      userAgent: req.get('user-agent'),
       redirectUrl,
+      timestamp: new Date().toISOString(),
     });
 
     res.setHeader('Location', redirectUrl);

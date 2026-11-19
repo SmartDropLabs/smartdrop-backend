@@ -3,12 +3,22 @@
 const logger = require('../logger');
 
 /**
- * Data access audit trail (issue #563).
+ * Data access audit trail (issue #563, #660).
  *
  * Logs every data read/write operation for accountability, breach
  * detection, and compliance. Unlike the admin-action AuditLogger (#473)
  * and the API-key usage log (#551), this records *what data* was accessed
  * by *whom*, regardless of auth method.
+ * 
+ * Issue #660: Database indexes required for efficient audit queries:
+ * 
+ * CREATE INDEX idx_audit_user ON audit_log(user_id);
+ * CREATE INDEX idx_audit_timestamp ON audit_log(timestamp);
+ * CREATE INDEX idx_audit_resource ON audit_log(resource, resource_id);
+ * CREATE INDEX idx_audit_action ON audit_log(action, timestamp DESC);
+ * 
+ * These indexes prevent slow audit queries and performance degradation
+ * when the audit log grows. Apply via migration script.
  */
 
 class DataAccessAuditor {

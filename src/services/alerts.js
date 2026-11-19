@@ -5,6 +5,24 @@ const logger = require('../logger');
 
 const IDS_KEY = 'alerts:ids';
 const COOLDOWN_MS = 5 * 60 * 1000;
+const DEDUP_WINDOW_SECONDS = 300;
+
+function getAlertDedupKey(alert) {
+  const resource = alert.resource || alert.asset || alert.id;
+  return `alert:dedup:${alert.type}:${resource}`;
+}
+
+async function isDuplicateAlert(alert) {
+  const key = getAlertDedupKey(alert);
+  try {
+    const existing = await cache.get(key);
+    if (existing) return true;
+    await cache.set(key, { id: alert.id, type: alert.type, at: Date.now() }, DEDUP_WINDOW_SECONDS);
+  } catch (err) {
+    // Ignore cache retrieval/storage failure so alerts aren't blocked
+  }
+  return false;
+}
 // Ceiling on one asset's alert evaluation pass (issue #315). evaluateForAsset
 // makes several Redis round trips per alert with no timeout of its own, so a
 // slow/hanging Redis instance could otherwise block the evaluation loop
@@ -130,6 +148,11 @@ async function remove(id) {
 }
 
 async function fire(alert, priceUsd) {
+  if (await isDuplicateAlert(alert)) {
+    logger.info('Duplicate alert suppressed by deduplication', { alert_id: alert.id, asset: alert.asset });
+    return false;
+  }
+
   const payload = {
     event: 'price.alert',
     alert_id: alert.id,
@@ -142,6 +165,7 @@ async function fire(alert, priceUsd) {
 
   logger.info('Price alert triggered', { alert_id: alert.id, asset: alert.asset, price: priceUsd });
   await webhook.deliver(alert.webhook_url, alert.webhook_secret, payload);
+  return true;
 }
 
 function assetCooldownKey(asset) {
@@ -257,5 +281,16 @@ async function backfillAssetIndex() {
 }
 
 module.exports = {
-  create, get, list, listPaginated, remove, evaluateForAsset, evaluateAll, backfillAssetIndex,
+  create,
+  get,
+  list,
+  listPaginated,
+  remove,
+  evaluateForAsset,
+  evaluateAll,
+  backfillAssetIndex,
+  fire,
+  isDuplicateAlert,
+  getAlertDedupKey,
+  DEDUP_WINDOW_SECONDS,
 };

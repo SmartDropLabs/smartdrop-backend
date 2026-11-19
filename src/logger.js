@@ -17,9 +17,10 @@ const getLogLevel = () => {
 };
 
 // ==================== FORMAT DECISION ====================
-const env = process.env.NODE_ENV || 'development';
-const logFormat = process.env.LOG_FORMAT || (env === 'production' ? 'json' : 'pretty');
-const useJsonFormat = logFormat === 'json';
+// Structured (JSON) output is the default in every environment so logs are
+// machine-parseable. Set LOG_FORMAT=pretty for human-readable local output.
+const logFormat = process.env.LOG_FORMAT || 'json';
+const useJsonFormat = logFormat !== 'pretty';
 
 // ==================== REQUEST CONTEXT ====================
 const requestIdFormat = winston.format((info) => {

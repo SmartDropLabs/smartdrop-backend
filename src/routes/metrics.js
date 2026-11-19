@@ -12,6 +12,7 @@ const indexerPoller = require('../indexer/runtime');
 const webhookRepo = require('../repositories/webhookRepository');
 const deliveryRepo = require('../repositories/deliveryRepository');
 const { defaultPoolMonitor } = require('../database');
+const { requireApiKey } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -113,9 +114,10 @@ async function metricsHandler(_req, res) {
   } catch (err) {
     res.status(500).send('# Error generating metrics\n');
   }
-);
+}
 
-router.get('/metrics', metricsHandler);
+// Metrics expose internal operational data, so they require an admin-scoped API key (#674).
+router.get('/metrics', requireApiKey({ scopes: ['admin'] }), metricsHandler);
 
 module.exports = {
   router,
@@ -123,5 +125,4 @@ module.exports = {
   requestMetricsMiddleware,
   incCounter,
   counters,
-  registry,
 };

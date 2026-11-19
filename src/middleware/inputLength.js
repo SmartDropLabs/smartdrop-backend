@@ -45,18 +45,27 @@ const FIELD_MAX_LENGTHS = {
   body: 10000,
 };
 
-function getMaxLength(field, defaultValue) {
-  return FIELD_MAX_LENGTHS[field] ?? defaultValue;
+function getMaxLength(field, defaultValue, fieldLimits = FIELD_MAX_LENGTHS) {
+  return fieldLimits[field] ?? defaultValue;
 }
 
-function checkStringLengths(obj, path = '', errors = []) {
+function checkStringLengths(
+  obj,
+  path = '',
+  errors = [],
+  {
+    fieldLimits = FIELD_MAX_LENGTHS,
+    maxStringLength = DEFAULT_MAX_STRING_LENGTH,
+    maxArrayLength = DEFAULT_MAX_ARRAY_LENGTH,
+  } = {},
+) {
   if (obj === null || obj === undefined) return errors;
 
   if (typeof obj === 'string') {
     // Normalize Unicode before length validation to prevent validation bypass (#656)
     const normalized = obj.normalize('NFC');
     const field = path.split('.').pop();
-    const max = getMaxLength(field, DEFAULT_MAX_STRING_LENGTH);
+    const max = getMaxLength(field, maxStringLength, fieldLimits);
     if (normalized.length > max) {
       errors.push(`${path || 'value'} exceeds maximum length of ${max} (got ${normalized.length})`);
     }
@@ -64,16 +73,22 @@ function checkStringLengths(obj, path = '', errors = []) {
   }
 
   if (Array.isArray(obj)) {
-    if (obj.length > DEFAULT_MAX_ARRAY_LENGTH) {
-      errors.push(`${path || 'array'} exceeds maximum length of ${DEFAULT_MAX_ARRAY_LENGTH} (got ${obj.length})`);
+    if (obj.length > maxArrayLength) {
+      errors.push(`${path || 'array'} exceeds maximum length of ${maxArrayLength} (got ${obj.length})`);
     }
-    obj.forEach((item, index) => checkStringLengths(item, `${path}[${index}]`, errors));
+    obj.forEach((item, index) =>
+      checkStringLengths(item, `${path}[${index}]`, errors, { fieldLimits, maxStringLength, maxArrayLength }),
+    );
     return errors;
   }
 
   if (typeof obj === 'object') {
     for (const [key, value] of Object.entries(obj)) {
-      checkStringLengths(value, path ? `${path}.${key}` : key, errors);
+      checkStringLengths(value, path ? `${path}.${key}` : key, errors, {
+        fieldLimits,
+        maxStringLength,
+        maxArrayLength,
+      });
     }
   }
 
@@ -93,23 +108,24 @@ function inputLengthValidation(options = {}) {
 
   // Merge custom field limits with defaults
   const maxLimits = { ...FIELD_MAX_LENGTHS, ...fields };
+  const checkOpts = { fieldLimits: maxLimits, maxStringLength, maxArrayLength };
 
   return (req, res, next) => {
     const errors = [];
 
     // Validate body
     if (req.body && typeof req.body === 'object') {
-      checkStringLengths(req.body, 'body', errors);
+      checkStringLengths(req.body, 'body', errors, checkOpts);
     }
 
     // Validate query params
     if (req.query && typeof req.query === 'object') {
-      checkStringLengths(req.query, 'query', errors);
+      checkStringLengths(req.query, 'query', errors, checkOpts);
     }
 
     // Validate route params
     if (req.params && typeof req.params === 'object') {
-      checkStringLengths(req.params, 'params', errors);
+      checkStringLengths(req.params, 'params', errors, checkOpts);
     }
 
     if (errors.length > 0) {

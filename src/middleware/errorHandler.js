@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const AppError = require('../errors/AppError');
 const logger = require('../logger');
 const errorTracker = require('../services/errorTracker');
@@ -118,12 +119,15 @@ function errorHandler(err, req, res, _next) {
   // #619 — in production a 5xx never echoes its own message or details: those
   // describe internals (query text, file paths, upstream errors). The full
   // error and stack are still logged and sent to the error tracker above.
+  const correlationId = req.id || req.headers?.['x-correlation-id'] || crypto.randomUUID();
+  res.setHeader('X-Correlation-Id', correlationId);
+
   const hideInternals = isProduction() && status >= 500;
   const safeMessage = hideInternals
     ? translate('INTERNAL_ERROR', locale)
     : sanitizeMessage(message);
   const localizedMessage = translate(code, locale) !== code ? translate(code, locale) : safeMessage;
-  const error = { code, message: localizedMessage, request_id: req.id };
+  const error = { code, message: localizedMessage, request_id: correlationId };
   if (!hideInternals && isAppError && err.details && Object.keys(err.details).length > 0) {
     // Also sanitize details to prevent stack traces in nested fields.
     error.details = sanitizeDetails(err.details);

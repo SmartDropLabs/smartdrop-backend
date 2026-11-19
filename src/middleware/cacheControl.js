@@ -37,6 +37,12 @@ function cacheControl(options = {}) {
       return next();
     }
 
+    // Authenticated requests must never be cached in shared caches (#705)
+    if (req.user) {
+      res.setHeader('Cache-Control', 'private, no-store');
+      return next();
+    }
+
     // Check if path is cacheable
     const cacheable = CACHEABLE_PATHS.find((c) => c.pattern.test(path));
     if (cacheable) {

@@ -24,6 +24,7 @@ const config = require('../config');
 const { setCookie } = require('../auth/cookies');
 
 const CSRF_SECRET = process.env.CSRF_SECRET || 'smartdrop-csrf-token-hmac-secret-key-32b';
+const DEFAULT_TOKEN_TTL_MS = 30 * 60 * 1000; // 30 minutes (#708)
 
 const METHOD_OVERRIDE_HEADERS = [
   'x-http-method-override',
@@ -45,14 +46,27 @@ const DEFAULT_EXEMPT_PATHS = [
 /**
  * Generate a cryptographically secure CSRF token bound to a session ID.
  */
-function generateCsrfToken(sessionId, secret = CSRF_SECRET) {
+function generateCsrfToken(sessionId, secret = CSRF_SECRET, issuedAt = Date.now()) {
   const boundId = sessionId || 'anonymous';
   const salt = crypto.randomBytes(16).toString('hex');
+  const issuedAtStr = String(issuedAt);
   const hmac = crypto
     .createHmac('sha256', secret)
-    .update(`${boundId}:${salt}`)
+    .update(`${boundId}:${salt}:${issuedAtStr}`)
     .digest('hex');
-  return `${salt}.${hmac}`;
+  return `${salt}.${issuedAtStr}.${hmac}`;
+}
+
+/**
+ * Extract the age in milliseconds of a timestamped CSRF token, or null if untimestamped.
+ */
+function getCsrfTokenAgeMs(token, now = Date.now()) {
+  if (!token || typeof token !== 'string') return null;
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  const issuedAt = Number(parts[1]);
+  if (!Number.isFinite(issuedAt)) return null;
+  return Math.max(0, now - issuedAt);
 }
 
 /**
@@ -62,15 +76,27 @@ function verifyCsrfToken(token, sessionId, secret = CSRF_SECRET) {
   if (!token || typeof token !== 'string') return false;
 
   const parts = token.split('.');
-  if (parts.length !== 2) return false;
+  let payload;
+  let receivedHmac;
+  if (parts.length === 2) {
+    const [salt, hmac] = parts;
+    if (!salt || !hmac) return false;
+    const boundId = sessionId || 'anonymous';
+    payload = `${boundId}:${salt}`;
+    receivedHmac = hmac;
+  } else if (parts.length === 3) {
+    const [salt, issuedAtStr, hmac] = parts;
+    if (!salt || !issuedAtStr || !hmac) return false;
+    const boundId = sessionId || 'anonymous';
+    payload = `${boundId}:${salt}:${issuedAtStr}`;
+    receivedHmac = hmac;
+  } else {
+    return false;
+  }
 
-  const [salt, receivedHmac] = parts;
-  if (!salt || !receivedHmac) return false;
-
-  const boundId = sessionId || 'anonymous';
   const expectedHmac = crypto
     .createHmac('sha256', secret)
-    .update(`${boundId}:${salt}`)
+    .update(payload)
     .digest('hex');
 
   const receivedBuf = Buffer.from(receivedHmac, 'utf8');
@@ -189,6 +215,7 @@ function createCsrfProtectionMiddleware(options = {}) {
   const allowedOrigins = options.allowedOrigins || config.corsAllowedOrigins || [];
   const exemptPaths = options.exemptPaths || [];
   const secret = options.secret || CSRF_SECRET;
+  const tokenTtlMs = Number.isFinite(options.tokenTtlMs) ? options.tokenTtlMs : DEFAULT_TOKEN_TTL_MS;
 
   return function csrfProtectionMiddleware(req, res, next) {
     // 1. Detect and reject method override bypass attempts immediately
@@ -263,6 +290,23 @@ function createCsrfProtectionMiddleware(options = {}) {
       return next(
         new AppError('FORBIDDEN', 'Invalid CSRF token', 403)
       );
+    }
+
+    // 8. Periodic CSRF token rotation (#708)
+    const tokenAge = getCsrfTokenAgeMs(token);
+    if (tokenAge !== null && tokenAge > tokenTtlMs) {
+      const newToken = generateCsrfToken(sessionId, secret);
+      if (typeof res.cookie === 'function') {
+        setCookie(res, CSRF_COOKIE_NAME, newToken, {
+          req,
+          sameSite: 'Strict',
+          httpOnly: true,
+          maxAgeMs: CSRF_COOKIE_MAX_AGE_MS,
+        });
+      }
+      if (typeof res.setHeader === 'function') {
+        res.setHeader('X-CSRF-Token', newToken);
+      }
     }
 
     return next();

@@ -105,8 +105,17 @@ class VirusScanner {
       return { infected: cached.infected, threats: cached.threats || [] };
     }
 
+    const timeoutMs = config.virusScannerTimeoutMs || 30000;
+    let timer;
+    const timeoutPromise = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('Scan timeout')), timeoutMs);
+    });
+
     try {
-      const result = await this.backend.scan(fileBuffer, filename);
+      const scanPromise = this.backend.scan(fileBuffer, filename);
+      const result = await Promise.race([scanPromise, timeoutPromise]);
+      clearTimeout(timer);
+
       logger.info('Virus scan completed', {
         filename,
         infected: result.infected,
@@ -120,6 +129,7 @@ class VirusScanner {
       await this._writeScanCache(cacheKey, normalized);
       return normalized;
     } catch (err) {
+      clearTimeout(timer);
       logger.error('Virus scan error', { error: err.message, filename });
       throw err;
     }

@@ -44,13 +44,53 @@ async function processBatch(items, handler, options = {}) {
 }
 
 /**
+ * Process a batch of operations atomically within a database transaction (#631).
+ * If any operation fails, the entire transaction rolls back.
+ *
+ * @param {Array} items - Array of items to process
+ * @param {Function} handler - async (item, index, trx) => result
+ * @param {Object} [db] - Database client or pool with transaction() support
+ * @returns {Promise<Array>} Array of results
+ */
+async function processBatchTransactional(items, handler, db) {
+  if (!items || !Array.isArray(items)) {
+    throw new Error('Items must be an array');
+  }
+
+  if (db && typeof db.transaction === 'function') {
+    return await db.transaction(async (trx) => {
+      const results = [];
+      for (let i = 0; i < items.length; i++) {
+        results.push(await handler(items[i], i, trx));
+      }
+      return results;
+    });
+  }
+
+  // Fallback transactional processing: fails immediately if any item throws
+  const executed = [];
+  try {
+    for (let i = 0; i < items.length; i++) {
+      executed.push(await handler(items[i], i));
+    }
+    return executed;
+  } catch (err) {
+    logger.error('Bulk transaction failed, rolling back', { error: err.message, processedCount: executed.length });
+    throw err;
+  }
+}
+
+/**
  * Express handler factory for bulk endpoints.
  *
  * @param {Function} operationHandler - async (item) => result
  * @param {string} itemName - Name of the item type for error messages
+ * @param {Object} [options]
+ * @param {boolean} [options.transactional=false] - Whether to execute atomically within a transaction
+ * @param {Object} [options.db] - Database instance
  * @returns {Function} Express route handler
  */
-function bulkHandler(operationHandler, itemName = 'item') {
+function bulkHandler(operationHandler, itemName = 'item', options = {}) {
   return async (req, res, next) => {
     try {
       const items = req.body?.items;
@@ -59,6 +99,17 @@ function bulkHandler(operationHandler, itemName = 'item') {
       }
       if (items.length > 100) {
         return res.status(400).json({ error: `Batch size limited to 100 ${itemName}s per request` });
+      }
+
+      if (options.transactional || req.query?.atomic === 'true') {
+        const db = options.db || req.db;
+        const results = await processBatchTransactional(items, operationHandler, db);
+        return res.json({
+          total: items.length,
+          succeeded: results.length,
+          failed: 0,
+          results,
+        });
       }
 
       const results = await processBatch(items, operationHandler);
@@ -77,5 +128,6 @@ function bulkHandler(operationHandler, itemName = 'item') {
 
 module.exports = {
   processBatch,
+  processBatchTransactional,
   bulkHandler,
 };

@@ -7,6 +7,14 @@ const IDS_KEY = 'alerts:ids';
 const COOLDOWN_MS = 5 * 60 * 1000;
 const DEDUP_WINDOW_SECONDS = 300;
 
+// Escalation (issue #689): an alert that is still unacknowledged this long
+// after creation is escalated once via its webhook. Default 15 minutes;
+// override with ALERT_ESCALATION_TIMEOUT_MS.
+const ESCALATION_TIMEOUT_MS = parseInt(process.env.ALERT_ESCALATION_TIMEOUT_MS, 10) || 15 * 60 * 1000;
+// Short-lived lock so concurrent evaluators (multiple instances, overlapping
+// passes) cannot both deliver the escalation for the same alert.
+const ESCALATION_LOCK_TTL_SECONDS = 60;
+
 function getAlertDedupKey(alert) {
   const resource = alert.resource || alert.asset || alert.id;
   return `alert:dedup:${alert.type}:${resource}`;
@@ -81,6 +89,11 @@ async function create(data) {
     created_at: new Date().toISOString(),
     last_fired_at: null,
     baseline_price: baselinePrice,
+    // Escalation state (issue #689). Absent/false until acknowledge() is
+    // called or escalateAlert() delivers the escalation.
+    acknowledged: false,
+    acknowledged_at: null,
+    escalated_at: null,
   };
 
   const redis = cache.getClient();
@@ -166,6 +179,113 @@ async function fire(alert, priceUsd) {
   logger.info('Price alert triggered', { alert_id: alert.id, asset: alert.asset, price: priceUsd });
   await webhook.deliver(alert.webhook_url, alert.webhook_secret, payload);
   return true;
+}
+
+// Marks an alert as acknowledged so it is never escalated. Returns the
+// updated alert, or null if the alert does not exist. Acknowledging an
+// already-acknowledged alert is a no-op that returns the existing record.
+async function acknowledge(id) {
+  const existing = await cache.get(alertKey(id));
+  if (!existing) return null;
+  if (existing.acknowledged) return existing;
+  const updated = {
+    ...existing,
+    acknowledged: true,
+    acknowledged_at: new Date().toISOString(),
+  };
+  await cache.set(alertKey(id), updated);
+  return updated;
+}
+
+// An alert is due for escalation when it has not been acknowledged, has not
+// already been escalated, and was created at least ESCALATION_TIMEOUT_MS ago.
+function isEscalationDue(alert, now = Date.now()) {
+  if (!alert || alert.acknowledged || alert.escalated_at) return false;
+  const createdMs = Date.parse(alert.created_at);
+  if (Number.isNaN(createdMs)) return false;
+  return now - createdMs > ESCALATION_TIMEOUT_MS;
+}
+
+function escalationLockKey(id) {
+  return `alert:escalation-lock:${id}`;
+}
+
+// Escalates a single alert once. Idempotent: returns false without delivering
+// if the alert is acknowledged, already escalated, or another worker holds the
+// escalation lock. The durable `escalated_at` marker prevents re-escalation
+// after the lock expires. Returns true only when this call delivered it.
+async function escalateAlert(alert) {
+  if (!alert || alert.acknowledged || alert.escalated_at) return false;
+
+  const redis = cache.getClient();
+  // SET NX EX: only one caller across all instances can take the lock.
+  const locked = await redis.set(
+    escalationLockKey(alert.id),
+    '1',
+    'EX',
+    ESCALATION_LOCK_TTL_SECONDS,
+    'NX'
+  );
+  if (locked !== 'OK') return false;
+
+  // Re-read under the lock: another worker may have finished escalating
+  // (or the alert may have been acknowledged) between our check and the lock.
+  const current = await cache.get(alertKey(alert.id));
+  if (!current || current.acknowledged || current.escalated_at) {
+    await redis.del(escalationLockKey(alert.id));
+    return false;
+  }
+
+  const payload = {
+    event: 'alert.escalated',
+    alert_id: current.id,
+    asset: current.asset,
+    type: current.type,
+    threshold_usd: current.threshold_usd,
+    created_at: current.created_at,
+    escalation_timeout_ms: ESCALATION_TIMEOUT_MS,
+    escalated_at: new Date().toISOString(),
+  };
+
+  try {
+    await webhook.deliver(current.webhook_url, current.webhook_secret, payload);
+  } catch (err) {
+    // Delivery failed: release the lock so a later pass can retry.
+    await redis.del(escalationLockKey(alert.id));
+    logger.error('Alert escalation delivery failed', { alert_id: current.id, error: err.message });
+    throw err;
+  }
+
+  await cache.set(alertKey(current.id), { ...current, escalated_at: payload.escalated_at });
+  logger.warn('Alert escalated after acknowledgement timeout', { alert_id: current.id, asset: current.asset });
+  return true;
+}
+
+// Scans all alerts (paged, like evaluateAll) and escalates those that are due.
+// Returns the number of alerts escalated in this pass. A failure on one alert
+// is logged and does not stop the pass.
+async function evaluateEscalations({ now = Date.now() } = {}) {
+  let escalated = 0;
+  let offset = 0;
+
+  for (;;) {
+    const { alerts: page, total } = await listPaginated({
+      offset,
+      limit: EVALUATE_ALL_PAGE_SIZE,
+    });
+    for (const alert of page) {
+      if (!isEscalationDue(alert, now)) continue;
+      try {
+        if (await escalateAlert(alert)) escalated += 1;
+      } catch (err) {
+        logger.error('Alert escalation pass error', { alert_id: alert.id, error: err.message });
+      }
+    }
+    offset += EVALUATE_ALL_PAGE_SIZE;
+    if (offset >= total || page.length === 0) break;
+  }
+
+  return escalated;
 }
 
 function assetCooldownKey(asset) {
@@ -293,4 +413,10 @@ module.exports = {
   isDuplicateAlert,
   getAlertDedupKey,
   DEDUP_WINDOW_SECONDS,
+  // Escalation (issue #689)
+  acknowledge,
+  escalateAlert,
+  evaluateEscalations,
+  isEscalationDue,
+  ESCALATION_TIMEOUT_MS,
 };

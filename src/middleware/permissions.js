@@ -8,7 +8,47 @@
  * data leakage across users.
  */
 
+const cache = require('../services/cache');
 const logger = require('../logger');
+
+/**
+ * Get cached user permissions or load via fetcher (#650).
+ * @param {string} userId
+ * @param {Function} fetcher - Async () => Array<string>
+ * @param {number} [ttlSeconds=300]
+ * @returns {Promise<Array<string>>}
+ */
+async function getUserPermissions(userId, fetcher, ttlSeconds = 300) {
+  if (!userId) return [];
+  const cacheKey = `perms:${userId}`;
+  try {
+    const cached = await cache.get(cacheKey);
+    if (cached) return Array.isArray(cached) ? cached : JSON.parse(cached);
+  } catch {
+    // Cache read failed, fall through to fetcher
+  }
+
+  const perms = fetcher ? await fetcher(userId) : [];
+  try {
+    await cache.set(cacheKey, perms, ttlSeconds);
+  } catch {
+    // Ignore cache write error
+  }
+  return perms;
+}
+
+/**
+ * Invalidate cached user permissions (#650).
+ * @param {string} userId
+ */
+async function invalidateUserPermissions(userId) {
+  if (!userId) return;
+  try {
+    await cache.del(`perms:${userId}`);
+  } catch {
+    // Ignore cache error
+  }
+}
 
 /**
  * Create a middleware that checks resource ownership/permission.
@@ -90,4 +130,6 @@ function requireRole(...roles) {
 module.exports = {
   requireResourcePermission,
   requireRole,
+  getUserPermissions,
+  invalidateUserPermissions,
 };

@@ -12,6 +12,12 @@
  *   if (featureFlags.isEnabled('new-checkout', { userId })) {
  *     // new checkout flow
  *   }
+ *
+ * Usage analytics (#691):
+ *   evaluateFlag(name, userId) behaves like isEnabled(name, { userId }) and
+ *   additionally records per-flag evaluation counts via trackUsage(). Tracking
+ *   is best-effort: any failure is logged and never changes the returned result.
+ *   Counters are in-process only (no storage), so no migration is required.
  */
 
 const cache = require('./cache');
@@ -19,6 +25,10 @@ const logger = require('../logger');
 
 // In-memory flag store. In production, back this with Redis or a DB.
 const flags = new Map();
+
+// In-memory usage counters (#691). Keyed by flag name.
+// Per-user IDs are intentionally not retained.
+const usageStats = new Map();
 
 /**
  * Flag structure:
@@ -132,6 +142,77 @@ function isEnabled(name, context = {}) {
 }
 
 /**
+ * Evaluate a flag for a user and record the outcome (#691).
+ * Returns exactly what isEnabled(name, { userId }) returns. Tracking failures
+ * are caught inside trackUsage and never affect the result.
+ * @param {string} name - Flag name
+ * @param {string} [userId] - User ID used for allow/deny lists and rollout bucketing
+ * @returns {boolean}
+ */
+function evaluateFlag(name, userId) {
+  const enabled = isEnabled(name, userId ? { userId } : {});
+  trackUsage(name, userId, enabled);
+  return enabled;
+}
+
+/**
+ * Record one flag evaluation in the in-memory usage counters (#691).
+ * Never throws: failures are logged at warn level and swallowed.
+ * @param {string} name - Flag name
+ * @param {string} [userId] - Evaluated user ID (not stored, to limit retained personal data)
+ * @param {boolean} enabled - Result of the evaluation
+ */
+function trackUsage(name, userId, enabled) {
+  void userId;
+  try {
+    const key = String(name);
+    let entry = usageStats.get(key);
+    if (!entry) {
+      entry = { evaluations: 0, enabled: 0, disabled: 0, lastEvaluatedAt: null };
+      usageStats.set(key, entry);
+    }
+    entry.evaluations += 1;
+    if (enabled) {
+      entry.enabled += 1;
+    } else {
+      entry.disabled += 1;
+    }
+    entry.lastEvaluatedAt = Date.now();
+  } catch (err) {
+    try {
+      logger.warn(`Feature flag usage tracking failed for ${name}`, { error: err.message });
+    } catch {
+      // Logging must never break flag evaluation either
+    }
+  }
+}
+
+/**
+ * Get usage counters (#691).
+ * @param {string} [name] - Optional flag name. Omit to get all flags.
+ * @returns {Object|null} Copy of the counters for one flag (null if never evaluated),
+ *   or an object keyed by flag name when no name is given.
+ */
+function getUsageStats(name) {
+  if (name !== undefined) {
+    const entry = usageStats.get(String(name));
+    return entry ? { ...entry } : null;
+  }
+  const result = {};
+  for (const [key, entry] of usageStats) {
+    result[key] = { ...entry };
+  }
+  return result;
+}
+
+/**
+ * Clear all usage counters (#691). Primarily useful in tests.
+ */
+function resetUsageStats() {
+  usageStats.clear();
+}
+
+/**
  * Get all flags (for admin display).
  */
 function getAllFlags() {
@@ -158,4 +239,8 @@ module.exports = {
   removeFlag,
   isEnabled,
   getAllFlags,
+  evaluateFlag,
+  trackUsage,
+  getUsageStats,
+  resetUsageStats,
 };

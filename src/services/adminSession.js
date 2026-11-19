@@ -43,6 +43,9 @@ const SESSION_ACTIVITY_THROTTLE_SECONDS =
   parseInt(process.env.SESSION_ACTIVITY_THROTTLE_SECONDS, 10) || 60;
 const CLOCK_SKEW_SECONDS =
   parseInt(process.env.SESSION_CLOCK_SKEW_SECONDS, 10) || 60;
+// #682 — warn when a request arrives this close to idle expiry.
+const SESSION_TIMEOUT_WARNING_SECONDS =
+  parseInt(process.env.SESSION_TIMEOUT_WARNING_SECONDS, 10) || 5 * 60;
 const ACTIVE_INDEX_KEY = 'admin_sessions:active';
 const ADMINS_KEY = 'admins:ids';
 const ADMISNS_KEY = ADMINS_KEY;
@@ -269,6 +272,23 @@ async function removeFromIndexes(redis, record) {
  * and refresh both operate on that same in-memory record. There is no second
  * read via a separate refreshSession call.
  */
+/**
+ * #682 — attach `timeout_warning` when the expiry that applied before this
+ * request was within SESSION_TIMEOUT_WARNING_SECONDS, so the client can
+ * prompt the admin before the session lapses.
+ */
+function withTimeoutWarning(record, previousExpiryMs, nowMs) {
+  const out = sanitize(record);
+  const remainingSeconds = Math.floor((previousExpiryMs - nowMs) / 1000);
+  if (Number.isFinite(remainingSeconds) && remainingSeconds > 0 && remainingSeconds <= SESSION_TIMEOUT_WARNING_SECONDS) {
+    out.timeout_warning = {
+      expires_in_seconds: remainingSeconds,
+      expires_at: new Date(previousExpiryMs).toISOString(),
+    };
+  }
+  return out;
+}
+
 async function validateSession(sessionId) {
   if (!sessionId) return null;
   const record = await cache.get(sessionKey(sessionId));
@@ -297,10 +317,15 @@ async function validateSession(sessionId) {
     ? Date.parse(record.absolute_expires_at)
     : (record.expires_at ? Date.parse(record.expires_at) : createdAtMs + SESSION_ABSOLUTE_LIFETIME_SECONDS * 1000);
 
+  const previousExpiryMs = Math.min(
+    Date.parse(record.idle_expires_at) || Infinity,
+    absoluteExpiresAtMs,
+  );
+
   // Throttled write: only write to store if interval elapsed
   const throttleMs = SESSION_ACTIVITY_THROTTLE_SECONDS * 1000;
   if (nowMs - lastActivityMs < throttleMs) {
-    return sanitize(record);
+    return withTimeoutWarning(record, previousExpiryMs, nowMs);
   }
 
   // Extend idle window, bounded by absolute lifetime
@@ -315,7 +340,7 @@ async function validateSession(sessionId) {
     absolute_expires_at: record.absolute_expires_at || new Date(absoluteExpiresAtMs).toISOString(),
   };
   await cache.set(sessionKey(sessionId), refreshed, remainingTtlSeconds);
-  return sanitize(refreshed);
+  return withTimeoutWarning(refreshed, previousExpiryMs, nowMs);
 }
 
 async function getSession(sessionId) {

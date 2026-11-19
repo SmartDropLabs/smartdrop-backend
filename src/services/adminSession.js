@@ -44,7 +44,8 @@ const SESSION_ACTIVITY_THROTTLE_SECONDS =
 const CLOCK_SKEW_SECONDS =
   parseInt(process.env.SESSION_CLOCK_SKEW_SECONDS, 10) || 60;
 const ACTIVE_INDEX_KEY = 'admin_sessions:active';
-const ADMISNS_KEY = 'admins:ids';
+const ADMINS_KEY = 'admins:ids';
+const ADMISNS_KEY = ADMINS_KEY;
 // Bound a single cleanup pass so a huge backlog of expired sessions cannot
 // block the event loop or balloon memory in one call.
 const CLEANUP_BATCH_SIZE =
@@ -54,6 +55,9 @@ const GET_ALL_DEFAULT_LIMIT =
 // Maximum number of audit entries retained per session.
 const AUDIT_HISTORY_MAX =
   parseInt(process.env.ADMIN_SESSION_AUDIT_MAX, 10) || 50;
+// Maximum concurrent sessions per admin (#636).
+const MAX_CONCURRENT_SESSIONS =
+  parseInt(process.env.ADMIN_MAX_CONCURRENT_SESSIONS, 10) || 5;
 
 function sessionKey(id) {
   return `admin_session:${id}`;
@@ -107,6 +111,10 @@ async function createSession(adminId, options = {}) {
   if (!adminId || typeof adminId !== 'string') {
     throw new Error('adminSession.createSession: adminId is required');
   }
+
+  // Enforce concurrent session limit (#636)
+  await enforceConcurrentSessionLimit(adminId, options.maxConcurrentSessions || MAX_CONCURRENT_SESSIONS);
+
   const now = new Date();
   const nowMs = now.getTime();
   const absoluteExpiresAtMs = nowMs + SESSION_ABSOLUTE_LIFETIME_SECONDS * 1000;
@@ -435,16 +443,43 @@ async function listSessionsByAdmin(adminId, { limit = GET_ALL_DEFAULT_LIMIT } = 
   }
 }
 
+async function invalidateOldestSession(adminId) {
+  if (!adminId) return null;
+  const sessions = await listSessionsByAdmin(adminId, { limit: 100 });
+  if (sessions.length === 0) return null;
+  sessions.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+  const oldest = sessions[0];
+  await revokeSession(oldest.id);
+  return oldest;
+}
+
+async function enforceConcurrentSessionLimit(adminId, maxSessions = MAX_CONCURRENT_SESSIONS) {
+  if (!adminId || maxSessions <= 0) return;
+  const sessions = await listSessionsByAdmin(adminId, { limit: 100 });
+  if (sessions.length >= maxSessions) {
+    sessions.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+    const countToRevoke = sessions.length - maxSessions + 1;
+    for (let i = 0; i < countToRevoke && i < sessions.length; i++) {
+      await revokeSession(sessions[i].id);
+    }
+  }
+}
+
 module.exports = {
   ACTIVE_INDEX_KEY,
   AUDIT_HISTORY_MAX,
   SESSION_TTL_SECONDS,
+  MAX_CONCURRENT_SESSIONS,
+  MAX_SESSIONS: MAX_CONCURRENT_SESSIONS,
   cleanupExpiredSessions,
   createSession,
   getAllActiveSessions,
   getSession,
+  getSessions: listSessionsByAdmin,
   listSessionsByAdmin,
   recordAudit,
   revokeSession,
   validateSession,
+  invalidateOldestSession,
+  enforceConcurrentSessionLimit,
 };

@@ -105,6 +105,17 @@ const circuitBreakerStateGauge = registry.gauge(
   'State of circuit breakers (0 = CLOSED, 1 = HALF_OPEN, 2 = OPEN)'
 );
 
+// ── Database Retry Metrics (#719) ────────────────────────────────────────────
+const dbQueryRetriesTotal = registry.counter(
+  'db_query_retries_total',
+  'Total database query retry attempts, labelled by error code'
+);
+const dbQueryRetryDelaySeconds = registry.histogram(
+  'db_query_retry_delay_seconds',
+  'Backoff delay before a database query retry in seconds',
+  { buckets: [0.05, 0.1, 0.25, 0.5, 1, 2.5, 5] }
+);
+
 // Event loop lag measurement
 let lastLagCheck = Date.now();
 let eventLoopLagSeconds = 0;
@@ -339,4 +350,6 @@ module.exports = {
   priceCacheMisses,
   webhookDeliveriesTotal,
   webhookDeliveryErrors,
+  dbQueryRetriesTotal,
+  dbQueryRetryDelaySeconds,
 };

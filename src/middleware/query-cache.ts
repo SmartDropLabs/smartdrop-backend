@@ -73,6 +73,13 @@ export function createQueryCache(config: CacheConfig) {
         return next();
       }
 
+      // #718: clients can send `X-No-Cache` to skip the cache for one request.
+      // The response is neither read from nor written to the cache.
+      if (req.headers['x-no-cache'] !== undefined) {
+        res.setHeader('X-Cache', 'BYPASS');
+        return next();
+      }
+
       const cacheKey = options.key || generateCacheKey(req, mergedConfig.keyPrefix!);
       const cacheTTL = options.ttl || mergedConfig.defaultTTL!;
 

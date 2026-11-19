@@ -106,6 +106,27 @@ function sleep(ms) {
 }
 
 /**
+ * Record a retry attempt in Prometheus metrics (#719).
+ * The metrics module is required lazily to avoid a load-time cycle, and any
+ * metrics failure is swallowed so it can never affect the query itself.
+ * @param {Error} err - The error that triggered the retry
+ * @param {number} delayMs - Backoff delay before the retry
+ */
+function recordRetryMetrics(err, delayMs) {
+  try {
+    const { dbQueryRetriesTotal, dbQueryRetryDelaySeconds } = require("../metrics");
+    const code = String(err.code || "").toUpperCase();
+    // Bounded label set: known codes only, everything else is "other"
+    dbQueryRetriesTotal.inc({
+      code: RETRYABLE_ERROR_CODES.includes(code) ? code : "other",
+    });
+    dbQueryRetryDelaySeconds.observe({}, delayMs / 1000);
+  } catch {
+    // Metrics are best-effort
+  }
+}
+
+/**
  * Execute a database query with automatic retry on transient errors.
  * Implements circuit breaker pattern to stop retrying when database is down.
  *
@@ -155,6 +176,8 @@ async function queryWithRetry(queryFn, options = {}) {
         baseDelayMs * Math.pow(2, attempt) + Math.random() * baseDelayMs,
         maxDelayMs,
       );
+
+      recordRetryMetrics(err, delay);
 
       logger.warn(
         `Query failed (attempt ${attempt + 1}/${maxRetries + 1}), retrying in ${Math.round(delay)}ms`,

@@ -2,6 +2,7 @@
 // Implements optimistic locking to prevent data corruption
 
 import { Request, Response, NextFunction } from 'express';
+import logger from '../logger';
 
 export interface VersionedEntity {
   id: string;
@@ -98,6 +99,23 @@ export function setVersionHeader(res: Response, version: number): void {
 }
 
 /**
+ * Log a version conflict (#717) so conflicts can be counted and analysed.
+ */
+function logVersionConflict(
+  table: string,
+  id: string,
+  expectedVersion: number,
+  actualVersion: number,
+): void {
+  logger.warn('Version conflict detected', {
+    table,
+    id,
+    expectedVersion,
+    actualVersion,
+  });
+}
+
+/**
  * Database query helper with optimistic locking
  */
 export class OptimisticLockingRepository {
@@ -135,6 +153,7 @@ export class OptimisticLockingRepository {
         throw new Error(`Entity not found: ${id}`);
       }
 
+      logVersionConflict(table, id, expectedVersion, existing.rows[0].version);
       throw new OptimisticLockError(
         'Version mismatch - entity was modified',
         id,
@@ -171,6 +190,7 @@ export class OptimisticLockingRepository {
         throw new Error(`Entity not found: ${id}`);
       }
 
+      logVersionConflict(table, id, expectedVersion, existing.rows[0].version);
       throw new OptimisticLockError(
         'Version mismatch - entity was modified',
         id,

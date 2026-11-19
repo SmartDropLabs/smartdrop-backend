@@ -6,8 +6,14 @@
  * Implements authenticated field-level AES-256-GCM encryption for sensitive data
  * stored in the database (e.g. credentials, tokens, secrets, PII).
  *
- * Encrypted values are packed as:
- *   enc:v1:<iv_base64>:<ciphertext_base64>:<authTag_base64>
+ * Encrypted values are packed as (#720):
+ *   enc:v2:<keyId>:<iv_base64>:<ciphertext_base64>:<authTag_base64>
+ *
+ * - keyId is the value of DB_ENCRYPTION_KEY_ID at encrypt time (default
+ *   "default"), so a value can be traced to the key that produced it.
+ * - Legacy values written before key ids were tracked use the
+ *   enc:v1:<iv>:<ciphertext>:<authTag> form. They are still decrypted with the
+ *   current key, and are never rewritten by this module.
  *
  * Features:
  * - Deterministic prefix allows detecting already-encrypted values (isEncrypted).
@@ -22,7 +28,11 @@ const logger = require("../logger");
 
 const ALGORITHM = "aes-256-gcm";
 const IV_BYTES = 12; // Standard 96-bit IV for GCM
-const PREFIX = "enc:v1:";
+const PREFIX_V1 = "enc:v1:"; // legacy: no key id
+const PREFIX = "enc:v2:"; // current: includes key id
+const KEY_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+const DEFAULT_KEY_ID = "default";
+const CUSTOM_KEY_ID = "custom";
 const DEV_FALLBACK_KEY_MATERIAL =
   "smartdrop-dev-db-encryption-key-do-not-use-in-production";
 
@@ -77,6 +87,21 @@ function deriveKey(customKeyMaterial) {
 }
 
 /**
+ * Key id of the configured master key (#720). Read from DB_ENCRYPTION_KEY_ID.
+ *
+ * @returns {string} Key id matching KEY_ID_PATTERN
+ */
+function getCurrentKeyId() {
+  const keyId = process.env.DB_ENCRYPTION_KEY_ID || DEFAULT_KEY_ID;
+  if (!KEY_ID_PATTERN.test(keyId)) {
+    throw new Error(
+      "DB_ENCRYPTION_KEY_ID must be 1-64 characters from A-Z, a-z, 0-9, '.', '_' or '-'",
+    );
+  }
+  return keyId;
+}
+
+/**
  * Derive a field-specific encryption key from the master key.
  * This ensures that compromising one field's key doesn't affect others.
  *
@@ -97,7 +122,10 @@ function deriveFieldKey(fieldName, masterKey) {
  * @returns {boolean}
  */
 function isEncrypted(value) {
-  return typeof value === "string" && value.startsWith(PREFIX);
+  return (
+    typeof value === "string" &&
+    (value.startsWith(PREFIX) || value.startsWith(PREFIX_V1))
+  );
 }
 
 /**
@@ -132,6 +160,8 @@ function encrypt(value, options = {}) {
   const key = options.fieldName
     ? deriveFieldKey(options.fieldName, masterKey)
     : masterKey;
+  // Custom keys are not the configured key, so they are stamped "custom"
+  const keyId = options.key ? CUSTOM_KEY_ID : getCurrentKeyId();
   const iv = crypto.randomBytes(IV_BYTES);
   const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
 
@@ -141,7 +171,7 @@ function encrypt(value, options = {}) {
   ]);
   const authTag = cipher.getAuthTag();
 
-  return `${PREFIX}${iv.toString("base64")}:${ciphertext.toString("base64")}:${authTag.toString("base64")}`;
+  return `${PREFIX}${keyId}:${iv.toString("base64")}:${ciphertext.toString("base64")}:${authTag.toString("base64")}`;
 }
 
 /**
@@ -160,16 +190,42 @@ function decrypt(packed, options = {}) {
     return packed;
   }
 
-  if (typeof packed !== "string" || !packed.startsWith(PREFIX)) {
+  if (!isEncrypted(packed)) {
     return packed; // Legacy unencrypted value
   }
 
-  const payload = packed.slice(PREFIX.length);
+  // v2 carries a key id before the payload; v1 (legacy) has none
+  let keyId = null;
+  let payload;
+  if (packed.startsWith(PREFIX)) {
+    const rest = packed.slice(PREFIX.length);
+    const sep = rest.indexOf(":");
+    if (sep <= 0) {
+      throw new Error("Malformed encrypted database value: missing key id");
+    }
+    keyId = rest.slice(0, sep);
+    payload = rest.slice(sep + 1);
+  } else {
+    payload = packed.slice(PREFIX_V1.length);
+  }
+
   const parts = payload.split(":");
   if (parts.length !== 3) {
     throw new Error(
       "Malformed encrypted database value: expected 3 segments (iv:ciphertext:authTag)",
     );
+  }
+
+  // Only check the key id when the configured key is in use. A caller that
+  // passes its own key is responsible for choosing the right one.
+  if (keyId !== null && !options.key) {
+    const currentKeyId = getCurrentKeyId();
+    if (keyId !== currentKeyId) {
+      throw new Error(
+        `Encrypted value was written with key id "${keyId}" but the current key id is ` +
+          `"${currentKeyId}". Re-encrypt the value or configure key "${keyId}" before decrypting.`,
+      );
+    }
   }
 
   const [ivB64, ciphertextB64, authTagB64] = parts;

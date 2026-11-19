@@ -4,7 +4,7 @@
  */
 exports.up = async function(knex) {
   await knex.raw(`
-    CREATE TABLE alerts (
+    CREATE TABLE IF NOT EXISTS alerts (
       id              TEXT PRIMARY KEY,
       asset           TEXT NOT NULL,
       type            TEXT NOT NULL,
@@ -17,7 +17,7 @@ exports.up = async function(knex) {
       created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
-    CREATE INDEX idx_alerts_asset ON alerts (asset);
+    CREATE INDEX IF NOT EXISTS idx_alerts_asset ON alerts (asset);
   `);
 };
 

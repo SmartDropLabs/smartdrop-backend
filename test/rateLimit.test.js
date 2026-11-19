@@ -49,7 +49,7 @@ describe('rateLimit middleware', () => {
     expect(blocked.headers['retry-after']).toBeDefined();
   });
 
-  test('sets Redis expiry only when a fixed-window bucket is first created', async () => {
+  test('sets Redis expiry only when a window bucket is first created', async () => {
     const app = buildApp(buildRateLimit({ windowSeconds: 30, max: 5, keyPrefix: 'expire' }));
 
     await request(app).get('/test');
@@ -57,7 +57,8 @@ describe('rateLimit middleware', () => {
 
     expect(redis.incr).toHaveBeenCalledTimes(2);
     expect(redis.expire).toHaveBeenCalledTimes(1);
-    expect(redis.expire.mock.calls[0][1]).toBe(30);
+    // Two windows, so the previous bucket is still readable for the sliding estimate (#613).
+    expect(redis.expire.mock.calls[0][1]).toBe(60);
   });
 
   test('fails open when Redis increment fails and logs the cache outage', async () => {
@@ -85,6 +86,45 @@ describe('rateLimit middleware', () => {
 
     expect(mockLogger.error).not.toHaveBeenCalled();
     expect(mockLogger.warn).toHaveBeenCalledTimes(2);
+  });
+
+  describe('window boundary (#613)', () => {
+    const WINDOW_MS = 60_000;
+    const windowStart = Math.floor(Date.now() / WINDOW_MS) * WINDOW_MS + 10 * WINDOW_MS;
+    let nowSpy;
+
+    afterEach(() => nowSpy?.mockRestore());
+
+    function at(ms) {
+      nowSpy?.mockRestore();
+      nowSpy = jest.spyOn(Date, 'now').mockReturnValue(ms);
+    }
+
+    test('does not allow a second full burst right after the window rolls over', async () => {
+      const app = buildApp(buildRateLimit({ windowSeconds: 60, max: 3, keyPrefix: 'edge' }));
+      at(windowStart + 59_000);
+      for (let i = 0; i < 3; i += 1) {
+        expect((await request(app).get('/test')).status).toBe(200);
+      }
+
+      at(windowStart + WINDOW_MS + 1_000);
+      const blocked = await request(app).get('/test');
+
+      expect(blocked.status).toBe(429);
+    });
+
+    test('lets traffic through again once the previous window has mostly slid out', async () => {
+      const app = buildApp(buildRateLimit({ windowSeconds: 60, max: 3, keyPrefix: 'decay' }));
+      at(windowStart + 59_000);
+      for (let i = 0; i < 3; i += 1) {
+        await request(app).get('/test');
+      }
+
+      at(windowStart + WINDOW_MS + 50_000);
+      const res = await request(app).get('/test');
+
+      expect(res.status).toBe(200);
+    });
   });
 
   test('throws when configured with invalid options', () => {

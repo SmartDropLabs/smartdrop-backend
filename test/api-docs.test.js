@@ -93,6 +93,21 @@ describe("Swagger UI", () => {
     expect(res.text).toBe(fileContent);
   });
 
+  test("GET /api-docs/openapi.json serves the parsed spec", async () => {
+    const res = await request(app).get("/api-docs/openapi.json");
+
+    expect(res.status).toBe(200);
+    expect(res.body.openapi).toBe("3.0.3");
+    expect(res.body.info.title).toBe("SmartDrop API");
+  });
+
+  test("Swagger UI is available outside development", async () => {
+    const res = await request(app).get("/api-docs/");
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain("swagger-ui");
+  });
+
   test("Swagger UI HTML is served at /api-docs in development mode", () => {
     const NODE_ENV = process.env.NODE_ENV;
     process.env.NODE_ENV = "development";

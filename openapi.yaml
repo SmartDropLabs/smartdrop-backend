@@ -5,8 +5,11 @@ info:
     SmartDrop backend services — price oracle, webhook delivery, health monitoring, and indexing.
 
     This specification covers all current REST endpoints and planned future endpoints.
-    The public HTTP API is versioned by URL path under `/api/v1`; breaking
-    changes are introduced in a new versioned path rather than in place.
+    The public HTTP API is versioned by URL path under `/v1` (with `/api/v1` supported as an alias).
+    Legacy unversioned paths (e.g. `/api/...`) remain supported for backward compatibility but are
+    deprecated and emit `Deprecation: true` and `Sunset` headers. Unknown API versions (such as `/v99/...`)
+    return 404 NOT_FOUND. Breaking changes will be introduced in a new versioned path (e.g. `/v2`) rather
+    than in place. Infrastructure endpoints (`/health`, `/api-docs`) remain unversioned.
   version: 0.1.0
   license:
     name: MIT

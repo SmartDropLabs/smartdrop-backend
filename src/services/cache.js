@@ -18,25 +18,27 @@ let reconnectAttempts = 0;
 const MAX_CONCURRENT_OPS = parseInt(process.env.REDIS_MAX_CONCURRENT_OPS, 10) || 50;
 const operationSemaphore = new Semaphore(MAX_CONCURRENT_OPS);
 
-let consecutiveQueueWarnings = 0;
+const consecutiveQueueWarningsByCaller = new Map();
 
 function _checkQueueBackpressure(caller) {
   const queueLen = getCommandQueueLength();
+  const previousWarnings = consecutiveQueueWarningsByCaller.get(caller) || 0;
+  const consecutiveWarnings = previousWarnings + 1;
   if (queueLen > COMMAND_QUEUE_BACKPRESSURE_THRESHOLD) {
-    consecutiveQueueWarnings++;
-    if (consecutiveQueueWarnings % 10 === 1) {
+    consecutiveQueueWarningsByCaller.set(caller, consecutiveWarnings);
+    if (consecutiveWarnings % 10 === 1) {
       logger.error('Redis command queue critically deep — backpressure active', {
         queue_length: queueLen,
         threshold: COMMAND_QUEUE_BACKPRESSURE_THRESHOLD,
         caller,
-        consecutive_warnings: consecutiveQueueWarnings,
+        consecutive_warnings: consecutiveWarnings,
       });
     }
     return true;
   }
   if (queueLen > COMMAND_QUEUE_WARN_THRESHOLD) {
-    consecutiveQueueWarnings++;
-    if (consecutiveQueueWarnings % 5 === 1) {
+    consecutiveQueueWarningsByCaller.set(caller, consecutiveWarnings);
+    if (consecutiveWarnings % 5 === 1) {
       logger.warn('Redis command queue depth high', {
         queue_length: queueLen,
         threshold: COMMAND_QUEUE_WARN_THRESHOLD,
@@ -45,14 +47,30 @@ function _checkQueueBackpressure(caller) {
     }
     return false;
   }
-  if (consecutiveQueueWarnings > 0) {
+  if (previousWarnings > 0) {
     logger.info('Redis command queue depth recovered', { queue_length: queueLen, caller });
-    consecutiveQueueWarnings = 0;
+    consecutiveQueueWarningsByCaller.delete(caller);
   }
   return false;
 }
 
 function getClient() {
+  // Issue #366: 'end' is ioredis's terminal state — reached after .quit()/
+  // .disconnect(true), or after retryStrategy() returns null (MAX_RETRIES
+  // exceeded, see below). A client in 'end' will never reconnect on its
+  // own and rejects every command immediately with "Connection is closed."
+  // Transient states ('connecting', 'reconnecting', 'close') are left
+  // alone — enableOfflineQueue: true already buffers commands through
+  // those and flushes them once the client reaches 'ready' again, so
+  // discarding the client there would just churn connections for no
+  // benefit.
+  if (client && client.status === 'end') {
+    logger.warn('Redis client reached terminal "end" state, discarding and reconnecting', {
+      reconnectAttempts,
+    });
+    client = null;
+  }
+
   if (!client) {
     client = new Redis(config.redis.url, {
       lazyConnect: true,
@@ -118,9 +136,50 @@ async function get(key) {
     if (!data) return null;
     try {
       return JSON.parse(data);
-    } catch {
-      return data;
+    } catch (err) {
+      // Every write path (set()) serializes via JSON.stringify, so a value
+      // that fails to parse here is corrupt, not a legitimate raw string —
+      // returning it as-is would hand callers an unexpected type (#325).
+      logger.warn('Cached value failed JSON.parse, treating as cache miss', {
+        key,
+        error: err.message,
+      });
+      return null;
     }
+  } finally {
+    release();
+  }
+}
+
+/**
+ * Batched sibling of get() (issue #357): fetches N keys in a single MGET
+ * round trip instead of N separate GETs.
+ *
+ * Returns the parsed values in the same order as `keys`. A missing or
+ * unparsable entry is `null` — exactly what get() hands back for that key —
+ * so callers can map positions without caring which keys were hits.
+ */
+async function mget(keys) {
+  if (!Array.isArray(keys) || keys.length === 0) return [];
+  const release = await operationSemaphore.acquire(5000);
+  try {
+    _checkQueueBackpressure('mget');
+    const redis = getClient();
+    const raw = await redis.mget(...keys);
+    return raw.map((value, i) => {
+      if (!value) return null;
+      try {
+        return JSON.parse(value);
+      } catch (err) {
+        // Same contract as get(): a value that fails to parse is corrupt,
+        // not a legitimate raw string, so it's reported as a cache miss.
+        logger.warn('Cached value failed JSON.parse, treating as a cache miss', {
+          key: keys[i],
+          error: err.message,
+        });
+        return null;
+      }
+    });
   } finally {
     release();
   }
@@ -131,7 +190,16 @@ async function set(key, value, ttlSeconds) {
   try {
     _checkQueueBackpressure('set');
     const redis = getClient();
-    const serialized = JSON.stringify(value);
+    let serialized;
+    try {
+      serialized = JSON.stringify(value);
+    } catch (err) {
+      logger.error('cache.set: value is not JSON-serializable', {
+        key,
+        error: err.message,
+      });
+      return;
+    }
     if (ttlSeconds) {
       await redis.setex(key, ttlSeconds, serialized);
     } else {
@@ -152,6 +220,24 @@ async function del(key) {
   }
 }
 
+/**
+ * Bulk delete operation for cache invalidation on batch updates (#564).
+ * Invalidates multiple cache keys in parallel while respecting concurrency limits.
+ *
+ * @param {string[]} keys - Array of cache keys to delete
+ * @returns {Promise<number>} Number of keys deleted
+ */
+async function delMany(keys) {
+  if (!Array.isArray(keys) || keys.length === 0) return 0;
+  const release = await operationSemaphore.acquire(5000);
+  try {
+    const redis = getClient();
+    return await redis.del(...keys);
+  } finally {
+    release();
+  }
+}
+
 async function disconnect() {
   if (client) {
     await client.quit();
@@ -159,7 +245,28 @@ async function disconnect() {
   }
 }
 
+/**
+ * Read-through cache with stampede protection (#614).
+ *
+ * A bare get() → miss → fetch → set() lets every concurrent request that
+ * misses an expired key hit the database at once. getOrSet() routes the miss
+ * through src/cache/stampede.js: in-process calls for the same key share one
+ * fetch, and across processes a short Redis lock lets one caller refresh
+ * while the others wait briefly and re-read. Prefer it over hand-rolled
+ * get/set pairs for anything expensive to recompute.
+ *
+ * @param {string} key
+ * @param {() => Promise<*>} fetchFn - Loads the value on a miss
+ * @param {number} [ttlSeconds=60]
+ * @param {Object} [options] - Passed through to fetchWithLock
+ */
+async function getOrSet(key, fetchFn, ttlSeconds = 60, options = {}) {
+  // Required lazily: stampede.js itself requires this module.
+  const { fetchWithLock } = require('../cache/stampede');
+  return fetchWithLock(key, fetchFn, { ...options, ttlSeconds });
+}
+
 module.exports = {
-  get, set, del, disconnect, getClient, isConnected,
-  getCommandQueueLength, getConcurrencyStats,
+  get, mget, set, del, delMany, disconnect, getClient, isConnected,
+  getCommandQueueLength, getConcurrencyStats, getOrSet,
 };

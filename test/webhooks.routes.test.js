@@ -114,6 +114,23 @@ describe("POST /api/v1/webhooks", () => {
     expect(res.status).toBe(201);
     expect(res.body.filters).toEqual({ asset: "USDC", pool_id: "pool_123" });
   });
+
+  test("warning message does not leak network error details when target is unreachable (#336)", async () => {
+    const networkError = new Error("connect ECONNREFUSED 203.0.113.42:443 — internal routing detail");
+    mockAxiosHead.mockRejectedValue(networkError);
+    mockAxiosGet.mockRejectedValue(networkError);
+
+    const res = await request(app)
+      .post("/api/v1/webhooks")
+      .send({ url: "https://example.com/hook", events: ["*"] });
+
+    expect(res.status).toBe(201);
+    expect(res.body.reachability).toBe("unreachable");
+    expect(res.body.warning).toMatch(/unreachable during registration/);
+    expect(res.body.warning).not.toContain("ECONNREFUSED");
+    expect(res.body.warning).not.toContain("203.0.113.42");
+    expect(res.body.warning).not.toContain("internal routing detail");
+  });
 });
 
 describe("GET /api/v1/webhooks", () => {

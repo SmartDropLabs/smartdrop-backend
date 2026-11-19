@@ -32,13 +32,61 @@ const mockRedis = {
     const stopIdx = stop === -1 ? entries.length + stop : stop;
     return entries.slice(startIdx, stopIdx + 1).map(([member]) => member);
   }),
+  multi: jest.fn(() => {
+    const ops = [];
+    const chain = {
+      set: jest.fn((k, v) => {
+        ops.push(() => mockStore.set(k, v));
+        return chain;
+      }),
+      del: jest.fn((k) => {
+        ops.push(() => mockStore.delete(k));
+        return chain;
+      }),
+      zadd: jest.fn((k, score, member) => {
+        ops.push(() => mockRedis.zadd(k, score, member));
+        return chain;
+      }),
+      zrem: jest.fn((k, member) => {
+        ops.push(() => mockRedis.zrem(k, member));
+        return chain;
+      }),
+      exec: jest.fn(async () => {
+        for (const op of ops) await op();
+        return [];
+      }),
+    };
+    return chain;
+  }),
 };
 
 jest.mock('../src/services/cache', () => ({
   getClient: () => mockRedis,
   get: jest.fn(async (key) => {
     const v = mockStore.get(key);
-    return v !== undefined ? JSON.parse(JSON.stringify(v)) : null;
+    if (v === undefined || v === null) return null;
+    if (typeof v === 'string') {
+      try {
+        return JSON.parse(v);
+      } catch {
+        return v;
+      }
+    }
+    return JSON.parse(JSON.stringify(v));
+  }),
+  mget: jest.fn(async (keys) => {
+    return keys.map((k) => {
+      const v = mockStore.get(k);
+      if (v === undefined || v === null) return null;
+      if (typeof v === 'string') {
+        try {
+          return JSON.parse(v);
+        } catch {
+          return v;
+        }
+      }
+      return JSON.parse(JSON.stringify(v));
+    });
   }),
   set: jest.fn(async (key, value) => {
     mockStore.set(key, JSON.parse(JSON.stringify(value)));

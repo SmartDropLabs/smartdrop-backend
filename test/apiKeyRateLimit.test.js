@@ -135,7 +135,8 @@ describe('per-API-key rate limiting', () => {
 
     expect(redis.incr).toHaveBeenCalledTimes(2);
     expect(redis.expire).toHaveBeenCalledTimes(1);
-    expect(redis.expire.mock.calls[0][1]).toBe(config.apiKeyRateLimit.windowSeconds);
+    // Two windows, so the previous bucket is still readable for the sliding estimate (#613).
+    expect(redis.expire.mock.calls[0][1]).toBe(config.apiKeyRateLimit.windowSeconds * 2);
   });
 
   test('passes unauthenticated requests through untouched', async () => {

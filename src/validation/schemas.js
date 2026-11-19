@@ -18,10 +18,27 @@ const assetCodeSchema = z
   .regex(/^[A-Za-z0-9]+$/, "Asset code must be alphanumeric")
   .transform((value) => value.toUpperCase());
 
+// Upper bounds for free-text and secret fields. The columns behind them are
+// unbounded TEXT, so without a cap one request can store megabytes per row
+// and every later list/read pays for it.
+const MAX_NAME_LENGTH = 200;
+const MAX_DESCRIPTION_LENGTH = 2000;
+const MAX_SECRET_LENGTH = 256;
+
+const descriptionSchema = z
+  .string()
+  .max(MAX_DESCRIPTION_LENGTH, `description must be ${MAX_DESCRIPTION_LENGTH} characters or fewer`);
+
 const optionalIssuerSchema = z.preprocess(
   (value) => (value === "" ? undefined : value),
   stellarPublicKeySchema.optional(),
 );
+
+// Upper bounds for free-form request fields (#599, #600, #601). Unbounded
+// strings and arrays let one request write an arbitrarily large row.
+const MAX_SCOPE_LENGTH = 64;
+const MAX_SCOPES_PER_KEY = 20;
+const MAX_ALERT_THRESHOLD_USD = 1e12;
 
 const paginationQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
@@ -50,10 +67,20 @@ const PRIVATE_IP_RE = new RegExp(
     "|10\\." + // RFC-1918 /8
     "|172\\.(1[6-9]|2\\d|3[01])\\." + // RFC-1918 /12
     "|192\\.168\\." + // RFC-1918 /16
-    "|169\\.254\\." + // link-local
+    "|169\\.254\\." + // link-local (IPv4)
     "|0\\.0\\.0\\.0" + // unspecified
     "|::1" + // IPv6 loopback
-    "|fc[0-9a-f]{2}:" + // IPv6 ULA
+    "|fc[0-9a-f]{2}:" + // IPv6 ULA (fc00::/7)
+    "|fd[0-9a-f]{2}:" + // IPv6 ULA (fd00::/8)
+    "|fe[89ab][0-9a-f]:" + // IPv6 link-local (fe80::/10)
+    "|::ffff:0:" + // IPv4-mapped IPv6
+    "|::ffff:127\\." + // IPv4 loopback as IPv6
+    "|::ffff:10\\." + // RFC-1918 as IPv6
+    "|::ffff:172\\.(1[6-9]|2\\d|3[01])\\." + // RFC-1918 as IPv6
+    "|::ffff:192\\.168\\." + // RFC-1918 as IPv6
+    "|::ffff:169\\.254\\." + // link-local as IPv6
+    "|0:0:0:0:0:ffff:" + // IPv4-mapped (alternate notation)
+    "|0:0:0:0:0:0:0:0" + // unspecified (all zeros)
     ")",
 );
 
@@ -106,7 +133,13 @@ const priceQuerySchema = z.object({
 
 const keyCreateBodySchema = z.object({
   label: z.string().trim().min(1).max(80),
-  scopes: z.array(z.string().trim().min(1)).nonempty().optional(),
+  // Bounded so a single request cannot store an arbitrarily large key record
+  // (#599): a scope is a short identifier, and no key needs dozens of them.
+  scopes: z
+    .array(z.string().trim().min(1).max(MAX_SCOPE_LENGTH))
+    .nonempty()
+    .max(MAX_SCOPES_PER_KEY)
+    .optional(),
   // Sizes the key's own rate limit bucket (issue #251). Enumerated from
   // configuration so adding a tier does not require touching validation.
   tier: z.enum(Object.keys(config.apiKeyRateLimit.tiers)).optional(),
@@ -115,6 +148,7 @@ const keyCreateBodySchema = z.object({
 const keyRotateBodySchema = z.object({
   // Preserves label and scopes from the old key, but allows overriding tier
   tier: z.enum(Object.keys(config.apiKeyRateLimit.tiers)).optional(),
+  grace_period_seconds: z.number().int().min(0).max(86400).optional(),
 });
 
 const alertCreateBodySchema = z.object({
@@ -124,9 +158,11 @@ const alertCreateBodySchema = z.object({
     { message: "Asset code is not in the list of watched Stellar assets" },
   ),
   type: z.enum(["above", "below", "change_pct"]),
-  threshold_usd: z.number().positive(),
+  // Finite and bounded (#600): an absurd threshold can never fire and only
+  // wastes an evaluation slot on every price tick.
+  threshold_usd: z.number().positive().finite().max(MAX_ALERT_THRESHOLD_USD),
   webhook_url: httpUrlSchema,
-  webhook_secret: z.string().min(8),
+  webhook_secret: z.string().min(8).max(MAX_SECRET_LENGTH),
   repeat: z.boolean().optional(),
 });
 
@@ -181,17 +217,17 @@ const webhookFiltersSchema = z
 const webhookCreateBodySchema = z.object({
   url: httpUrlSchema,
   events: webhookSubscriptionSchema,
-  secret: z.string().min(16).optional(),
-  description: z.string().optional(),
+  secret: z.string().min(16).max(MAX_SECRET_LENGTH).optional(),
+  description: z.string().trim().max(MAX_DESCRIPTION_LENGTH).optional(),
   filters: webhookFiltersSchema.optional(),
 });
 
 const webhookPatchBodySchema = z.object({
   url: httpUrlSchema.optional(),
   events: webhookSubscriptionSchema.optional(),
-  secret: z.string().min(16).optional(),
+  secret: z.string().min(16).max(MAX_SECRET_LENGTH).optional(),
   active: z.boolean().optional(),
-  description: z.string().optional(),
+  description: z.string().trim().max(MAX_DESCRIPTION_LENGTH).optional(),
   filters: webhookFiltersSchema.optional(),
 });
 
@@ -248,8 +284,8 @@ function expiryLedgerSchema(currentLedger) {
 function airdropCreateBodySchema(currentLedger) {
   return z
     .object({
-      name: z.string().trim().min(1),
-      description: z.string().optional(),
+      name: z.string().trim().min(1).max(MAX_NAME_LENGTH),
+      description: descriptionSchema.optional(),
       asset: assetCodeSchema,
       asset_issuer: stellarPublicKeySchema,
       total_amount: z
@@ -284,8 +320,8 @@ function airdropCreateBodySchema(currentLedger) {
 
 function airdropUpdateBodySchema(currentLedger) {
   return z.object({
-    name: z.string().trim().min(1).optional(),
-    description: z.string().optional(),
+    name: z.string().trim().min(1).max(MAX_NAME_LENGTH).optional(),
+    description: descriptionSchema.optional(),
     expiry_ledger: expiryLedgerSchema(currentLedger).optional(),
   });
 }
@@ -302,13 +338,42 @@ const airdropRecipientsBodySchema = z.object({
   }, recipientsSchema.optional()),
 });
 
+// ── Indexer route schemas (issue #527) ───────────────────────────────────────
+
+const indexerAirdropIdParamsSchema = z.object({
+  id: z
+    .string()
+    .trim()
+    .min(1)
+    .max(128)
+    .regex(/^[A-Za-z0-9:_-]+$/, "Invalid airdrop id"),
+});
+
+// A recipient is a Stellar account (G…) or contract (C…) strkey: 56
+// characters of base32 (A-Z, 2-7). The old "any 10-80 uppercase/digit
+// string" check let arbitrary values reach the event-store lookup.
+const indexerAddressParamsSchema = z.object({
+  address: z
+    .string()
+    .trim()
+    .regex(/^[GC][A-Z2-7]{55}$/, "Must be a Stellar account (G…) or contract (C…) address"),
+});
+
 module.exports = {
+  MAX_DESCRIPTION_LENGTH,
+  MAX_NAME_LENGTH,
+  MAX_SECRET_LENGTH,
   airdropCreateBodySchema,
   airdropRecipientsBodySchema,
   airdropUpdateBodySchema,
   alertCreateBodySchema,
   assetCodeSchema,
   httpUrlSchema,
+  // Imported by routes/indexer.js; without these exports validate() received
+  // `undefined` and every indexer request failed with a 500.
+  indexerAddressParamsSchema,
+  indexerAirdropIdParamsSchema,
+  isPrivateTarget,
   keyCreateBodySchema,
   keyRotateBodySchema,
   optionalIssuerSchema,

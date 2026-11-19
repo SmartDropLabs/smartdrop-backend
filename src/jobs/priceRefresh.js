@@ -18,6 +18,19 @@ const health = {
 
 function start() {
   const intervalSeconds = config.price.refreshInterval;
+
+  // #361 — Validate that the interval evenly divides 60 so the cron
+  // expression produces a correct schedule. Non-divisor intervals (e.g.
+  // 7 seconds) would create an incorrect cron schedule with node-cron's
+  // second-level syntax.
+  if (!Number.isInteger(intervalSeconds) || intervalSeconds < 1 || intervalSeconds > 59 || 60 % intervalSeconds !== 0) {
+    throw new Error(
+      `price.refreshInterval must be a whole number between 1 and 59 that evenly divides 60 ` +
+      `(got ${intervalSeconds}). Non-divisor intervals produce incorrect cron schedules. ` +
+      `Valid values: 1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30, 60.`
+    );
+  }
+
   const cronExpression = `*/${intervalSeconds} * * * * *`;
   health.startedAt = Date.now();
 

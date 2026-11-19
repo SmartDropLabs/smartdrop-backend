@@ -193,20 +193,19 @@ async function preflightCheck(knex, options = {}) {
  * actually needs when reconstructing what happened to a database.
  */
 async function ensureStatusTable(knex) {
-  const exists = await knex.schema.hasTable(STATUS_TABLE);
-  if (exists) return;
-
-  await knex.schema.createTable(STATUS_TABLE, (table) => {
-    table.increments('id').primary();
-    table.string('migration_name').notNullable();
-    table.string('direction').notNullable(); // up | down
-    table.string('status').notNullable();    // applied | failed | dry-run
-    table.boolean('destructive').notNullable().defaultTo(false);
-    table.text('detected_operations');
-    table.text('error');
-    table.string('applied_by');
-    table.timestamp('recorded_at').notNullable().defaultTo(knex.fn.now());
-  });
+  await knex.raw(`
+    CREATE TABLE IF NOT EXISTS ${STATUS_TABLE} (
+      id                  SERIAL PRIMARY KEY,
+      migration_name      VARCHAR(255) NOT NULL,
+      direction           VARCHAR(10) NOT NULL,
+      status              VARCHAR(20) NOT NULL,
+      destructive         BOOLEAN NOT NULL DEFAULT false,
+      detected_operations TEXT,
+      error               TEXT,
+      applied_by          VARCHAR(255),
+      recorded_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
 }
 
 /**

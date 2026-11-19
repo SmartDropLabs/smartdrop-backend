@@ -88,4 +88,77 @@ function generateSecret(bytes = 32) {
   return `whsec_${crypto.randomBytes(bytes).toString('hex')}`;
 }
 
-module.exports = { sign, verify, verifyDetailed, generateSecret, SIGNATURE_PREFIX };
+/**
+ * Validate that a timestamp is within the acceptable age window (#639).
+ *
+ * @param {number|string} timestamp - Timestamp in seconds or milliseconds
+ * @param {number} [maxAgeSeconds=300] - Tolerance window (default: 5 minutes)
+ * @returns {boolean} True if within tolerance
+ */
+function isTimestampValid(timestamp, maxAgeSeconds = 300) {
+  if (!timestamp) return false;
+  const num = Number(timestamp);
+  if (isNaN(num) || num <= 0) return false;
+  const tsSeconds = num > 1e11 ? Math.floor(num / 1000) : num;
+  const now = Math.floor(Date.now() / 1000);
+  return Math.abs(now - tsSeconds) <= maxAgeSeconds;
+}
+
+/**
+ * Generate signature with explicit timestamp for replay attack protection (#639).
+ *
+ * Format: `t=${timestamp},v1=${hmac}`
+ *
+ * @param {string} secret
+ * @param {string|Object} body
+ * @param {number} [timestamp=Date.now()]
+ * @returns {string} Signed timestamp token
+ */
+function signWithTimestamp(secret, body, timestamp = Date.now()) {
+  if (typeof secret !== 'string' || secret.length === 0) {
+    throw new Error('signature secret must be a non-empty string');
+  }
+  const num = Number(timestamp);
+  const tsSeconds = num > 1e11 ? Math.floor(num / 1000) : num;
+  const bodyStr = typeof body === 'string' ? body : JSON.stringify(body);
+  const hmac = crypto.createHmac('sha256', secret).update(`${tsSeconds}.${bodyStr}`).digest('hex');
+  return `t=${tsSeconds},v1=${hmac}`;
+}
+
+/**
+ * Verify signature with timestamp replay check (#639).
+ *
+ * @param {string} secret
+ * @param {string|Object} body
+ * @param {string} signatureWithTimestamp
+ * @param {number} [maxAgeSeconds=300]
+ * @returns {boolean}
+ */
+function verifyWithTimestamp(secret, body, signatureWithTimestamp, maxAgeSeconds = 300) {
+  if (!signatureWithTimestamp || typeof signatureWithTimestamp !== 'string') return false;
+  const match = signatureWithTimestamp.match(/t=(\d+)[,;]\s*(?:v1=|sha256=)?([0-9a-f]+)/i);
+  if (!match) return false;
+
+  const [, tsStr, digest] = match;
+  const timestamp = Number(tsStr);
+  if (!isTimestampValid(timestamp, maxAgeSeconds)) return false;
+
+  const bodyStr = typeof body === 'string' ? body : JSON.stringify(body);
+  const expected = crypto.createHmac('sha256', secret).update(`${timestamp}.${bodyStr}`).digest('hex');
+
+  const a = Buffer.from(expected, 'hex');
+  const b = Buffer.from(digest, 'hex');
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+module.exports = {
+  sign,
+  verify,
+  verifyDetailed,
+  generateSecret,
+  SIGNATURE_PREFIX,
+  isTimestampValid,
+  signWithTimestamp,
+  verifyWithTimestamp,
+};

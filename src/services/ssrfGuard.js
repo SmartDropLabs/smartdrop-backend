@@ -137,11 +137,36 @@ async function assertPublicTarget(url) {
   pinned.hostname = isV6 ? `[${chosen}]` : chosen;
   const originalHost = parsed.hostname;
   const hostHeader = net.isIP(normalizeHostname(originalHost)) ? null : originalHost;
-  return { targetUrl: pinned.toString(), host: hostHeader };
+  return { targetUrl: pinned.toString(), host: hostHeader, pinnedIp: chosen, addresses };
+}
+
+/**
+ * Pin DNS resolution for a hostname and verify it resolves strictly to public addresses (#627).
+ * @param {string} hostname
+ * @returns {Promise<string>} Validated public IP address
+ */
+async function pinDns(hostname) {
+  const host = normalizeHostname(hostname);
+  const addresses = await resolveAddresses(host);
+  if (!addresses || addresses.length === 0) {
+    throw new AppError('WEBHOOK_TARGET_BLOCKED', 'Webhook target could not be resolved to a public address', 422);
+  }
+  for (const addr of addresses) {
+    if (isPrivateIp(addr)) {
+      throw new AppError(
+        'WEBHOOK_TARGET_BLOCKED',
+        'Webhook target must not point to a private or internal network address',
+        422,
+      );
+    }
+  }
+  return addresses[0];
 }
 
 module.exports = {
   assertPublicTarget,
   assertPublicUrlSync,
   isPrivateIp,
+  pinDns,
+  resolveAddresses,
 };

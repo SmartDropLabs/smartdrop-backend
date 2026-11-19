@@ -9,6 +9,7 @@ const { idempotencyMiddleware } = require("../services/idempotency");
 const logger = require("../logger");
 const AppError = require("../errors/AppError");
 const { flattenZodIssues, validate } = require("../middleware/validate");
+const { requireApiKey } = require("../middleware/auth");
 const {
   airdropCreateBodySchema,
   airdropRecipientsBodySchema,
@@ -21,6 +22,7 @@ const buildRateLimit = require("../middleware/rateLimit");
 const { routeTimeout } = require("../middleware/timeout");
 const { StrKey } = require("@stellar/stellar-sdk");
 const { paginateResponse } = require("../utils/paginate");
+const virusScanner = require("../services/virusScanner");
 
 // Stellar Int64 max in stroops (1 unit = 10_000_000 stroops for XLM/USDC)
 const INT64_MAX_STROOPS = 9223372036854775807n;
@@ -33,7 +35,13 @@ const CSV_PARSE_CHUNK_BYTES = 64 * 1024;
 const MAX_REPORTED_INVALID_ROWS = 20;
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: config.airdrops.csvMaxBytes },
+  limits: {
+    fileSize: config.airdrops.csvMaxBytes,
+    files: 1,
+    fields: 10,
+    parts: 12,
+    fieldSize: 64 * 1024,
+  },
 });
 const validateRouteIdParams = validate(routeIdParamsSchema, "params");
 const validatePaginationQuery = validate(paginationQuerySchema, "query");
@@ -64,18 +72,71 @@ const addRecipientsLimit = buildRateLimit({
 });
 
 function uploadRecipientsFile(req, res, next) {
-  upload.single("file")(req, res, (err) => {
-    if (err instanceof multer.MulterError && err.code === "LIMIT_FILE_SIZE") {
+  upload.single("file")(req, res, async (err) => {
+    if (err instanceof multer.MulterError) {
+      if (err.code === "LIMIT_FILE_SIZE") {
+        return next(
+          new AppError(
+            "PAYLOAD_TOO_LARGE",
+            `CSV file cannot exceed ${config.airdrops.csvMaxBytes} bytes`,
+            413,
+            { max_bytes: config.airdrops.csvMaxBytes },
+          ),
+        );
+      }
+
       return next(
         new AppError(
-          "PAYLOAD_TOO_LARGE",
-          `CSV file cannot exceed ${config.airdrops.csvMaxBytes} bytes`,
-          413,
-          { max_bytes: config.airdrops.csvMaxBytes },
+          "VALIDATION_ERROR",
+          "Upload does not match the expected form structure",
+          400,
+          { reason: err.code },
         ),
       );
     }
-    return next(err);
+
+    if (err) {
+      return next(err);
+    }
+
+    if (!req.file) {
+      return next(
+        new AppError(
+          "VALIDATION_ERROR",
+          "No file provided in upload",
+          400,
+        ),
+      );
+    }
+
+    try {
+      const scanResult = await virusScanner.scan(req.file.buffer, req.file.originalname);
+      if (scanResult.infected) {
+        logger.warn("Infected file upload rejected", {
+          filename: req.file.originalname,
+          threats: scanResult.threats,
+        });
+        return next(
+          new AppError(
+            "SECURITY_ERROR",
+            "Uploaded file failed virus scan",
+            400,
+            { infected: true, threats: scanResult.threats },
+          ),
+        );
+      }
+    } catch (scanErr) {
+      logger.error("Virus scan error during upload", { error: scanErr.message });
+      return next(
+        new AppError(
+          "INTERNAL_ERROR",
+          "Failed to scan uploaded file",
+          500,
+        ),
+      );
+    }
+
+    return next();
   });
 }
 
@@ -283,6 +344,7 @@ async function parseCSV(buffer) {
 
 router.post(
   "/airdrops",
+  requireApiKey({ scopes: ["airdrops"] }),
   routeTimeout(),
   createAirdropLimit,
   idempotencyMiddleware("airdrop"),
@@ -326,6 +388,7 @@ router.get("/airdrops/:id", validateRouteIdParams, async (req, res, next) => {
 
 router.patch(
   "/airdrops/:id",
+  requireApiKey({ scopes: ["airdrops"] }),
   validateRouteIdParams,
   validateWithCurrentLedger(airdropUpdateBodySchema),
   async (req, res, next) => {
@@ -349,6 +412,7 @@ router.patch(
 
 router.delete(
   "/airdrops/:id",
+  requireApiKey({ scopes: ["airdrops"] }),
   validateRouteIdParams,
   async (req, res, next) => {
     try {
@@ -368,6 +432,7 @@ router.delete(
 
 router.post(
   "/airdrops/:id/cancel",
+  requireApiKey({ scopes: ["airdrops"] }),
   validateRouteIdParams,
   async (req, res, next) => {
     try {
@@ -387,6 +452,7 @@ router.post(
 
 router.post(
   "/airdrops/:id/recipients",
+  requireApiKey({ scopes: ["airdrops"] }),
   routeTimeout(),
   validateRouteIdParams,
   addRecipientsLimit,

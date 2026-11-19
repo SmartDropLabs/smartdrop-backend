@@ -80,6 +80,17 @@ function createLeaderElection(jobName, opts = {}) {
   let renewTimer = null;
   let acquiredAt = null;
   let lastRenewedAt = null;
+  // Issue #375: guards against a renew/acquire cycle overlapping with
+  // another still in flight — the startup case (startRenewLoop's initial
+  // tryAcquire() isn't awaited before setInterval starts) is one way to
+  // hit this, but a slow Redis round-trip that outlives renewIntervalMs
+  // would too. Concurrent calls to the same instance's own SET NX are
+  // otherwise a real footgun: the second one fails (the key already
+  // exists) and — if it resolves after the first one already set
+  // `leader = true` — reads that as "someone else has the lease" and
+  // incorrectly flips `leader` back to false despite this instance still
+  // holding a perfectly valid lease.
+  let cycleInFlight = false;
 
   /**
    * Attempt to acquire the leader lease.
@@ -92,7 +103,14 @@ function createLeaderElection(jobName, opts = {}) {
     const result = await redis.set(lockKey, instanceId, 'NX', 'PX', leaseTtlMs);
     if (result === 'OK') {
       if (!leader) {
-        logger.info('Acquired leader lease', { job: jobName, instanceId, lockKey, leaseTtlMs });
+        logger.info('Acquired leader lease', {
+          event: 'leader_election',
+          transition: 'acquired',
+          job: jobName,
+          instanceId,
+          lockKey,
+          leaseTtlMs,
+        });
       }
       leader = true;
       acquiredAt = Date.now();
@@ -105,6 +123,8 @@ function createLeaderElection(jobName, opts = {}) {
       // This shouldn't normally happen with proper renewal, but handles edge
       // cases like a long GC pause causing lease expiry.
       logger.warn('Lost leader lease — another instance has acquired it', {
+        event: 'leader_election',
+        transition: 'lost',
         job: jobName,
         instanceId,
         lockKey,
@@ -136,6 +156,8 @@ function createLeaderElection(jobName, opts = {}) {
 
       // Lease expired and someone else took it, or it was manually deleted.
       logger.warn('Failed to renew leader lease — lost leadership', {
+        event: 'leader_election',
+        transition: 'lost',
         job: jobName,
         instanceId,
         lockKey,
@@ -151,9 +173,13 @@ function createLeaderElection(jobName, opts = {}) {
         lockKey,
         error: err.message,
       });
-      // Don't clear leader flag on transient Redis errors — the lease may
-      // still be valid. We'll retry on the next renewal cycle.
-      return leader;
+      // Return false on Redis errors to prevent the instance from
+      // continuing to act as leader when it cannot verify its lease.
+      // The instance will attempt to re-acquire leadership on the next cycle.
+      leader = false;
+      acquiredAt = null;
+      lastRenewedAt = null;
+      return false;
     }
   }
 
@@ -168,7 +194,13 @@ function createLeaderElection(jobName, opts = {}) {
 
     try {
       await redis.releaseLease(lockKey, instanceId);
-      logger.info('Released leader lease', { job: jobName, instanceId, lockKey });
+      logger.info('Released leader lease', {
+        event: 'leader_election',
+        transition: 'released',
+        job: jobName,
+        instanceId,
+        lockKey,
+      });
     } catch (err) {
       logger.error('Error releasing leader lease', {
         job: jobName,
@@ -184,41 +216,48 @@ function createLeaderElection(jobName, opts = {}) {
   }
 
   /**
+   * Run one acquire-or-renew cycle, skipping it entirely if a previous
+   * cycle is still in flight (issue #375) rather than letting two
+   * overlap.
+   */
+  async function runElectionCycle() {
+    if (cycleInFlight) return;
+    cycleInFlight = true;
+    const action = leader ? 'renew' : 'acquire';
+    try {
+      if (leader) {
+        await renew();
+      } else {
+        await tryAcquire();
+      }
+    } catch (err) {
+      logger.error('Leader election cycle failed', {
+        job: jobName,
+        instanceId,
+        action,
+        error: err.message,
+      });
+    } finally {
+      cycleInFlight = false;
+    }
+  }
+
+  /**
    * Start the periodic renewal loop.
    */
   function startRenewLoop() {
     if (renewTimer) return;
     stopRenewLoop();
 
-    // Try to acquire immediately on start
-    tryAcquire().catch((err) => {
-      logger.error('Leader election initial acquire failed', {
-        job: jobName,
-        instanceId,
-        error: err.message,
-      });
-    });
+    // Try to acquire immediately on start. Deliberately not awaited —
+    // startRenewLoop() itself stays synchronous/fire-and-forget for
+    // callers — but runElectionCycle()'s in-flight guard means the
+    // interval below can't start a second, overlapping cycle before this
+    // one settles.
+    runElectionCycle();
 
     renewTimer = setInterval(() => {
-      if (leader) {
-        // We hold the lease — try to renew it
-        renew().catch((err) => {
-          logger.error('Leader election renewal loop error', {
-            job: jobName,
-            instanceId,
-            error: err.message,
-          });
-        });
-      } else {
-        // We don't hold the lease — try to acquire
-        tryAcquire().catch((err) => {
-          logger.error('Leader election acquire retry failed', {
-            job: jobName,
-            instanceId,
-            error: err.message,
-          });
-        });
-      }
+      runElectionCycle();
     }, renewIntervalMs);
 
     if (typeof renewTimer.unref === 'function') {
@@ -226,6 +265,8 @@ function createLeaderElection(jobName, opts = {}) {
     }
 
     logger.info('Leader election renewal loop started', {
+      event: 'leader_election',
+      transition: 'renew_loop_started',
       job: jobName,
       instanceId,
       lockKey,
@@ -243,7 +284,12 @@ function createLeaderElection(jobName, opts = {}) {
       renewTimer = null;
     }
     await release();
-    logger.info('Leader election renewal loop stopped', { job: jobName, instanceId });
+    logger.info('Leader election renewal loop stopped', {
+      event: 'leader_election',
+      transition: 'renew_loop_stopped',
+      job: jobName,
+      instanceId,
+    });
   }
 
   /**
@@ -285,6 +331,47 @@ function createLeaderElection(jobName, opts = {}) {
     }
   }
 
+  /**
+   * Acquire a monotonically increasing fencing token for split-brain protection (#633).
+   * @returns {Promise<number>}
+   */
+  async function acquireFenceToken() {
+    const redis = cache.getClient();
+    const tokenKey = `leader:${jobName}:fence-token`;
+    const token = await redis.incr(tokenKey);
+    return token;
+  }
+
+  /**
+   * Verify that a fencing token is still the current active token before commit (#633).
+   * @param {number} token
+   * @returns {Promise<boolean>}
+   */
+  async function validateFenceToken(token) {
+    if (!token) return false;
+    const redis = cache.getClient();
+    const tokenKey = `leader:${jobName}:fence-token`;
+    const current = await redis.get(tokenKey);
+    return Number(current) === Number(token);
+  }
+
+  /**
+   * Execute job with split-brain fencing token protection (#633).
+   *
+   * @param {Object} job
+   * @param {Function} processJobFn
+   * @returns {Promise<*>}
+   */
+  async function executeWithFencing(job, processJobFn) {
+    const token = await acquireFenceToken();
+    const result = await processJobFn(job, token);
+    const valid = await validateFenceToken(token);
+    if (!valid) {
+      throw new Error(`Split-brain detected: fence token ${token} was superseded during execution`);
+    }
+    return result;
+  }
+
   return {
     tryAcquire,
     renew,
@@ -294,11 +381,30 @@ function createLeaderElection(jobName, opts = {}) {
     isLeader,
     getState,
     getCurrentLeader,
+    acquireFenceToken,
+    validateFenceToken,
+    executeWithFencing,
     jobName,
     lockKey,
     instanceId,
   };
 }
 
-module.exports = { createLeaderElection };
+async function acquireFencingToken(jobName = 'default') {
+  const redis = cache.getClient();
+  return redis.incr(`leader:${jobName}:fence-token`);
+}
+
+async function validateFencingToken(jobName = 'default', token) {
+  if (!token) return false;
+  const redis = cache.getClient();
+  const current = await redis.get(`leader:${jobName}:fence-token`);
+  return Number(current) === Number(token);
+}
+
+module.exports = {
+  createLeaderElection,
+  acquireFencingToken,
+  validateFencingToken,
+};
 

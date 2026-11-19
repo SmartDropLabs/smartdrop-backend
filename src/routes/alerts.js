@@ -22,7 +22,7 @@ router.post('/alerts', validate(alertCreateBodySchema), async (req, res, next) =
 
 router.get('/alerts', validate(paginationQuerySchema, 'query'), async (req, res, next) => {
   try {
-    const pagination = parsePagination(req.query);
+    const pagination = parsePagination(req.validated.query);
     const result = await alertsService.listPaginated(pagination);
     return res.json(
       paginateResponse(
@@ -38,11 +38,21 @@ router.get('/alerts', validate(paginationQuerySchema, 'query'), async (req, res,
 
 router.delete('/alerts/:id', validateRouteIdParams, async (req, res, next) => {
   try {
-    const deleted = await alertsService.remove(req.params.id);
+    const alertId = req.validated?.params?.id || req.params.id;
+    // #508 — verify resource ownership before deletion
+    const alert = await alertsService.get(alertId);
+    if (!alert) {
+      return next(new AppError('ALERT_NOT_FOUND', 'Alert not found', 404));
+    }
+    const clientIp = req.ip || req.connection?.remoteAddress || 'unknown';
+    if (alert.owner_ip && alert.owner_ip !== clientIp) {
+      return next(new AppError('FORBIDDEN', 'You do not have permission to delete this alert', 403));
+    }
+    const deleted = await alertsService.remove(alertId);
     if (!deleted) {
       return next(new AppError('ALERT_NOT_FOUND', 'Alert not found', 404));
     }
-    return res.json({ deleted: true, id: req.params.id });
+    return res.json({ deleted: true, id: alertId });
   } catch (err) {
     logger.error('Delete alert error', { error: err.message });
     return next(err);

@@ -8,7 +8,10 @@ const deliveryRepo = require("../repositories/deliveryRepository");
 const dispatcher = require("../services/webhookDispatcher");
 const signatureService = require("../services/webhookSignature");
 const { probeReachability } = require("../services/webhook");
+const { assertPublicTarget } = require("../services/ssrfGuard");
 const { idempotencyMiddleware } = require("../services/idempotency");
+const { requireCsrfHeader } = require("../middleware/csrf");
+const { requireResourcePermission } = require("../middleware/permissions");
 const buildRateLimit = require("../middleware/rateLimit");
 const { routeTimeout } = require("../middleware/timeout");
 const AppError = require("../errors/AppError");
@@ -98,6 +101,7 @@ function publicView(webhook) {
 
 router.post(
   "/webhooks",
+  requireCsrfHeader,
   routeTimeout(),
   idempotencyMiddleware("webhook"),
   validate(webhookCreateBodySchema),
@@ -121,6 +125,14 @@ router.post(
         );
       }
 
+      // Issue #313: probeReachability makes a real outbound HTTP request to
+      // the caller-supplied URL — used to happen here before the URL had
+      // been validated at all (webhookRepo.create()'s SSRF check only runs
+      // *after* this point), making the probe itself an SSRF oracle against
+      // internal/private targets. Validate (format, protocol, and resolved
+      // address) before probing, the same guard used at delivery time.
+      await assertPublicTarget(body.url);
+
       const secret = body.secret || signatureService.generateSecret();
       const reachability = await probeReachability(body.url);
       const webhook = await webhookRepo.create({
@@ -141,7 +153,7 @@ router.post(
       };
 
       if (!reachability.reachable) {
-        response.warning = `Webhook target is unreachable during registration: ${reachability.error || "request failed"}`;
+        response.warning = "Webhook target is unreachable during registration: check the URL and try again";
       }
 
       return res.status(201).json(response);
@@ -165,111 +177,6 @@ router.get("/webhooks", validatePaginationQuery, async (req, res, next) => {
     return next(err);
   }
 });
-
-router.get("/webhooks/:id", validateRouteIdParams, async (req, res, next) => {
-  try {
-    const webhook = await webhookRepo.findById(req.params.id);
-    if (!webhook)
-      return next(new AppError("WEBHOOK_NOT_FOUND", "Webhook not found", 404));
-    return res.json(publicView(webhook));
-  } catch (err) {
-    return next(err);
-  }
-});
-
-router.patch(
-  "/webhooks/:id",
-  validateRouteIdParams,
-  validate(webhookPatchBodySchema),
-  async (req, res, next) => {
-    try {
-      const patch = req.validated.body;
-      const updated = await webhookRepo.update(req.params.id, patch);
-      if (!updated)
-        return next(
-          new AppError("WEBHOOK_NOT_FOUND", "Webhook not found", 404),
-        );
-      return res.json(publicView(updated));
-    } catch (err) {
-      return next(err);
-    }
-  },
-);
-
-router.delete(
-  "/webhooks/:id",
-  validateRouteIdParams,
-  async (req, res, next) => {
-    try {
-      const deleted = await webhookRepo.remove(req.params.id);
-      if (!deleted)
-        return next(
-          new AppError("WEBHOOK_NOT_FOUND", "Webhook not found", 404),
-        );
-      return res.json({ deleted: true, id: req.params.id });
-    } catch (err) {
-      return next(err);
-    }
-  },
-);
-
-// Reduces a delivery's raw failure detail to a generic public category so
-// the /test response never leaks low-level network error strings (e.g.
-// "ECONNREFUSED ...") or raw upstream HTTP detail to the caller. The raw
-// value is still stored on the delivery record and logged server-side for
-// operators (#96).
-function categorizePublicError(delivery) {
-  if (!delivery.last_error) return delivery.last_error;
-  return delivery.response_status != null ? "error_response" : "unreachable";
-}
-
-router.post(
-  "/webhooks/:id/test",
-  routeTimeout(),
-  validateRouteIdParams,
-  testLimit,
-  async (req, res, next) => {
-    try {
-      const delivery = await dispatcher.sendTest(req.params.id);
-      if (!delivery)
-        return next(
-          new AppError("WEBHOOK_NOT_FOUND", "Webhook not found", 404),
-        );
-      return res.status(202).json({
-        delivery_id: delivery.id,
-        status: delivery.status,
-        attempts: delivery.attempts,
-        response_status: delivery.response_status,
-        last_error: categorizePublicError(delivery),
-      });
-    } catch (err) {
-      return next(err);
-    }
-  },
-);
-
-router.get(
-  "/webhooks/:id/deliveries",
-  validateRouteIdParams,
-  validate(webhookDeliveriesQuerySchema, "query"),
-  async (req, res, next) => {
-    try {
-      const webhook = await webhookRepo.findById(req.params.id);
-      if (!webhook)
-        return next(
-          new AppError("WEBHOOK_NOT_FOUND", "Webhook not found", 404),
-        );
-      const { limit, status } = req.validated.query;
-      const deliveries = await deliveryRepo.listByWebhook(req.params.id, {
-        limit,
-        status,
-      });
-      return res.json({ deliveries });
-    } catch (err) {
-      return next(err);
-    }
-  },
-);
 
 // ── Dead Letter Queue endpoints (#257) ──────────────────────────────────
 
@@ -325,5 +232,131 @@ router.post("/webhooks/dlq/:id/retry", async (req, res, next) => {
     return next(err);
   }
 });
+
+router.get("/webhooks/:id", validateRouteIdParams, async (req, res, next) => {
+  try {
+    const webhookId = req.validated?.params?.id || req.params.id;
+    const webhook = await webhookRepo.findById(webhookId);
+    if (!webhook)
+      return next(new AppError("WEBHOOK_NOT_FOUND", "Webhook not found", 404));
+    return res.json(publicView(webhook));
+  } catch (err) {
+    return next(err);
+  }
+});
+
+router.patch(
+  "/webhooks/:id",
+  requireCsrfHeader,
+  validateRouteIdParams,
+  validate(webhookPatchBodySchema),
+  async (req, res, next) => {
+    try {
+      const webhookId = req.validated?.params?.id || req.params.id;
+      const patch = req.validated.body;
+      const updated = await webhookRepo.update(webhookId, patch);
+      if (!updated)
+        return next(
+          new AppError("WEBHOOK_NOT_FOUND", "Webhook not found", 404),
+        );
+      return res.json(publicView(updated));
+    } catch (err) {
+      return next(err);
+    }
+  },
+);
+
+router.delete(
+  "/webhooks/:id",
+  requireCsrfHeader,
+  validateRouteIdParams,
+  // #508 — verify resource ownership before deletion
+  requireResourcePermission({
+    resourceName: 'webhook',
+    getResourceOwner: async (req) => {
+      const webhookId = req.validated?.params?.id || req.params.id;
+      const webhook = await webhookRepo.findById(webhookId);
+      return webhook?.owner_ip || null;
+    },
+    isAllowed: (req, ownerId) => {
+      const clientIp = clientIpFromRequest(req);
+      return clientIp === ownerId;
+    },
+  }),
+  async (req, res, next) => {
+    try {
+      const webhookId = req.validated?.params?.id || req.params.id;
+      const deleted = await webhookRepo.remove(webhookId);
+      if (!deleted)
+        return next(
+          new AppError("WEBHOOK_NOT_FOUND", "Webhook not found", 404),
+        );
+      return res.json({ deleted: true, id: webhookId });
+    } catch (err) {
+      return next(err);
+    }
+  },
+);
+
+// Reduces a delivery's raw failure detail to a generic public category so
+// the /test response never leaks low-level network error strings (e.g.
+// "ECONNREFUSED ...") or raw upstream HTTP detail to the caller. The raw
+// value is still stored on the delivery record and logged server-side for
+// operators (#96).
+function categorizePublicError(delivery) {
+  if (!delivery.last_error) return delivery.last_error;
+  return delivery.response_status != null ? "error_response" : "unreachable";
+}
+
+router.post(
+  "/webhooks/:id/test",
+  requireCsrfHeader,
+  routeTimeout(),
+  validateRouteIdParams,
+  testLimit,
+  async (req, res, next) => {
+    try {
+      const webhookId = req.validated?.params?.id || req.params.id;
+      const delivery = await dispatcher.sendTest(webhookId);
+      if (!delivery)
+        return next(
+          new AppError("WEBHOOK_NOT_FOUND", "Webhook not found", 404),
+        );
+      return res.status(202).json({
+        delivery_id: delivery.id,
+        status: delivery.status,
+        attempts: delivery.attempts,
+        response_status: delivery.response_status,
+        last_error: categorizePublicError(delivery),
+      });
+    } catch (err) {
+      return next(err);
+    }
+  },
+);
+
+router.get(
+  "/webhooks/:id/deliveries",
+  validateRouteIdParams,
+  validate(webhookDeliveriesQuerySchema, "query"),
+  async (req, res, next) => {
+    try {
+      const webhookId = req.validated?.params?.id || req.params.id;
+      const webhook = await webhookRepo.findById(webhookId);
+      if (!webhook)
+        return next(
+          new AppError("WEBHOOK_NOT_FOUND", "Webhook not found", 404),
+        );
+      const { limit, status } = req.validated.query;
+      const deliveries = await deliveryRepo.listByWebhook(webhookId, {
+        limit,
+        status,
+      });
+      return res.json({ deliveries });
+    } catch (err) {
+      return next(err);
+    }
+  },
+);
 
 module.exports = router;

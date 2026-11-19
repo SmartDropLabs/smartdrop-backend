@@ -15,8 +15,10 @@ async function getIdempotencyResponse(key) {
   
   try {
     const cacheKey = `${IDEMPOTENCY_KEY_PREFIX}${key}`;
+    // cache.get() already JSON.parses the stored value, so `cached` here is
+    // a plain object, not a string — re-parsing it throws (issue #316).
     const cached = await cache.get(cacheKey);
-    return cached ? JSON.parse(cached) : null;
+    return cached || null;
   } catch (err) {
     logger.warn('Failed to retrieve idempotency response', { key, error: err.message });
     return null;
@@ -40,7 +42,9 @@ async function storeIdempotencyResponse(key, statusCode, responseBody) {
       body: responseBody,
       timestamp: new Date().toISOString(),
     };
-    await cache.setex(cacheKey, IDEMPOTENCY_TTL_SECONDS, JSON.stringify(data));
+    // cache.set() already JSON.stringifies the value and supports a TTL;
+    // cache.setex() isn't a method this module exports (issue #316).
+    await cache.set(cacheKey, data, IDEMPOTENCY_TTL_SECONDS);
   } catch (err) {
     logger.error('Failed to store idempotency response', { key, error: err.message });
   }
@@ -59,20 +63,21 @@ async function storeIdempotencyResponse(key, statusCode, responseBody) {
 function idempotencyMiddleware(resourceType = 'resource') {
   return async (req, res, next) => {
     const idempotencyKey = req.get('Idempotency-Key');
-    
-    // Store the original json() method
-    const originalJson = res.json.bind(res);
-    
-    // Override json() to capture and cache the response
-    res.json = function(data) {
-      if (idempotencyKey && res.statusCode >= 200 && res.statusCode < 300) {
-        // Only cache successful responses
-        storeIdempotencyResponse(idempotencyKey, res.statusCode, data);
-      }
-      return originalJson(data);
-    };
-    
-    // Check if this idempotency key was already processed
+
+    // Validate idempotency key format before processing
+    if (idempotencyKey && typeof idempotencyKey !== 'string') {
+      return res.status(400).json({
+        error: { code: 'IDEMPOTENCY_KEY_INVALID', message: 'Invalid Idempotency-Key header', request_id: req.id },
+      });
+    }
+
+    if (idempotencyKey && idempotencyKey.length === 0) {
+      return res.status(400).json({
+        error: { code: 'IDEMPOTENCY_KEY_EMPTY', message: 'Idempotency-Key header cannot be empty', request_id: req.id },
+      });
+    }
+
+    // Check if this idempotency key was already processed before any other processing
     if (idempotencyKey) {
       const cached = await getIdempotencyResponse(idempotencyKey);
       if (cached) {
@@ -80,11 +85,25 @@ function idempotencyMiddleware(resourceType = 'resource') {
         res.set('Idempotency-Replay', 'true');
         return res.status(cached.statusCode).json(cached.body);
       }
-      
-      // Mark that we're processing this key
+    }
+
+    // Store the original json() method
+    const originalJson = res.json.bind(res);
+
+    // Override json() to capture and cache the response only after request is processed successfully
+    res.json = function(data) {
+      if (idempotencyKey && res.statusCode >= 200 && res.statusCode < 300) {
+        // Only cache successful responses
+        storeIdempotencyResponse(idempotencyKey, res.statusCode, data);
+      }
+      return originalJson(data);
+    };
+
+    // Mark that we're processing this key
+    if (idempotencyKey) {
       res.set('Idempotency-Key', idempotencyKey);
     }
-    
+
     return next();
   };
 }

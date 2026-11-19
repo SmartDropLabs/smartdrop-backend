@@ -29,7 +29,7 @@ function validateAssetCode(assetCode) {
 router.get('/prices/:asset_code', validatePriceParams, validatePriceQuery, async (req, res, next) => {
   try {
     const { asset_code: normalizedCode } = req.validated.params;
-    const { issuer } = req.query;
+    const { issuer } = req.validated.query;
 
     const priceData = await priceOracle.getPrice(normalizedCode, issuer || null);
 
@@ -46,7 +46,7 @@ router.get('/prices/:asset_code', validatePriceParams, validatePriceQuery, async
 router.get('/prices/:asset_code/refresh', routeTimeout(), requireApiKey(), validatePriceParams, validatePriceQuery, async (req, res, next) => {
   try {
     const { asset_code: normalizedCode } = req.validated.params;
-    const { issuer } = req.query;
+    const { issuer } = req.validated.query;
 
     const priceData = await priceOracle.fetchFreshPrice(normalizedCode, issuer || null);
     if (priceData.price_usd === null) {

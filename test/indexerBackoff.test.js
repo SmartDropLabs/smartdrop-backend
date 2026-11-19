@@ -13,8 +13,9 @@ const mockLogger = {
 function buildStore(overrides = {}) {
   return {
     getLastLedger: jest.fn(async () => 100),
-    setLastLedger: jest.fn(async () => {}),
+    advanceLastLedger: jest.fn(async () => true),
     saveEvent: jest.fn(async () => {}),
+    saveEvents: jest.fn(async () => {}),
     ...overrides,
   };
 }

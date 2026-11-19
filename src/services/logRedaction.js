@@ -24,15 +24,46 @@ const winston = require('winston');
  * objects with sensitive keys.
  */
 
-const SENSITIVE_KEYS = ['apikey', 'privatekey', 'secret', 'token', 'authorization'];
+const SENSITIVE_KEYS = [
+  'apikey',
+  'privatekey',
+  'secret',
+  'token',
+  'authorization',
+  'password',
+  'passwd',
+  'cookie',
+  'cookies',
+  'setcookie',
+  'body',
+  'reqbody',
+  'requestbody',
+  'credential',
+  'credentials',
+  'jwt',
+  'session',
+  'bearer',
+];
+
+const ENTIRELY_REDACTED_KEYS = [
+  'body',
+  'reqbody',
+  'requestbody',
+  'authorization',
+  'cookie',
+  'cookies',
+  'setcookie',
+  'password',
+  'passwd',
+];
 
 // Matches webhook secrets (whsec_ + hex). Safe to match broadly: the prefix is
 // distinctive and only ever precedes a secret in this codebase.
 const WHSEC_RE = /whsec_[0-9a-f]+/gi;
 
-// Matches token=/secret=/key= query parameters embedded in any string value,
+// Matches token=/secret=/key=/password= query parameters embedded in any string value,
 // capturing the parameter name so we can preserve it and only redact the value.
-const QUERY_SECRET_RE = /([?&](?:token|secret|key)=)([^&#\s]+)/gi;
+const QUERY_SECRET_RE = /([?&](?:token|secret|key|api_key|password|auth|sig|signature|access_token|credential|session)=)([^&#\s]+)/gi;
 
 // Normalize a key for matching: treat `_`/`-` as nothing so `api_key`,
 // `ApiKey`, `PRIVATE_KEY` all match their tokens.
@@ -45,6 +76,11 @@ function isSensitiveKey(key) {
   return SENSITIVE_KEYS.some((k) => n.includes(k));
 }
 
+function isEntirelyRedactedKey(key) {
+  const n = normKey(key);
+  return ENTIRELY_REDACTED_KEYS.some((k) => n === k || n.includes(k));
+}
+
 function redactWhsec(value) {
   return value.replace(WHSEC_RE, 'whsec_****');
 }
@@ -53,10 +89,36 @@ function redactQuerySecrets(value) {
   return value.replace(QUERY_SECRET_RE, '$1[REDACTED]');
 }
 
-// Scan a string value for secret *shapes* regardless of the key it sits under.
+// Comprehensive PII detection patterns (#634)
+const PII_PATTERNS = [
+  // Credit cards (Visa, MasterCard, Amex, Discover, etc. 13-19 digits, separated by hyphens or spaces)
+  /\b(?:\d{4}[- ]?){3}\d{4}\b/g,
+  /\b\d{4}[- ]?\d{6}[- ]?\d{5}\b/g,
+  // Social Security Numbers (SSN: AAA-GG-SSSS)
+  /\b\d{3}[- ]\d{2}[- ]\d{4}\b/g,
+  // Stellar secret keys (starts with S, 56 characters base32)
+  /\bS[A-Z2-7]{55}\b/g,
+  // Email addresses
+  /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g,
+  // Phone numbers (e.g. +1-555-555-5555, (555) 555-5555, 555-555-5555)
+  /\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g,
+];
+
+function redactPii(value) {
+  let out = value;
+  for (const pattern of PII_PATTERNS) {
+    out = out.replace(pattern, '[REDACTED_PII]');
+  }
+  return out;
+}
+
+// Scan a string value for secret *shapes* regardless of the key it sits under,
+// and escape CR and LF to prevent log injection / log splitting (Issue #499).
 function scanString(value) {
   let out = redactWhsec(value);
   out = redactQuerySecrets(out);
+  out = redactPii(out);
+  out = out.replace(/\r/g, '\\r').replace(/\n/g, '\\n');
   return out;
 }
 
@@ -72,7 +134,9 @@ function redactValue(value, key) {
 // is an array of secret-shaped strings). Recurse into it so each leaf is
 // redacted by shape/key rather than blanket-replacing the whole structure with
 // `[REDACTED]` — which would also lose the `whsec_****` partial reveal.
+// Bodies, cookies, passwords, and authorization headers are always redacted entirely.
 function redactSensitiveValue(value, key, seen) {
+  if (isEntirelyRedactedKey(key)) return '[REDACTED]';
   if (typeof value === 'string') return redactValue(value, key);
   if (Array.isArray(value)) {
     return value.map((el) => {
@@ -85,42 +149,64 @@ function redactSensitiveValue(value, key, seen) {
   return '[REDACTED]';
 }
 
+// Builds a redacted copy instead of mutating `node` in place (#328) — the
+// same info object can be logged again or read elsewhere after this format
+// runs, and mutating it would silently corrupt that later use. `seen` is a
+// Map from original node -> its redacted clone, so a circular reference
+// resolves to the already-built clone instead of looping forever or (as a
+// mutate-in-place approach would) returning the original, still-unredacted
+// node.
 function redact(node, seen) {
   if (!node || typeof node !== 'object') return node;
-  if (seen.has(node)) return node;
-  seen.add(node);
+  if (seen.has(node)) return seen.get(node);
 
   if (Array.isArray(node)) {
-    for (let i = 0; i < node.length; i += 1) {
-      const el = node[i];
+    const result = [];
+    seen.set(node, result);
+    for (const el of node) {
       if (typeof el === 'string') {
-        node[i] = scanString(el);
+        result.push(scanString(el));
       } else if (el && typeof el === 'object') {
-        redact(el, seen);
+        result.push(redact(el, seen));
+      } else {
+        result.push(el);
       }
     }
-    return node;
+    return result;
   }
+
+  // Spread first so properties `Object.keys` won't enumerate — notably
+  // Winston's `Symbol.for('level')`/`Symbol.for('message')` on the
+  // top-level `info` object — still survive into the redacted copy.
+  const result = { ...node };
+  seen.set(node, result);
 
   for (const key of Object.keys(node)) {
     const val = node[key];
 
     if (isSensitiveKey(key)) {
-      node[key] = redactSensitiveValue(val, key, seen);
+      result[key] = redactSensitiveValue(val, key, seen);
     } else if (typeof val === 'string') {
-      node[key] = scanString(val);
+      result[key] = scanString(val);
     } else if (val && typeof val === 'object') {
-      redact(val, seen);
+      result[key] = redact(val, seen);
     }
   }
-  return node;
+  return result;
 }
 
 function redactInfo(info) {
-  // Track visited objects to avoid infinite recursion on circular structures.
-  return redact(info, new Set());
+  // Track visited objects (original -> clone) to avoid infinite recursion
+  // on circular structures.
+  return redact(info, new Map());
 }
 
 const redactFormat = winston.format(redactInfo);
 
-module.exports = { redactInfo, redactFormat, SENSITIVE_KEYS };
+module.exports = {
+  redactInfo,
+  redactFormat,
+  SENSITIVE_KEYS,
+  PII_PATTERNS,
+  redactPii,
+};

@@ -7,7 +7,7 @@ exports.up = async function(knex) {
     -- Airdrop CRUD records (distinct from the indexer airdrops table which
     -- mirrors on-chain contract state). This table backs the Redis-backed
     -- airdrops service that manages draft/active/completed lifecycle.
-    CREATE TABLE service_airdrops (
+    CREATE TABLE IF NOT EXISTS service_airdrops (
       id            TEXT PRIMARY KEY,
       name          TEXT NOT NULL,
       description   TEXT,
@@ -20,7 +20,7 @@ exports.up = async function(knex) {
       updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
-    CREATE TABLE service_airdrop_recipients (
+    CREATE TABLE IF NOT EXISTS service_airdrop_recipients (
       id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       airdrop_id   TEXT NOT NULL REFERENCES service_airdrops(id) ON DELETE CASCADE,
       address      TEXT NOT NULL,
@@ -30,7 +30,7 @@ exports.up = async function(knex) {
       UNIQUE (airdrop_id, address)
     );
 
-    CREATE INDEX idx_service_airdrop_recipients_airdrop
+    CREATE INDEX IF NOT EXISTS idx_service_airdrop_recipients_airdrop
       ON service_airdrop_recipients (airdrop_id);
   `);
 };

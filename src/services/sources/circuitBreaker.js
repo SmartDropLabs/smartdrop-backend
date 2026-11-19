@@ -37,14 +37,15 @@ function createCircuitBreaker({ sourceName, cooldownMs, reminderIntervalMs }) {
     }
   }
 
-  /** Call on a nonRetryable failure. Logs distinctly (error level) only the first time the circuit transitions from closed to open. */
+  /** Call on a nonRetryable failure. Logs distinctly (error level) only the first time the circuit transitions from closed to open. When `context.cooldownMs` is provided it overrides the default — used for permanent auth failures (401) that should keep the circuit open longer than transient misconfigurations. */
   function open(context = {}) {
     const wasOpen = isOpen();
-    openUntil = Date.now() + cooldownMs;
+    const effectiveCooldown = context.cooldownMs || cooldownMs;
+    openUntil = Date.now() + effectiveCooldown;
     if (!wasOpen) {
       logger.error("Price source permanently misconfigured", {
         source: sourceName,
-        cooldownMs,
+        cooldownMs: effectiveCooldown,
         ...context,
       });
       lastReminderLoggedAt = Date.now();

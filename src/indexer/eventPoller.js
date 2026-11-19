@@ -27,6 +27,7 @@ class EventPoller {
     this.logger = options.logger || logger;
     this.server = options.server || new rpc.Server(options.rpcUrl || config.stellar.sorobanRpcUrl);
     this.timer = null;
+    this.inFlight = null;
     this.stopped = false;
     this.lastRun = null;
     this.lastError = null;
@@ -77,8 +78,15 @@ class EventPoller {
    */
   computeBackoffMs() {
     if (this.consecutiveFailures === 0) return this.basePollIntervalMs;
-    const scaled = this.basePollIntervalMs
-      * this.backoffFactor ** this.consecutiveFailures;
+
+    // Cap the exponent itself before raising backoffFactor to it — with a
+    // high enough consecutiveFailures and factor, `factor ** failures` can
+    // overflow to Infinity (or, combined with a zero base, produce NaN via
+    // `0 * Infinity`), which would then bypass the Math.min clamp below.
+    // 64 failures already dwarfs any realistic maxPollIntervalMs for any
+    // factor > 1, so clamping the exponent there is always safe.
+    const exponent = Math.min(this.consecutiveFailures, 64);
+    const scaled = this.basePollIntervalMs * this.backoffFactor ** exponent;
     return Math.min(scaled, this.maxPollIntervalMs);
   }
 
@@ -168,6 +176,10 @@ class EventPoller {
     let response;
     let lastError;
     for (let attempt = 1; attempt <= RPC_MAX_RETRIES; attempt++) {
+      if (this.stopped) {
+        throw new Error('Poll stopped during RPC retry');
+      }
+
       try {
         response = await this.rpcBreaker.call(() =>
           this.server.getEvents({
@@ -204,9 +216,7 @@ class EventPoller {
     const rawEvents = response.events || [];
     const parsedEvents = rawEvents.map(parseContractEvent).filter(Boolean);
 
-    for (const event of parsedEvents) {
-      await this.store.saveEvent(event);
-    }
+    await this.store.saveEvents(parsedEvents);
 
     // response.latestLedger is the chain's current tip, not how far this
     // particular call actually got — if the RPC returned a full pollLimit
@@ -222,7 +232,29 @@ class EventPoller {
       ? Math.max(previousLedger ?? 0, ...eventLedgers)
       : Math.max(response.latestLedger || previousLedger || 0, ...eventLedgers);
 
-    await this.store.setLastLedger(latestIndexedLedger);
+    // Advance the cursor only if it still holds the value this poll read
+    // (issue #341). A plain set here is a read-modify-write across two
+    // round trips: an overlapping poller would have its own progress
+    // silently overwritten, and a stale/lagging answer could even move the
+    // cursor backwards. The events above are already saved either way —
+    // saves are idempotent — so refusing the write costs nothing but the
+    // duplicate work the other poller already did.
+    const cursorAdvanced = await this.store.advanceLastLedger(
+      previousLedger,
+      latestIndexedLedger,
+    );
+    if (!cursorAdvanced) {
+      this.metrics.pollsSkipped += 1;
+      this.logger.warn(
+        'Ledger cursor changed concurrently; leaving the other writer in place',
+        {
+          expected_ledger: previousLedger,
+          attempted_ledger: latestIndexedLedger,
+        },
+      );
+      return { skipped: true, reason: 'concurrent cursor advance' };
+    }
+
     this.lastIndexedLedger = latestIndexedLedger;
     this.metrics.eventsIndexed += parsedEvents.length;
 
@@ -317,26 +349,30 @@ class EventPoller {
     // fixed interval cannot express. It also guarantees cycles never
     // overlap, since the next one is only scheduled after this one settles.
     const run = async () => {
-      try {
-        const result = await this.pollOnce();
-        if (result.skipped) {
-          this.logger.debug('SmartDrop event poll skipped', result);
-        } else {
-          this.recordPollSuccess();
-          this.logger.info('SmartDrop contract events indexed', result);
+      this.inFlight = (async () => {
+        try {
+          const result = await this.pollOnce();
+          if (result.skipped) {
+            this.logger.debug('SmartDrop event poll skipped', result);
+          } else {
+            this.recordPollSuccess();
+            this.logger.info('SmartDrop contract events indexed', result);
+          }
+        } catch (err) {
+          this.lastRun = new Date().toISOString();
+          this.lastError = err.message;
+          this.recordPollFailure();
+          this.logger.warn('SmartDrop event indexing failed', {
+            error: err.message,
+            consecutive_failures: this.consecutiveFailures,
+            next_poll_interval_ms: this.currentPollIntervalMs,
+          });
+        } finally {
+          this.inFlight = null;
+          this.scheduleNext(run);
         }
-      } catch (err) {
-        this.lastRun = new Date().toISOString();
-        this.lastError = err.message;
-        this.recordPollFailure();
-        this.logger.warn('SmartDrop event indexing failed', {
-          error: err.message,
-          consecutive_failures: this.consecutiveFailures,
-          next_poll_interval_ms: this.currentPollIntervalMs,
-        });
-      } finally {
-        this.scheduleNext(run);
-      }
+      })();
+      await this.inFlight;
     };
 
     run();
@@ -360,13 +396,21 @@ class EventPoller {
     if (typeof this.timer.unref === 'function') this.timer.unref();
   }
 
-  stop() {
+  /**
+   * Stops the poller, waiting for any in-flight pollOnce() to finish
+   * writing before resolving (issue #317) so the process doesn't exit
+   * mid-write.
+   */
+  async stop() {
     this.stopped = true;
     if (this.timer) {
       clearTimeout(this.timer);
       this.timer = null;
-      this.logger.info('SmartDrop event indexer stopped');
     }
+    if (this.inFlight) {
+      await this.inFlight;
+    }
+    this.logger.info('SmartDrop event indexer stopped');
   }
 }
 

@@ -7,6 +7,9 @@ const { errorHandler } = require('../src/middleware/errorHandler');
 
 const ALLOWED = ['http://localhost:3000', 'https://app.smartdrop.io'];
 
+// Must match config.js's CORS_MAX_AGE_SECONDS default.
+const DEFAULT_MAX_AGE_SECONDS = 86400;
+
 function buildApp(allowedOrigins) {
   const app = express();
   app.use(buildCorsMiddleware(allowedOrigins));
@@ -107,6 +110,48 @@ describe('CORS no-origin requests (server-to-server, curl)', () => {
   });
 });
 
+describe('CORS preflight caching (#344)', () => {
+  let app;
+  beforeAll(() => { app = buildApp(ALLOWED); });
+
+  test('a cross-origin POST preflight advertises a cache window', async () => {
+    const res = await request(app)
+      .options('/test')
+      .set('Origin', 'http://localhost:3000')
+      .set('Access-Control-Request-Method', 'POST')
+      .set('Access-Control-Request-Headers', 'content-type,authorization');
+
+    expect(res.status).toBe(204);
+    // Without Access-Control-Max-Age the browser re-sends this preflight for
+    // every cross-origin POST; with it, the response is reusable for the
+    // advertised number of seconds.
+    expect(res.headers['access-control-max-age']).toBe(String(DEFAULT_MAX_AGE_SECONDS));
+    expect(res.headers['access-control-allow-methods']).toMatch(/POST/);
+  });
+
+  test('the cache window is configurable via CORS_MAX_AGE_SECONDS', async () => {
+    const original = process.env.CORS_MAX_AGE_SECONDS;
+    process.env.CORS_MAX_AGE_SECONDS = '600';
+    jest.resetModules();
+    const buildCors = require('../src/middleware/cors');
+    const configurableApp = express();
+    configurableApp.use(buildCors(ALLOWED));
+    configurableApp.get('/test', (req, res) => res.json({ ok: true }));
+
+    try {
+      const res = await request(configurableApp)
+        .options('/test')
+        .set('Origin', 'http://localhost:3000')
+        .set('Access-Control-Request-Method', 'POST');
+      expect(res.headers['access-control-max-age']).toBe('600');
+    } finally {
+      if (original === undefined) delete process.env.CORS_MAX_AGE_SECONDS;
+      else process.env.CORS_MAX_AGE_SECONDS = original;
+      jest.resetModules();
+    }
+  });
+});
+
 describe('CORS_ALLOWED_ORIGINS config parsing', () => {
   test('dev default allows localhost:3000 and localhost:3001', () => {
     const original = process.env.CORS_ALLOWED_ORIGINS;
@@ -129,5 +174,45 @@ describe('CORS_ALLOWED_ORIGINS config parsing', () => {
     ]);
     if (original !== undefined) process.env.CORS_ALLOWED_ORIGINS = original;
     else delete process.env.CORS_ALLOWED_ORIGINS;
+  });
+});
+
+describe('production CORS allowlist guard (#621)', () => {
+  const { resolveAllowedOrigins } = buildCorsMiddleware;
+  const DEV_DEFAULTS = ['http://localhost:3000', 'http://localhost:3001'];
+
+  test('non-production keeps the configured origins', () => {
+    expect(resolveAllowedOrigins(DEV_DEFAULTS, { nodeEnv: 'development', explicit: undefined }))
+      .toEqual(DEV_DEFAULTS);
+  });
+
+  test('production without CORS_ALLOWED_ORIGINS allows no cross-origin callers', () => {
+    expect(resolveAllowedOrigins(DEV_DEFAULTS, { nodeEnv: 'production', explicit: undefined }))
+      .toEqual([]);
+    expect(resolveAllowedOrigins(DEV_DEFAULTS, { nodeEnv: 'production', explicit: '  ' }))
+      .toEqual([]);
+  });
+
+  test('production drops localhost origins even when listed explicitly', () => {
+    const origins = ['https://app.smartdrop.io', 'http://localhost:3000', 'http://127.0.0.1:8080'];
+    expect(resolveAllowedOrigins(origins, { nodeEnv: 'production', explicit: origins.join(',') }))
+      .toEqual(['https://app.smartdrop.io']);
+  });
+
+  test('a wildcard origin is never honoured', () => {
+    expect(resolveAllowedOrigins(['*', 'https://a.example'], { nodeEnv: 'development' }))
+      .toEqual(['https://a.example']);
+    expect(resolveAllowedOrigins(['*'], { nodeEnv: 'production', explicit: '*' })).toEqual([]);
+  });
+
+  test('a production app built from the dev defaults rejects the dev origin', async () => {
+    const app = express();
+    app.use(buildCorsMiddleware(DEV_DEFAULTS, { nodeEnv: 'production', explicit: undefined }));
+    app.get('/test', (req, res) => res.json({ ok: true }));
+    app.use(errorHandler);
+
+    const res = await request(app).get('/test').set('Origin', 'http://localhost:3000');
+    expect(res.status).toBe(403);
+    expect(res.headers['access-control-allow-origin']).toBeUndefined();
   });
 });

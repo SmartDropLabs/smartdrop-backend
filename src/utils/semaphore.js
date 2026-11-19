@@ -49,6 +49,10 @@ class Semaphore {
         entry.timer = setTimeout(() => {
           const idx = this._queue.indexOf(entry);
           if (idx !== -1) this._queue.splice(idx, 1);
+          // Issue #365: drop the reference to this (now-fired) timer once
+          // it's done its job, so the closure the timer callback holds on
+          // `entry` isn't kept alive by `entry.timer` pointing back at it.
+          entry.timer = null;
           reject(new Error(`Semaphore: timed out after ${timeoutMs}ms`));
         }, timeoutMs);
       }

@@ -4,6 +4,7 @@ const { validate } = require("../middleware/validate");
 const apiKeys = require("../services/apiKeys");
 const logger = require("../logger");
 const AppError = require("../errors/AppError");
+const { routeTimeout } = require("../middleware/timeout");
 const {
   keyCreateBodySchema,
   keyRotateBodySchema,
@@ -43,7 +44,8 @@ router.post("/keys", validate(keyCreateBodySchema), async (req, res, next) => {
 
 router.delete("/keys/:id", validateRouteIdParams, async (req, res, next) => {
   try {
-    const deleted = await apiKeys.revokeKey(req.params.id);
+    const keyId = req.validated?.params?.id || req.params.id;
+    const deleted = await apiKeys.revokeKey(keyId);
     if (!deleted) {
       return next(new AppError("API_KEY_NOT_FOUND", "API key not found", 404));
     }
@@ -56,13 +58,18 @@ router.delete("/keys/:id", validateRouteIdParams, async (req, res, next) => {
 
 router.post(
   "/keys/:id/rotate",
+  routeTimeout(),
   validateRouteIdParams,
   validate(keyRotateBodySchema),
   async (req, res, next) => {
     try {
-      const { tier } = req.validated.body;
+      const { tier, grace_period_seconds: gracePeriodSeconds } = req.validated.body;
+      const keyId = req.validated?.params?.id || req.params.id;
 
-      const rotated = await apiKeys.rotateKey(req.params.id, { tier });
+      const rotated = await apiKeys.rotateKey(keyId, {
+        tier,
+        gracePeriodSeconds,
+      });
       if (!rotated) {
         return next(
           new AppError("API_KEY_NOT_FOUND", "API key not found", 404),

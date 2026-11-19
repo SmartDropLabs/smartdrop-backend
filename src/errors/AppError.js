@@ -20,6 +20,7 @@
 const ERROR_CODES = Object.freeze({
   // ── Generic ──────────────────────────────────────────────────────────
   VALIDATION_ERROR: { statusCode: 400 },
+  VALIDATION: { statusCode: 400 },
   UNAUTHORIZED: { statusCode: 401 },
   FORBIDDEN: { statusCode: 403 },
   NOT_FOUND: { statusCode: 404 },

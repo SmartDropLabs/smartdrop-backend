@@ -89,11 +89,35 @@ function redactQuerySecrets(value) {
   return value.replace(QUERY_SECRET_RE, '$1[REDACTED]');
 }
 
+// Comprehensive PII detection patterns (#634)
+const PII_PATTERNS = [
+  // Credit cards (Visa, MasterCard, Amex, Discover, etc. 13-19 digits, separated by hyphens or spaces)
+  /\b(?:\d{4}[- ]?){3}\d{4}\b/g,
+  /\b\d{4}[- ]?\d{6}[- ]?\d{5}\b/g,
+  // Social Security Numbers (SSN: AAA-GG-SSSS)
+  /\b\d{3}[- ]\d{2}[- ]\d{4}\b/g,
+  // Stellar secret keys (starts with S, 56 characters base32)
+  /\bS[A-Z2-7]{55}\b/g,
+  // Email addresses
+  /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g,
+  // Phone numbers (e.g. +1-555-555-5555, (555) 555-5555, 555-555-5555)
+  /\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g,
+];
+
+function redactPii(value) {
+  let out = value;
+  for (const pattern of PII_PATTERNS) {
+    out = out.replace(pattern, '[REDACTED_PII]');
+  }
+  return out;
+}
+
 // Scan a string value for secret *shapes* regardless of the key it sits under,
 // and escape CR and LF to prevent log injection / log splitting (Issue #499).
 function scanString(value) {
   let out = redactWhsec(value);
   out = redactQuerySecrets(out);
+  out = redactPii(out);
   out = out.replace(/\r/g, '\\r').replace(/\n/g, '\\n');
   return out;
 }
@@ -179,4 +203,10 @@ function redactInfo(info) {
 
 const redactFormat = winston.format(redactInfo);
 
-module.exports = { redactInfo, redactFormat, SENSITIVE_KEYS };
+module.exports = {
+  redactInfo,
+  redactFormat,
+  SENSITIVE_KEYS,
+  PII_PATTERNS,
+  redactPii,
+};

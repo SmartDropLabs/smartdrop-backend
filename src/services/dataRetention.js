@@ -103,6 +103,88 @@ async function cleanupExpiredRecordIndexes(recordKey) {
   }
 }
 
+/**
+ * Find expired records across retention collections (#632).
+ *
+ * @param {Object} [options]
+ * @returns {Promise<Array<string>>} List of expired record keys
+ */
+async function findExpired(options = {}) {
+  const expired = [];
+  try {
+    const redis = cache.getClient();
+    if (!redis) return expired;
+
+    // Scan for delivery logs or session keys
+    const patterns = ['webhook_delivery:*', 'session:*'];
+    for (const pattern of patterns) {
+      let cursor = '0';
+      do {
+        const [nextCursor, keys] = await redis.scan(cursor, 'MATCH', pattern, 'COUNT', 100);
+        cursor = nextCursor;
+        for (const key of keys) {
+          const ttl = await redis.ttl(key);
+          // If key has expired or negative TTL (except -1 no expiry, -2 non-existent)
+          if (ttl <= 0 && ttl !== -1) {
+            expired.push(key);
+          }
+        }
+      } while (cursor !== '0');
+    }
+  } catch (err) {
+    logger.warn('Error finding expired retention records', { error: err.message });
+  }
+  return expired;
+}
+
+/**
+ * Delete records by key.
+ *
+ * @param {Array<string>} records
+ * @returns {Promise<number>} Number of deleted records
+ */
+async function deleteRecords(records) {
+  if (!records || records.length === 0) return 0;
+  const redis = cache.getClient();
+  if (!redis) return 0;
+
+  const pipeline = redis.multi();
+  for (const item of records) {
+    const key = typeof item === 'string' ? item : item.key || item.id;
+    pipeline.del(key);
+  }
+  await pipeline.exec();
+  return records.length;
+}
+
+/**
+ * Run data retention policies with optional dry-run mode (#632).
+ *
+ * @param {boolean|Object} [dryRunOrOptions=false] - When true, computes records without deleting
+ * @returns {Promise<Object>} Execution summary
+ */
+async function runRetention(dryRunOrOptions = false) {
+  const dryRun = typeof dryRunOrOptions === 'boolean' ? dryRunOrOptions : !!dryRunOrOptions?.dryRun;
+  const toDelete = await findExpired();
+
+  if (dryRun) {
+    logger.info(`Retention dry-run: would delete ${toDelete.length} records`);
+    console.log(`Would delete ${toDelete.length} records`);
+    return {
+      dryRun: true,
+      count: toDelete.length,
+      wouldDelete: toDelete,
+    };
+  }
+
+  const deletedCount = await deleteRecords(toDelete);
+  logger.info(`Retention run: deleted ${deletedCount} records`);
+  return {
+    dryRun: false,
+    count: deletedCount,
+  };
+}
+
 module.exports = {
   DELIVERY_RETENTION_DAYS,
   SESSION_RETENTION_DAYS,
@@ -112,4 +194,7 @@ module.exports = {
   applyDeliveryRetention,
   applySessionRetention,
   cleanupExpiredRecordIndexes,
+  findExpired,
+  deleteRecords,
+  runRetention,
 };

@@ -12,10 +12,33 @@ const deliveryRepo = require("../repositories/deliveryRepository");
 const { requestContext } = require("../middleware/requestId");
 const { assertPublicTarget } = require("./ssrfGuard");
 const { encryptPayload } = require("./webhookEncryption");
+const { CircuitBreaker } = require("../utils/circuitBreaker");
 
 const USER_AGENT = "SmartDrop-Webhooks/1.0";
 const WEBHOOK_CACHE_TTL_MS = 60_000;
 const webhookCache = new Map();
+
+// Endpoint-level circuit breakers to protect against cascading failure and resource exhaustion (#635)
+const endpointBreakers = new Map();
+
+function getEndpointBreaker(url, options = {}) {
+  try {
+    const origin = new URL(url).origin;
+    if (!endpointBreakers.has(origin)) {
+      endpointBreakers.set(
+        origin,
+        new CircuitBreaker(origin, {
+          failureThreshold: options.failureThreshold || 5,
+          timeoutMs: options.resetTimeout || 60000,
+          ...options,
+        })
+      );
+    }
+    return endpointBreakers.get(origin);
+  } catch (err) {
+    return null;
+  }
+}
 
 // ── Delivery metrics (#343) ─────────────────────────────────────────────
 // Counters live in Redis (hash-per-webhook plus one aggregate hash) so a
@@ -373,13 +396,36 @@ function withDeliveryTrace(traceId, fn) {
  * exactly one attempt and returns or throws (#446).
  */
 async function postOnce(url, headers, body, timeoutMs) {
-  return axios.post(url, body, {
-    headers,
-    timeout: timeoutMs ?? config.webhooks.timeoutMs,
-    transformRequest: [(data) => data],
-    validateStatus: () => true,
-    maxRedirects: 0,
-  });
+  const breaker = getEndpointBreaker(url);
+  if (breaker && breaker.isOpen()) {
+    const err = new Error(`Circuit breaker open for endpoint ${url}`);
+    err.code = 'ECIRCUITOPEN';
+    throw err;
+  }
+
+  try {
+    const res = await axios.post(url, body, {
+      headers,
+      timeout: timeoutMs ?? config.webhooks.timeoutMs,
+      transformRequest: [(data) => data],
+      validateStatus: () => true,
+      maxRedirects: 0,
+    });
+
+    if (breaker) {
+      if (res.status >= 500) {
+        breaker.recordFailure(new Error(`HTTP ${res.status}`));
+      } else {
+        breaker.recordSuccess();
+      }
+    }
+    return res;
+  } catch (err) {
+    if (breaker) {
+      breaker.recordFailure(err);
+    }
+    throw err;
+  }
 }
 
 async function attempt(deliveryId, sequence) {
@@ -835,4 +881,7 @@ module.exports = {
   hydrateMetrics,
   recordDeliveryStart,
   recordDeliveryEnd,
+  CircuitBreaker,
+  getEndpointBreaker,
+  endpointBreakers,
 };

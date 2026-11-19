@@ -82,6 +82,35 @@ function buildHistoryKey(assetCode, issuer) {
   return `${HISTORY_PREFIX}${assetCode}:${issuer}`;
 }
 
+/**
+ * Detect whether a price payload or timestamp is stale (#626).
+ * @param {Object|number} price - Price object or timestamp
+ * @param {number} [maxAgeMs] - Maximum permitted age in ms
+ * @returns {boolean}
+ */
+function isPriceStale(price, maxAgeMs) {
+  if (!price) return true;
+  const maxAge = maxAgeMs !== undefined
+    ? maxAgeMs
+    : ((config.price?.staleThresholdMinutes || 15) * 60 * 1000);
+
+  let timestamp = null;
+  if (typeof price === 'number') {
+    timestamp = price;
+  } else if (typeof price === 'object') {
+    if (price.timestamp !== undefined) {
+      timestamp = typeof price.timestamp === 'number' ? price.timestamp : Date.parse(price.timestamp);
+    } else if (price.fetched_at !== undefined) {
+      timestamp = Date.parse(price.fetched_at);
+    } else if (price.fetchedAt !== undefined) {
+      timestamp = typeof price.fetchedAt === 'number' ? price.fetchedAt : Date.parse(price.fetchedAt);
+    }
+  }
+
+  if (!timestamp || isNaN(timestamp)) return true;
+  return Date.now() - timestamp > maxAge;
+}
+
 async function detectAnomaly(currentPrice, assetCode, issuer) {
   const historyKey = buildHistoryKey(assetCode, issuer);
 
@@ -449,6 +478,7 @@ module.exports = {
   refreshAllCachedPrices,
   getQueriedAssets,
   recordQueriedAsset,
+  isPriceStale,
   // Internal helpers exported for unit testing.
   median,
   detectAnomaly,

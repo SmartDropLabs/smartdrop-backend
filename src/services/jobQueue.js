@@ -17,6 +17,8 @@ const cache = require('./cache');
 const logger = require('../logger');
 
 const QUEUE_KEY = 'jobs:queue';
+const QUEUE_KEY_HIGH = 'jobs:queue:high';
+const QUEUE_KEY_LOW = 'jobs:queue:low';
 const PROCESSING_KEY = 'jobs:processing';
 const DEFAULT_CONCURRENCY = 5;
 const DEFAULT_POLL_INTERVAL_MS = 1000;
@@ -56,27 +58,51 @@ class JobQueue {
   }
 
   /**
-   * Enqueue a job for background processing.
+   * Enqueue a job for background processing with optional priority support (#624).
    * @param {string} type - Job type
    * @param {Object} data - Job payload
+   * @param {Object|number} [options] - Options or priority level
    * @returns {string} Job ID
    */
-  async enqueue(type, data = {}) {
+  async enqueue(type, data = {}, options = {}) {
+    const priority = typeof options === 'number'
+      ? options
+      : (options?.priority ?? data?.priority ?? 0);
     const jobId = `job_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const job = {
       id: jobId,
       type,
       data,
+      priority,
       attempts: 0,
       maxRetries: MAX_RETRIES,
       enqueuedAt: new Date().toISOString(),
     };
 
+    const queueKey = (priority > 0 || priority === 'high')
+      ? QUEUE_KEY_HIGH
+      : (priority < 0 || priority === 'low')
+      ? QUEUE_KEY_LOW
+      : QUEUE_KEY;
+
     const redis = cache.getClient();
-    await redis.lpush(QUEUE_KEY, JSON.stringify(job));
+    await redis.lpush(queueKey, JSON.stringify(job));
     this.stats.enqueued++;
-    logger.debug(`Job enqueued: ${type} (${jobId})`);
+    logger.debug(`Job enqueued: ${type} (${jobId}) [priority=${priority}]`);
     return jobId;
+  }
+
+  /**
+   * Add a job to the queue with priority support (#624).
+   * @param {Object} job - { type, data, priority }
+   * @param {Object} [options] - { priority }
+   * @returns {string} Job ID
+   */
+  async add(job, options = {}) {
+    const type = job.type || job.name || 'default';
+    const data = job.data !== undefined ? job.data : job;
+    const priority = options.priority !== undefined ? options.priority : (job.priority || 0);
+    return this.enqueue(type, data, { priority });
   }
 
   /**
@@ -107,8 +133,13 @@ class JobQueue {
     if (!this.running || this.activeJobs >= this.concurrency) return;
 
     const redis = cache.getClient();
-    // Atomically move a job from queue to processing (BRPOPLPUSH pattern)
-    const raw = await redis.rpoplpush(QUEUE_KEY, PROCESSING_KEY);
+    // Prioritized drain: check high-priority queue first, then default, then low-priority (#624)
+    const queues = [QUEUE_KEY_HIGH, QUEUE_KEY, QUEUE_KEY_LOW];
+    let raw = null;
+    for (const q of queues) {
+      raw = await redis.rpoplpush(q, PROCESSING_KEY);
+      if (raw) break;
+    }
     if (!raw) return;
 
     let job;
@@ -151,11 +182,16 @@ class JobQueue {
           type: job.type,
           error: err.message,
         });
-        // Re-enqueue with incremented attempt count after a delay
+        // Re-enqueue with incremented attempt count and preserved priority after a delay (#624)
+        const targetQueue = (job.priority > 0 || job.priority === 'high')
+          ? QUEUE_KEY_HIGH
+          : (job.priority < 0 || job.priority === 'low')
+          ? QUEUE_KEY_LOW
+          : QUEUE_KEY;
         setTimeout(async () => {
           try {
             const redis = cache.getClient();
-            await redis.lpush(QUEUE_KEY, JSON.stringify(job));
+            await redis.lpush(targetQueue, JSON.stringify(job));
           } catch (requeueErr) {
             logger.error('Failed to requeue job', { jobId: job.id, error: requeueErr.message });
           }
@@ -225,5 +261,8 @@ class JobQueue {
 // Singleton instance
 const jobQueue = new JobQueue();
 module.exports = jobQueue;
+module.exports.QUEUE_KEY = QUEUE_KEY;
+module.exports.QUEUE_KEY_HIGH = QUEUE_KEY_HIGH;
+module.exports.QUEUE_KEY_LOW = QUEUE_KEY_LOW;
 module.exports.DEAD_LETTER_KEY = DEAD_LETTER_KEY;
 module.exports.DEAD_LETTER_MAX = DEAD_LETTER_MAX;

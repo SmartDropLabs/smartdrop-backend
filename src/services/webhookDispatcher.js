@@ -13,6 +13,7 @@ const { requestContext } = require("../middleware/requestId");
 const { assertPublicTarget } = require("./ssrfGuard");
 const { encryptPayload } = require("./webhookEncryption");
 const { CircuitBreaker } = require("../utils/circuitBreaker");
+const dlq = require("../repositories/dlqRepository");
 
 const USER_AGENT = "SmartDrop-Webhooks/1.0";
 const WEBHOOK_CACHE_TTL_MS = 60_000;
@@ -586,26 +587,27 @@ async function attempt(deliveryId, sequence) {
       error: errorMessage,
     });
 
-    // #289 — Move permanently failed deliveries to a dead letter queue so
-    // they can be inspected, manually retried, or alerting-triggered without
-    // cluttering the active delivery table.
+    // #257 / #289 — Move permanently failed deliveries to the dead letter
+    // queue (src/repositories/dlqRepository.js), where they can be listed,
+    // inspected and retried via /webhooks/dlq. One DLQ only: the former
+    // write-only `webhook:dead_letter` Redis list had no reader. A DLQ write
+    // failure must not fail the delivery update below.
+    const errorHistory = delivery.last_error
+      ? [...(delivery.error_history || []), delivery.last_error, errorMessage]
+      : [errorMessage];
     try {
-      const redis = cache.getClient();
-      const deadLetterEntry = JSON.stringify({
-        delivery_id: delivery.id,
-        webhook_id: webhook.id,
-        event_type: delivery.event_type,
-        event_id: delivery.event_id,
-        error: errorMessage,
-        response_status: responseStatus,
-        attempts,
-        failed_at: nowIso,
-        trace_id: traceId,
-        request_id: delivery.request_id,
-      });
-      await redis.lpush("webhook:dead_letter", deadLetterEntry);
-      // Cap the dead letter queue at 10,000 entries to prevent unbounded growth
-      await redis.ltrim("webhook:dead_letter", 0, 9999);
+      await dlq.addToDLQ(
+        {
+          ...delivery,
+          webhook_id: webhook.id,
+          attempts,
+          last_error: errorMessage,
+          response_status: responseStatus,
+          trace_id: traceId,
+        },
+        errorHistory,
+        payload,
+      );
     } catch (dlqErr) {
       logger.warn("Failed to enqueue dead letter", {
         delivery_id: delivery.id,
@@ -620,6 +622,7 @@ async function attempt(deliveryId, sequence) {
       next_retry_at: null,
       last_error: errorMessage,
       response_status: responseStatus,
+      error_history: errorHistory,
     });
   });
 }
@@ -884,4 +887,5 @@ module.exports = {
   CircuitBreaker,
   getEndpointBreaker,
   endpointBreakers,
+  dlq,
 };

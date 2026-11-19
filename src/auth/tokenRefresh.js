@@ -327,6 +327,13 @@ async function refreshTokens(rawRefreshToken, options = {}) {
 }
 
 /**
+ * Rotate refresh token (#645).
+ */
+async function refreshToken(oldToken, options = {}) {
+  return await refreshTokens(oldToken, options);
+}
+
+/**
  * Revoke a single refresh token (e.g. on user logout).
  *
  * @param {string} rawRefreshToken
@@ -389,6 +396,7 @@ module.exports = {
   signJwt,
   createTokenPair,
   refreshTokens,
+  refreshToken,
   revokeRefreshToken,
   revokeFamily,
   hashToken,

@@ -80,6 +80,9 @@ class AccountLockout {
         failedAttempts: record.failedAttempts,
         lockedUntil: new Date(record.lockedUntil).toISOString(),
       }, 'Account locked after failed login attempts');
+      this.notifyLockout(identifier).catch((err) => {
+        logger.error({ identifier, error: err.message }, 'Failed to send account lockout notification');
+      });
     }
 
     return {
@@ -110,6 +113,30 @@ class AccountLockout {
   getFailedAttempts(identifier) {
     return this.attempts.get(identifier)?.failedAttempts ?? 0;
   }
+
+  /**
+   * Send notification when account is locked (#647).
+   */
+  async notifyLockout(identifier, notificationService) {
+    const notifier = notificationService || this.notificationService;
+    if (notifier && typeof notifier.send === 'function') {
+      await notifier.send(identifier, 'account_locked');
+    }
+  }
+}
+
+/**
+ * Lock an account and notify the user (#647).
+ */
+async function lockAccount(userId, services = {}) {
+  const db = services.db || require('../db');
+  const emailService = services.emailService || services.notificationService;
+  if (db && typeof db.update === 'function') {
+    await db.update(userId, { locked: true });
+  }
+  if (emailService && typeof emailService.send === 'function') {
+    await emailService.send(userId, 'account_locked');
+  }
 }
 
 // Singleton instance
@@ -118,4 +145,5 @@ const defaultLockout = new AccountLockout();
 module.exports = {
   AccountLockout,
   defaultLockout,
+  lockAccount,
 };

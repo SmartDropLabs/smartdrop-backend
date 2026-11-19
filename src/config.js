@@ -108,7 +108,7 @@ const env = cleanEnv(rawEnv, {
   // 32-byte AES-256 key for encrypting webhook secrets at rest (issue #145),
   // hex or base64 encoded. Empty in dev — webhookEncryption falls back to an
   // insecure fixed key and logs a warning; production must set this.
-  WEBHOOK_SECRET_ENCRYPTION_KEY: str({ default: '' }),
+  WEBHOOK_SECRET_ENCRYPTION_KEY: str({ devDefault: '' }),
   DB_ENCRYPTION_KEY: str({ default: '' }),
   AIRDROP_CSV_MAX_BYTES: positiveInteger({ default: 5 * 1024 * 1024 }),
   AIRDROP_JSON_MAX_BYTES: positiveInteger({ default: 2 * 1024 * 1024 }),
@@ -401,7 +401,7 @@ function reload() {
     LEASE_TTL_MS: positiveInteger({ default: 15000 }),
     LEASE_RENEW_INTERVAL_MS: positiveInteger({ default: 5000 }),
     ADMIN_API_KEY: str({ default: '' }),
-    WEBHOOK_SECRET_ENCRYPTION_KEY: str({ default: '' }),
+    WEBHOOK_SECRET_ENCRYPTION_KEY: str({ devDefault: '' }),
     DB_ENCRYPTION_KEY: str({ default: '' }),
     AIRDROP_CSV_MAX_BYTES: positiveInteger({ default: 5 * 1024 * 1024 }),
     AIRDROP_JSON_MAX_BYTES: positiveInteger({ default: 2 * 1024 * 1024 }),

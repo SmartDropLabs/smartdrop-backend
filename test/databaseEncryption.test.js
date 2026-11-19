@@ -19,7 +19,7 @@ describe('Database Encryption at Rest (#519)', () => {
       const encrypted = encrypt(plaintext);
 
       expect(isEncrypted(encrypted)).toBe(true);
-      expect(encrypted).toMatch(/^enc:v1:[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+$/);
+      expect(encrypted).toMatch(/^enc:v2:[A-Za-z0-9._-]+:[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+$/);
       expect(encrypted).not.toContain(plaintext);
 
       const decrypted = decrypt(encrypted);
@@ -61,10 +61,10 @@ describe('Database Encryption at Rest (#519)', () => {
     test('fails decryption if ciphertext is tampered with (auth tag validation)', () => {
       const encrypted = encrypt('sensitive-bank-account');
       const parts = encrypted.split(':');
-      // parts: ['enc', 'v1', iv, ciphertext, authTag]
+      // parts: ['enc', 'v2', keyId, iv, ciphertext, authTag]
       // tamper with ciphertext
       const tamperedCiphertext = Buffer.from('corrupted-data').toString('base64');
-      parts[3] = tamperedCiphertext;
+      parts[4] = tamperedCiphertext;
       const tampered = parts.join(':');
 
       expect(() => decrypt(tampered)).toThrow();

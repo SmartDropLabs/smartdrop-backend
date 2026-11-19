@@ -29,20 +29,32 @@ function registerEmailHandler(transport) {
  * Queue an email for async delivery (#515).
  * Returns immediately — the email is sent in the background.
  *
+ * When templateVersion is given (#679), it is stored in the job's metadata as
+ * `templateVersion` so the version used for a send can be traced and rolled back.
+ *
  * @param {Object} options
  * @param {string} options.to - Recipient email
  * @param {string} options.subject - Email subject
  * @param {string} [options.html] - HTML body
  * @param {string} [options.text] - Plain text body
  * @param {Object} [options.metadata] - Extra metadata for the transport
+ * @param {number} [options.templateVersion] - Positive integer version of the template used (#679)
  * @returns {Promise<string>} Job ID
+ * @throws {Error} When to/subject are missing or templateVersion is not a positive integer
  */
 async function queueEmail(options) {
-  const { to, subject, html, text, metadata } = options;
+  const { to, subject, html, text, metadata, templateVersion } = options;
   if (!to || !subject) {
     throw new Error('queueEmail requires to and subject');
   }
-  return jobQueue.enqueue(EMAIL_JOB_TYPE, { to, subject, html, text, metadata });
+  if (templateVersion !== undefined && (!Number.isInteger(templateVersion) || templateVersion < 1)) {
+    throw new Error(
+      `queueEmail templateVersion must be a positive integer, got ${templateVersion} (subject: "${subject}")`,
+    );
+  }
+  const jobMetadata =
+    templateVersion === undefined ? metadata : { ...(metadata || {}), templateVersion };
+  return jobQueue.enqueue(EMAIL_JOB_TYPE, { to, subject, html, text, metadata: jobMetadata });
 }
 
 /**

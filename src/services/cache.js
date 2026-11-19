@@ -18,6 +18,11 @@ let reconnectAttempts = 0;
 const MAX_CONCURRENT_OPS = parseInt(process.env.REDIS_MAX_CONCURRENT_OPS, 10) || 50;
 const operationSemaphore = new Semaphore(MAX_CONCURRENT_OPS);
 
+// In-process cache lookup counters (issue #680). Incremented by get() and
+// mget() only; exposed via getCacheStats() and exported to Prometheus by
+// src/metrics/index.js.
+const cacheStats = { hits: 0, misses: 0 };
+
 const consecutiveQueueWarningsByCaller = new Map();
 
 function _checkQueueBackpressure(caller) {
@@ -127,15 +132,43 @@ function getConcurrencyStats() {
   };
 }
 
+/**
+ * Snapshot of cache lookup counters since process start (issue #680).
+ * A hit is a lookup that returned a real value; a miss is one that returned
+ * null/undefined or a value that failed JSON.parse.
+ *
+ * @returns {{hits: number, misses: number}}
+ */
+function getCacheStats() {
+  return { hits: cacheStats.hits, misses: cacheStats.misses };
+}
+
+/**
+ * Records one lookup outcome. Only the parsed result decides hit vs miss,
+ * so a stored JSON null counts as a miss, matching what callers receive.
+ *
+ * @param {*} value - Parsed value (or null when the lookup missed)
+ * @returns {*} The same value, for convenient return
+ */
+function _recordLookup(value) {
+  if (value === null || value === undefined) {
+    cacheStats.misses++;
+  } else {
+    cacheStats.hits++;
+  }
+  return value;
+}
+
 async function get(key) {
   const release = await operationSemaphore.acquire(5000);
   try {
     _checkQueueBackpressure('get');
     const redis = getClient();
     const data = await redis.get(key);
-    if (!data) return null;
+    if (!data) return _recordLookup(null);
+    let parsed;
     try {
-      return JSON.parse(data);
+      parsed = JSON.parse(data);
     } catch (err) {
       // Every write path (set()) serializes via JSON.stringify, so a value
       // that fails to parse here is corrupt, not a legitimate raw string —
@@ -144,8 +177,9 @@ async function get(key) {
         key,
         error: err.message,
       });
-      return null;
+      return _recordLookup(null);
     }
+    return _recordLookup(parsed);
   } finally {
     release();
   }
@@ -167,9 +201,9 @@ async function mget(keys) {
     const redis = getClient();
     const raw = await redis.mget(...keys);
     return raw.map((value, i) => {
-      if (!value) return null;
+      if (!value) return _recordLookup(null);
       try {
-        return JSON.parse(value);
+        return _recordLookup(JSON.parse(value));
       } catch (err) {
         // Same contract as get(): a value that fails to parse is corrupt,
         // not a legitimate raw string, so it's reported as a cache miss.
@@ -177,7 +211,7 @@ async function mget(keys) {
           key: keys[i],
           error: err.message,
         });
-        return null;
+        return _recordLookup(null);
       }
     });
   } finally {
@@ -268,5 +302,5 @@ async function getOrSet(key, fetchFn, ttlSeconds = 60, options = {}) {
 
 module.exports = {
   get, mget, set, del, delMany, disconnect, getClient, isConnected,
-  getCommandQueueLength, getConcurrencyStats, getOrSet,
+  getCommandQueueLength, getConcurrencyStats, getCacheStats, getOrSet,
 };

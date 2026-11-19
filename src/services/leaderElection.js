@@ -247,7 +247,6 @@ function createLeaderElection(jobName, opts = {}) {
    */
   function startRenewLoop() {
     if (renewTimer) return;
-    stopRenewLoop();
 
     // Try to acquire immediately on start. Deliberately not awaited —
     // startRenewLoop() itself stays synchronous/fire-and-forget for

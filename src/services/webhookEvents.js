@@ -43,7 +43,47 @@ function matchesSubscription(subscribedEvents, eventType) {
   return subscribedEvents.includes(eventType);
 }
 
+// Envelope fields every delivered event carries (see README "Webhook payload").
+// Per-event data requirements: only airdrop.failed has a documented data field.
+const REQUIRED_DATA_FIELDS = new Map([
+  ['airdrop.failed', ['reason']],
+]);
+
+/**
+ * Validate an outgoing webhook event envelope before it is delivered.
+ *
+ * @param {unknown} payload - { event, event_id, occurred_at, data }
+ * @returns {{ valid: boolean, errors: string[] }}
+ */
+function validateEventPayload(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return { valid: false, errors: ['payload must be an object'] };
+  }
+  const errors = [];
+  if (!isKnownEvent(payload.event)) {
+    errors.push('event must be a known event type');
+  }
+  if (typeof payload.event_id !== 'string' || payload.event_id.length === 0) {
+    errors.push('event_id must be a non-empty string');
+  }
+  if (typeof payload.occurred_at !== 'string' || Number.isNaN(Date.parse(payload.occurred_at))) {
+    errors.push('occurred_at must be an ISO-8601 timestamp');
+  }
+  if (!payload.data || typeof payload.data !== 'object' || Array.isArray(payload.data)) {
+    errors.push('data must be an object');
+  } else if (REQUIRED_DATA_FIELDS.has(payload.event)) {
+    for (const field of REQUIRED_DATA_FIELDS.get(payload.event)) {
+      const value = payload.data[field];
+      if (value === undefined || value === null || value === '') {
+        errors.push(`data.${field} is required for ${payload.event}`);
+      }
+    }
+  }
+  return { valid: errors.length === 0, errors };
+}
+
 module.exports = {
+  validateEventPayload,
   POOL_EVENTS,
   PRICE_EVENTS,
   AIRDROP_EVENTS,

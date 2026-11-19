@@ -331,6 +331,47 @@ function createLeaderElection(jobName, opts = {}) {
     }
   }
 
+  /**
+   * Acquire a monotonically increasing fencing token for split-brain protection (#633).
+   * @returns {Promise<number>}
+   */
+  async function acquireFenceToken() {
+    const redis = cache.getClient();
+    const tokenKey = `leader:${jobName}:fence-token`;
+    const token = await redis.incr(tokenKey);
+    return token;
+  }
+
+  /**
+   * Verify that a fencing token is still the current active token before commit (#633).
+   * @param {number} token
+   * @returns {Promise<boolean>}
+   */
+  async function validateFenceToken(token) {
+    if (!token) return false;
+    const redis = cache.getClient();
+    const tokenKey = `leader:${jobName}:fence-token`;
+    const current = await redis.get(tokenKey);
+    return Number(current) === Number(token);
+  }
+
+  /**
+   * Execute job with split-brain fencing token protection (#633).
+   *
+   * @param {Object} job
+   * @param {Function} processJobFn
+   * @returns {Promise<*>}
+   */
+  async function executeWithFencing(job, processJobFn) {
+    const token = await acquireFenceToken();
+    const result = await processJobFn(job, token);
+    const valid = await validateFenceToken(token);
+    if (!valid) {
+      throw new Error(`Split-brain detected: fence token ${token} was superseded during execution`);
+    }
+    return result;
+  }
+
   return {
     tryAcquire,
     renew,
@@ -340,11 +381,30 @@ function createLeaderElection(jobName, opts = {}) {
     isLeader,
     getState,
     getCurrentLeader,
+    acquireFenceToken,
+    validateFenceToken,
+    executeWithFencing,
     jobName,
     lockKey,
     instanceId,
   };
 }
 
-module.exports = { createLeaderElection };
+async function acquireFencingToken(jobName = 'default') {
+  const redis = cache.getClient();
+  return redis.incr(`leader:${jobName}:fence-token`);
+}
+
+async function validateFencingToken(jobName = 'default', token) {
+  if (!token) return false;
+  const redis = cache.getClient();
+  const current = await redis.get(`leader:${jobName}:fence-token`);
+  return Number(current) === Number(token);
+}
+
+module.exports = {
+  createLeaderElection,
+  acquireFencingToken,
+  validateFencingToken,
+};
 

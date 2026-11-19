@@ -14,6 +14,7 @@ const API_CSP_DIRECTIVES = {
   'form-action': ["'none'"],
   'frame-ancestors': ["'none'"],
   'object-src': ["'none'"],
+  'report-uri': ['/api/csp-report'],
 };
 
 /**
@@ -38,6 +39,7 @@ const DOCS_CSP_DIRECTIVES = [
   "base-uri 'none'",
   "form-action 'none'",
   "frame-ancestors 'none'",
+  "report-uri /api/csp-report",
 ].join('; ');
 
 function docsCspMiddleware(_req, res, next) {
@@ -45,8 +47,14 @@ function docsCspMiddleware(_req, res, next) {
   next();
 }
 
+function cspMiddleware(_req, res, next) {
+  res.setHeader('Content-Security-Policy', "default-src 'self'; report-uri /api/csp-report");
+  next();
+}
+
 module.exports = {
   API_CSP_DIRECTIVES,
   DOCS_CSP_DIRECTIVES,
   docsCspMiddleware,
+  cspMiddleware,
 };

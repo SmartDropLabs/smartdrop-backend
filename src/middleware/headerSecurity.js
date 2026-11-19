@@ -33,6 +33,9 @@ function headerSecurityMiddleware(_req, res, next) {
     return originalSetHeader(name, value);
   };
 
+  // Enforce HSTS for all responses (#653)
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+
   next();
 }
 

@@ -53,10 +53,12 @@ function checkStringLengths(obj, path = '', errors = []) {
   if (obj === null || obj === undefined) return errors;
 
   if (typeof obj === 'string') {
+    // Normalize Unicode before length validation to prevent validation bypass (#656)
+    const normalized = obj.normalize('NFC');
     const field = path.split('.').pop();
     const max = getMaxLength(field, DEFAULT_MAX_STRING_LENGTH);
-    if (obj.length > max) {
-      errors.push(`${path || 'value'} exceeds maximum length of ${max} (got ${obj.length})`);
+    if (normalized.length > max) {
+      errors.push(`${path || 'value'} exceeds maximum length of ${max} (got ${normalized.length})`);
     }
     return errors;
   }

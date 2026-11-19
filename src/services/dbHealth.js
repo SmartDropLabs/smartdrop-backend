@@ -5,6 +5,18 @@ const config = require("../config");
 
 let db = null;
 
+async function checkPoolHealth() {
+  if (!db || !db.client || !db.client.pool) {
+    return { total: 0, idle: 0, waiting: 0 };
+  }
+  const pool = db.client.pool;
+  return {
+    total: typeof pool.numUsed === 'function' ? pool.numUsed() + pool.numFree() : (pool.totalCount || 0),
+    idle: typeof pool.numFree === 'function' ? pool.numFree() : (pool.idleCount || 0),
+    waiting: typeof pool.numPendingAcquires === 'function' ? pool.numPendingAcquires() : (pool.waitingCount || 0),
+  };
+}
+
 async function checkDatabase() {
   if (!config.databaseUrl) {
     return { configured: false, checked: false, status: "unavailable" };
@@ -25,10 +37,11 @@ async function checkDatabase() {
     }
 
     await db.raw("SELECT 1");
-    return { configured: true, checked: true, status: "ok" };
+    const pool = await checkPoolHealth();
+    return { configured: true, checked: true, status: "ok", pool };
   } catch (_err) {
     return { configured: true, checked: true, status: "error" };
   }
 }
 
-module.exports = { checkDatabase };
+module.exports = { checkDatabase, checkPoolHealth };

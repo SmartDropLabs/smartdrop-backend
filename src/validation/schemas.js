@@ -38,8 +38,6 @@ const optionalIssuerSchema = z.preprocess(
 // strings and arrays let one request write an arbitrarily large row.
 const MAX_SCOPE_LENGTH = 64;
 const MAX_SCOPES_PER_KEY = 20;
-const MAX_SECRET_LENGTH = 256;
-const MAX_DESCRIPTION_LENGTH = 500;
 const MAX_ALERT_THRESHOLD_USD = 1e12;
 
 const paginationQuerySchema = z.object({

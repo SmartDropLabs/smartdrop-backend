@@ -21,6 +21,38 @@ const logger = require('../logger');
  * when the audit log grows. Apply via migration script.
  */
 
+const DEFAULT_SENSITIVE_FIELDS = [
+  'email',
+  'phone',
+  'ssn',
+  'password',
+  'token',
+  'secret',
+  'apiKey',
+  'creditCard',
+];
+
+function maskSensitive(data, sensitiveFields = DEFAULT_SENSITIVE_FIELDS) {
+  if (data === null || data === undefined || typeof data !== 'object') {
+    return data;
+  }
+  if (Array.isArray(data)) {
+    return data.map((item) => maskSensitive(item, sensitiveFields));
+  }
+  const sensitiveSet = new Set(sensitiveFields.map((f) => String(f).toLowerCase()));
+  const out = {};
+  for (const [key, value] of Object.entries(data)) {
+    if (sensitiveSet.has(key.toLowerCase())) {
+      out[key] = '[REDACTED]';
+    } else if (value && typeof value === 'object') {
+      out[key] = maskSensitive(value, sensitiveFields);
+    } else {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
 class DataAccessAuditor {
   /**
    * Record a data access event.
@@ -45,7 +77,7 @@ class DataAccessAuditor {
       ip: ip || null,
       result,
       timestamp: new Date().toISOString(),
-      ...(details && { details }),
+      ...(details && { details: maskSensitive(details) }),
     });
   }
 
@@ -80,4 +112,4 @@ class DataAccessAuditor {
   }
 }
 
-module.exports = { DataAccessAuditor };
+module.exports = { DataAccessAuditor, maskSensitive, DEFAULT_SENSITIVE_FIELDS };

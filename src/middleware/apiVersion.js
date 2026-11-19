@@ -40,16 +40,24 @@ function parsePathVersion(path) {
   return match ? match[1] : null;
 }
 
+function normalizeVersionValue(raw) {
+  if (raw === undefined || raw === null) return null;
+  const trimmed = String(raw).trim().replace(/^v/i, '');
+  return /^\d+$/.test(trimmed) ? trimmed : null;
+}
+
 /**
  * Express middleware that negotiates the API version.
  *
- * Priority: Accept header > URL path > default.
+ * Priority: Accept vendor media type > Accept-Version header > query ?version= > URL path > default.
  * Rejects requests for unsupported versions with 406 Not Acceptable.
  */
 function negotiateVersion(req, res, next) {
-  const acceptVersion = parseAcceptVersion(req.headers.accept);
-  const pathVersion = parsePathVersion(req.path);
-  const requested = acceptVersion || pathVersion;
+  const acceptVersion = parseAcceptVersion(req.headers?.accept);
+  const acceptVersionHeader = normalizeVersionValue(req.headers?.['accept-version']);
+  const queryVersion = normalizeVersionValue(req.query?.version);
+  const pathVersion = parsePathVersion(req.path || '/');
+  const requested = acceptVersion || acceptVersionHeader || queryVersion || pathVersion;
 
   if (requested && !SUPPORTED_VERSIONS.includes(requested)) {
     return res.status(406).json({

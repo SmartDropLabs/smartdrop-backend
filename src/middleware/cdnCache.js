@@ -27,6 +27,20 @@ const NO_CDN_ROUTES = [
 ];
 
 /**
+ * Normalize a request's path and query string into a canonical CDN cache key (#714).
+ * Lowercases path, strips trailing slashes (except '/'), and sorts query parameters.
+ */
+function normalizeCacheKey(req) {
+  const rawPath = req.path || '/';
+  const normalizedPath = rawPath.length > 1 ? rawPath.toLowerCase().replace(/\/+$/, '') : '/';
+  const queryEntries = Object.entries(req.query || {})
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+    .join('&');
+  return queryEntries ? `${normalizedPath}?${queryEntries}` : normalizedPath;
+}
+
+/**
  * Set CDN cache headers based on route.
  * Surrogate-Control is for CDN edge caching.
  * CDN-Cache-Control is a standard for CDN providers.
@@ -35,7 +49,11 @@ function cdnCache(options = {}) {
   const { defaultMaxAge = 0 } = options;
 
   return (req, res, next) => {
-    const path = req.path;
+    const rawPath = req.path || '/';
+    const path = rawPath.length > 1 ? rawPath.toLowerCase().replace(/\/+$/, '') : '/';
+    const cacheKey = normalizeCacheKey(req);
+    req.normalizedCacheKey = cacheKey;
+    res.setHeader('X-Cache-Key', cacheKey);
 
     // Never CDN-cache sensitive routes
     if (NO_CDN_ROUTES.some((p) => p.test(path))) {
@@ -105,6 +123,7 @@ async function purgeCDN() {
 module.exports = {
   cdnCache,
   purgeCDN,
+  normalizeCacheKey,
   CDN_CACHEABLE_ROUTES,
   NO_CDN_ROUTES,
 };

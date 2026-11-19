@@ -61,13 +61,13 @@ function resolveRedirectHost(req, httpsConfig) {
  * major browsers. Removal is arduous and can take months, which risks breaking
  * services if HTTPS configuration is ever rolled back.
  */
-function buildHstsHeader(httpsConfig) {
+function buildHstsHeader(httpsConfig = {}) {
   const maxAge = httpsConfig.hstsMaxAge || 31536000;
   let header = `max-age=${maxAge}`;
-  if (httpsConfig.hstsIncludeSubDomains) {
+  if (httpsConfig.hstsIncludeSubDomains !== false) {
     header += '; includeSubDomains';
   }
-  if (httpsConfig.hstsPreload) {
+  if (httpsConfig.hstsPreload !== false) {
     header += '; preload';
   }
   return header;

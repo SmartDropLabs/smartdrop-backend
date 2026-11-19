@@ -8,6 +8,9 @@ const { CircuitBreaker } = require('../utils/circuitBreaker');
 
 const CACHE_PREFIX = 'price:';
 const HISTORY_PREFIX = 'price:history:';
+// #683 — last-known-good prices outlive the fresh-price cache so a total
+// upstream outage can still be answered (flagged stale).
+const LAST_KNOWN_GOOD_TTL_SECONDS = 24 * 60 * 60;
 const breakerOptions = config.price.circuitBreaker;
 
 // In-flight de-duplication map: key -> Promise. Prevents concurrent getPrice/
@@ -261,6 +264,20 @@ async function getPrice(assetCode, issuer = null) {
   return fetchFreshPrice(assetCode, issuer, redisUnavailable);
 }
 
+function lastKnownGoodKey(assetCode, issuer) {
+  return `${buildCacheKey(assetCode, issuer)}:last_known_good`;
+}
+
+async function readLastKnownGood(assetCode, issuer) {
+  try {
+    const value = await cache.get(lastKnownGoodKey(assetCode, issuer));
+    return value && value.price ? value : null;
+  } catch (err) {
+    logger.warn('Last-known-good read failed', { assetCode, issuer, error: err.message });
+    return null;
+  }
+}
+
 async function doFetchFreshPrice(assetCode, issuer = null, redisUnavailable = false) {
   const sourceResults = await fetchFromAllSources(assetCode, issuer);
   const sourcesAttempted = sourceResults.map((r) => r.source);
@@ -271,6 +288,24 @@ async function doFetchFreshPrice(assetCode, issuer = null, redisUnavailable = fa
 
   if (aggregatedPrice === null) {
     logger.warn('No price sources available', { assetCode, issuer });
+    // Failover: every source failed, so serve the last known good price
+    // rather than nothing, flagged stale.
+    const lastKnownGood = await readLastKnownGood(assetCode, issuer);
+    if (lastKnownGood) {
+      return {
+        asset_code: assetCode,
+        issuer: issuer || null,
+        price_usd: lastKnownGood.price,
+        source: lastKnownGood.source || 'cached',
+        fetched_at: new Date(lastKnownGood.fetchedAt).toISOString(),
+        is_stale: true,
+        stale_warning: 'All price sources failed — returning last known good price',
+        sources_attempted: sourcesAttempted,
+        redis_unavailable: redisUnavailable,
+        quorum_met: false,
+        anomalous: false,
+      };
+    }
     return {
       asset_code: assetCode,
       issuer: issuer || null,
@@ -338,6 +373,11 @@ async function doFetchFreshPrice(assetCode, issuer = null, redisUnavailable = fa
           sourcesAttempted,
         },
         config.price.cacheTtl
+      );
+      await cache.set(
+        lastKnownGoodKey(assetCode, issuer),
+        { price: aggregatedPrice, source: primarySource, fetchedAt: Date.now() },
+        LAST_KNOWN_GOOD_TTL_SECONDS
       );
     } catch (err) {
       logger.warn('Cache write failed, continuing without caching', { error: err.message });

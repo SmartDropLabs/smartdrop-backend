@@ -67,10 +67,14 @@ function normalizeTier(tier) {
   return config.apiKeyRateLimit.defaultTier;
 }
 
-async function createKey({ label, scopes = ["default"], tier }) {
+async function createKey({ label, scopes = ["default"], tier, expiresAt, expiresIn }) {
   const apiKey = generateApiKey();
   const hashed = hashApiKey(apiKey);
   const now = new Date().toISOString();
+  let expiry = expiresAt || null;
+  if (!expiry && expiresIn) {
+    expiry = Date.now() + expiresIn * 1000;
+  }
   const record = {
     id: keyId(),
     label,
@@ -80,6 +84,8 @@ async function createKey({ label, scopes = ["default"], tier }) {
     // Sizes this key's own rate limit bucket (issue #251).
     tier: normalizeTier(tier),
     created_at: now,
+    expires_at: expiry ? new Date(expiry).toISOString() : null,
+    expiresAt: expiry ? (typeof expiry === "number" ? expiry : Date.parse(expiry)) : null,
     last_used_at: null,
   };
 
@@ -203,14 +209,16 @@ async function validateApiKey(apiKey) {
   const record = await getKey(id);
   if (!record || record.key_hash !== hashed) return null;
 
-  if (record.expires_at && Date.parse(record.expires_at) <= Date.now()) {
+  const AppError = require("../errors/AppError");
+  const expiry = record.expiresAt || (record.expires_at ? Date.parse(record.expires_at) : null);
+  if (expiry && Date.now() > expiry) {
     const redis = cache.getClient();
     const multi = redis.multi();
     multi.del(keyPath(record.id));
     multi.del(hashPath(record.key_hash));
     multi.zrem(IDS_KEY, record.id);
     await multi.exec();
-    return null;
+    throw new AppError("UNAUTHORIZED", "API key expired", 401);
   }
 
   // Keys created before tiers existed have no `tier`; resolve them to the
@@ -222,8 +230,18 @@ async function validateApiKey(apiKey) {
   return touch(record);
 }
 
+function checkKeyExpiry(key) {
+  if (!key) return;
+  const AppError = require("../errors/AppError");
+  const expiry = key.expiresAt || (key.expires_at ? Date.parse(key.expires_at) : null);
+  if (expiry && Date.now() > expiry) {
+    throw new AppError("UNAUTHORIZED", "API key expired", 401);
+  }
+}
+
 module.exports = {
   createKey,
+  checkKeyExpiry,
   getKey,
   hashApiKey,
   listKeys,

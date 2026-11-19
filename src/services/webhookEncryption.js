@@ -196,6 +196,39 @@ function isPayloadEncrypted(value) {
   return typeof value === 'string' && (isEnvelope(value) || value.split('.').length === 3);
 }
 
+// ── Key Rotation (#629) ──────────────────────────────────────────────────
+
+const inMemoryKeyStore = new Map();
+
+const keyStore = {
+  async save(keyId, key, metadata = {}) {
+    const record = { key, ...metadata };
+    inMemoryKeyStore.set(keyId, record);
+    return record;
+  },
+  async get(keyId) {
+    return inMemoryKeyStore.get(keyId) || null;
+  },
+  async delete(keyId) {
+    return inMemoryKeyStore.delete(keyId);
+  },
+};
+
+function generateKey() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+async function rotateKey(keyId) {
+  const newKey = generateKey();
+  const version = Date.now();
+  await keyStore.save(keyId, newKey, { version });
+  return { keyId, key: newKey, version };
+}
+
+async function getKey(keyId) {
+  return await keyStore.get(keyId);
+}
+
 module.exports = {
   encryptSecret,
   decryptSecret,
@@ -203,4 +236,8 @@ module.exports = {
   encryptPayload,
   decryptPayload,
   isPayloadEncrypted,
+  generateKey,
+  rotateKey,
+  getKey,
+  keyStore,
 };

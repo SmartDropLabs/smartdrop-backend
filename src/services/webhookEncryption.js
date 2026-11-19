@@ -96,12 +96,20 @@ function isEncrypted(value) {
 }
 
 /**
- * Encrypts a webhook payload using AES-256-GCM with a key derived from
- * the webhook secret. The receiver can decrypt using the same webhook secret.
+ * Encrypts a webhook payload with AES-256-GCM, keyed from the webhook secret. The receiver decrypts with the same
+ * secret (issue #572).
  *
- * Returns `<iv>.<ciphertext>.<authTag>`, each base64-encoded.
- * Issue #572 - webhook payload encryption.
+ * The output is a JSON envelope that carries its own metadata (#696):
+ *   {"v":1,"alg":"aes-256-gcm","iv":"<b64>","data":"<b64>","tag":"<b64>"}
+ * so receivers know the format and algorithm without guessing. Payloads in the older `<iv>.<ciphertext>.<tag>`
+ * form are still accepted by decryptPayload.
  */
+const PAYLOAD_ENVELOPE_VERSION = 1;
+
+function payloadKey(webhookSecret) {
+  return crypto.createHash('sha256').update(webhookSecret).digest();
+}
+
 function encryptPayload(plaintext, webhookSecret) {
   if (typeof plaintext !== 'string' || plaintext.length === 0) {
     throw new Error('webhook payload to encrypt must be a non-empty string');
@@ -109,17 +117,39 @@ function encryptPayload(plaintext, webhookSecret) {
   if (typeof webhookSecret !== 'string' || webhookSecret.length === 0) {
     throw new Error('webhook secret must be a non-empty string');
   }
-  const key = crypto.createHash('sha256').update(webhookSecret).digest();
   const iv = crypto.randomBytes(IV_BYTES);
-  const cipher = crypto.createCipheriv(ALGORITHM, key, iv);
-  const ciphertext = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
-  const authTag = cipher.getAuthTag();
-  return [iv.toString('base64'), ciphertext.toString('base64'), authTag.toString('base64')].join('.');
+  const cipher = crypto.createCipheriv(ALGORITHM, payloadKey(webhookSecret), iv);
+  const data = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+  return JSON.stringify({
+    v: PAYLOAD_ENVELOPE_VERSION,
+    alg: ALGORITHM,
+    iv: iv.toString('base64'),
+    data: data.toString('base64'),
+    tag: cipher.getAuthTag().toString('base64'),
+  });
+}
+
+/** Returns the parsed envelope, null when the value is not JSON, or throws for an unknown version or algorithm. */
+function parseEnvelope(packed) {
+  let envelope;
+  try {
+    envelope = JSON.parse(packed);
+  } catch {
+    return null;
+  }
+  if (!envelope || typeof envelope !== 'object') return null;
+  if (envelope.v !== PAYLOAD_ENVELOPE_VERSION) {
+    throw new Error('unsupported encrypted webhook payload version');
+  }
+  if (envelope.alg !== ALGORITHM) {
+    throw new Error('unsupported encrypted webhook payload algorithm');
+  }
+  return envelope;
 }
 
 /**
- * Decrypts a webhook payload encrypted with {@link encryptPayload}.
- * @throws if the payload is malformed, or the auth tag doesn't verify.
+ * Decrypts a webhook payload encrypted with {@link encryptPayload}, or a legacy `<iv>.<ciphertext>.<tag>` value.
+ * @throws if the payload is malformed, uses an unknown version, or the auth tag doesn't verify.
  */
 function decryptPayload(packed, webhookSecret) {
   if (typeof packed !== 'string') {
@@ -128,26 +158,42 @@ function decryptPayload(packed, webhookSecret) {
   if (typeof webhookSecret !== 'string' || webhookSecret.length === 0) {
     throw new Error('webhook secret must be a non-empty string');
   }
-  const parts = packed.split('.');
-  if (parts.length !== 3) {
+  let ivB64;
+  let dataB64;
+  let tagB64;
+  const envelope = packed.trimStart().startsWith('{') ? parseEnvelope(packed) : null;
+  if (envelope) {
+    ({ iv: ivB64, data: dataB64, tag: tagB64 } = envelope);
+  } else {
+    const parts = packed.split('.');
+    if (parts.length !== 3) {
+      throw new Error('malformed encrypted webhook payload');
+    }
+    [ivB64, dataB64, tagB64] = parts;
+  }
+  if (typeof ivB64 !== 'string' || typeof dataB64 !== 'string' || typeof tagB64 !== 'string') {
     throw new Error('malformed encrypted webhook payload');
   }
-  const [ivB64, ciphertextB64, authTagB64] = parts;
-  const key = crypto.createHash('sha256').update(webhookSecret).digest();
-  const decipher = crypto.createDecipheriv(ALGORITHM, key, Buffer.from(ivB64, 'base64'));
-  decipher.setAuthTag(Buffer.from(authTagB64, 'base64'));
-  const plaintext = Buffer.concat([
-    decipher.update(Buffer.from(ciphertextB64, 'base64')),
-    decipher.final(),
-  ]);
+  const decipher = crypto.createDecipheriv(ALGORITHM, payloadKey(webhookSecret), Buffer.from(ivB64, 'base64'));
+  decipher.setAuthTag(Buffer.from(tagB64, 'base64'));
+  const plaintext = Buffer.concat([decipher.update(Buffer.from(dataB64, 'base64')), decipher.final()]);
   return plaintext.toString('utf8');
 }
 
+function isEnvelope(value) {
+  try {
+    const envelope = JSON.parse(value);
+    return !!envelope && envelope.v === PAYLOAD_ENVELOPE_VERSION && envelope.alg === ALGORITHM;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Checks if a value is an encrypted payload (three base64 segments joined by `.`).
+ * Checks if a value is an encrypted payload: a v1 envelope, or a legacy three-part value.
  */
 function isPayloadEncrypted(value) {
-  return typeof value === 'string' && value.split('.').length === 3;
+  return typeof value === 'string' && (isEnvelope(value) || value.split('.').length === 3);
 }
 
 module.exports = {

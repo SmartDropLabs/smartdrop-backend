@@ -8,7 +8,32 @@ const { CircuitBreaker } = require('../utils/circuitBreaker');
 
 const CACHE_PREFIX = 'price:';
 const HISTORY_PREFIX = 'price:history:';
+const MAX_PRICE_AGE_MS = (config.price?.staleThresholdMinutes || 5) * 60 * 1000;
 const breakerOptions = config.price.circuitBreaker;
+
+/**
+ * Returns true when `timestamp` is older than `maxAgeMs`.
+ */
+function isPriceStale(timestamp, maxAgeMs = MAX_PRICE_AGE_MS, nowMs = Date.now()) {
+  if (timestamp === undefined || timestamp === null) return false;
+  const ts = typeof timestamp === 'number' ? timestamp : new Date(timestamp).getTime();
+  if (!Number.isFinite(ts)) return true;
+  return nowMs - ts > maxAgeMs;
+}
+
+/**
+ * Validates that a price payload or timestamp is not older than `maxAgeMs`.
+ * @throws {Error} 'Price too stale' if `Date.now() - price.timestamp > maxAgeMs`.
+ */
+function assertFreshPrice(priceOrPayload, maxAgeMs = MAX_PRICE_AGE_MS, nowMs = Date.now()) {
+  if (priceOrPayload && typeof priceOrPayload === 'object') {
+    const ts = priceOrPayload.timestamp ?? priceOrPayload.fetchedAt;
+    if (ts !== undefined && isPriceStale(ts, maxAgeMs, nowMs)) {
+      throw new Error('Price too stale');
+    }
+  }
+  return priceOrPayload;
+}
 
 // In-flight de-duplication map: key -> Promise. Prevents concurrent getPrice/
 // fetchFreshPrice calls for the same asset from each independently hitting all
@@ -136,7 +161,12 @@ async function fetchFromAllSources(assetCode, issuer) {
       return null;
     }
 
-    const price = await source.breaker.call(() => source.fetch(assetCode, issuer));
+    const rawResult = await source.breaker.call(() => source.fetch(assetCode, issuer));
+    assertFreshPrice(rawResult);
+    const price =
+      rawResult !== null && typeof rawResult === 'object' && rawResult.price !== undefined
+        ? rawResult.price
+        : rawResult;
     if (price !== null && price > 0) {
       return { source: source.name, price };
     }
@@ -454,5 +484,8 @@ module.exports = {
   detectAnomaly,
   fetchFromAllSources,
   getSourceCircuitStates,
+  MAX_PRICE_AGE_MS,
+  isPriceStale,
+  assertFreshPrice,
   inFlight,
 };

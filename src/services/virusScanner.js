@@ -1,7 +1,12 @@
 'use strict';
 
+const crypto = require('crypto');
 const logger = require('../logger');
 const config = require('../config');
+const cache = require('./cache');
+
+// Scan results are reused for a day, keyed by the file's SHA-256 (#693).
+const SCAN_CACHE_TTL_SECONDS = 86400;
 
 /**
  * Virus scanning service for uploaded files (#574).
@@ -64,9 +69,40 @@ class VirusScanner {
     }
   }
 
+  /** Key covers the backend too, so switching scanners never reuses another scanner's verdict. */
+  _scanCacheKey(fileBuffer) {
+    const digest = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+    return `scan:${config.virusScannerBackend || 'log'}:${digest}`;
+  }
+
+  async _readScanCache(key) {
+    try {
+      return await cache.get(key);
+    } catch (err) {
+      // A cache outage must not block uploads: scan normally instead.
+      logger.warn('Virus scan cache read failed, scanning instead', { error: err.message });
+      return null;
+    }
+  }
+
+  async _writeScanCache(key, result) {
+    try {
+      await cache.set(key, result, SCAN_CACHE_TTL_SECONDS);
+    } catch (err) {
+      logger.warn('Virus scan cache write failed', { error: err.message });
+    }
+  }
+
   async scan(fileBuffer, filename = 'upload') {
     if (!fileBuffer || !Buffer.isBuffer(fileBuffer)) {
       throw new Error('fileBuffer must be a Buffer');
+    }
+
+    const cacheKey = this._scanCacheKey(fileBuffer);
+    const cached = await this._readScanCache(cacheKey);
+    if (cached && typeof cached.infected === 'boolean') {
+      logger.info('Virus scan result served from cache', { filename, infected: cached.infected });
+      return { infected: cached.infected, threats: cached.threats || [] };
     }
 
     try {
@@ -77,10 +113,12 @@ class VirusScanner {
         threatCount: (result.threats || []).length,
       });
 
-      return {
+      const normalized = {
         infected: result.infected,
         threats: result.threats || [],
       };
+      await this._writeScanCache(cacheKey, normalized);
+      return normalized;
     } catch (err) {
       logger.error('Virus scan error', { error: err.message, filename });
       throw err;

@@ -25,38 +25,72 @@ const AppError = require('../errors/AppError');
  * (ff00::/8), and IPv4-mapped IPv6 (::ffff:a.b.c.d).
  */
 
+/**
+ * Blocked ranges (#694). Node's BlockList does the CIDR matching, so each range is one line.
+ * IPv4-mapped (::ffff:a.b.c.d) and NAT64 (64:ff9b::a.b.c.d) addresses are checked by their embedded IPv4 address.
+ */
+const BLOCKED_IPV4 = new net.BlockList();
+[
+  ['0.0.0.0', 8], // unspecified / "this network"
+  ['10.0.0.0', 8], // RFC-1918
+  ['100.64.0.0', 10], // CGNAT / shared
+  ['127.0.0.0', 8], // loopback
+  ['169.254.0.0', 16], // link-local
+  ['172.16.0.0', 12], // RFC-1918
+  ['192.0.0.0', 24], // IETF protocol assignments
+  ['192.0.2.0', 24], // TEST-NET-1
+  ['192.88.99.0', 24], // 6to4 relay anycast
+  ['192.168.0.0', 16], // RFC-1918
+  ['198.18.0.0', 15], // benchmarking
+  ['198.51.100.0', 24], // TEST-NET-2
+  ['203.0.113.0', 24], // TEST-NET-3
+  ['224.0.0.0', 4], // multicast
+  ['240.0.0.0', 4], // reserved, includes broadcast
+].forEach(([addr, prefix]) => BLOCKED_IPV4.addSubnet(addr, prefix, 'ipv4'));
+
+const BLOCKED_IPV6 = new net.BlockList();
+[
+  ['::', 128], // unspecified
+  ['::1', 128], // loopback
+  ['::', 96], // IPv4-compatible (deprecated), includes ::/128 and ::1
+  ['::ffff:0:0', 96], // IPv4-mapped, anything not parsed by embeddedIpv4() is refused
+  ['64:ff9b::', 96], // NAT64, anything not parsed by embeddedIpv4() is refused
+  ['100::', 64], // discard-only
+  ['2001:db8::', 32], // documentation
+  ['fc00::', 7], // unique-local
+  ['fe80::', 10], // link-local (fe80::/10 covers fe80 through febf)
+  ['fec0::', 10], // deprecated site-local
+  ['ff00::', 8], // multicast
+].forEach(([addr, prefix]) => BLOCKED_IPV6.addSubnet(addr, prefix, 'ipv6'));
+
+/** Returns the dotted IPv4 address embedded in an IPv4-mapped or NAT64 IPv6 address, or null. */
+function embeddedIpv4(addr) {
+  const dotted = /^(?:::ffff:|64:ff9b::)(\d{1,3}(?:\.\d{1,3}){3})$/i.exec(addr);
+  if (dotted) return dotted[1];
+  // The WHATWG URL parser rewrites ::ffff:127.0.0.1 as ::ffff:7f00:1, so the hex form has to be handled too.
+  const hex = /^(?:::ffff:|64:ff9b::)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(addr);
+  if (hex) {
+    const hi = parseInt(hex[1], 16);
+    const lo = parseInt(hex[2], 16);
+    return [hi >> 8, hi & 0xff, lo >> 8, lo & 0xff].join('.');
+  }
+  return null;
+}
+
 function isPrivateIpv4(ip) {
-  const parts = ip.split('.');
-  if (parts.length !== 4) return true;
-  const octets = parts.map((p) => Number(p));
-  if (octets.some((n) => Number.isNaN(n) || n < 0 || n > 255)) return true;
-  const [a, b] = octets;
-  if (a === 10) return true; // RFC-1918
-  if (a === 172 && b >= 16 && b <= 31) return true; // RFC-1918
-  if (a === 192 && b === 168) return true; // RFC-1918
-  if (a === 127) return true; // loopback
-  if (a === 169 && b === 254) return true; // link-local
-  if (a === 0) return true; // unspecified
-  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT / shared
-  if (a >= 224) return true; // multicast + reserved (224/4, 240/4)
-  return false;
+  if (!net.isIPv4(ip)) return true;
+  return BLOCKED_IPV4.check(ip, 'ipv4');
 }
 
 function isPrivateIpv6(ip) {
-  const lower = ip.toLowerCase();
-  if (lower === '::1' || lower === '::') return true;
-  if (lower.startsWith('fe80')) return true; // link-local
-  if (lower.startsWith('fc') || lower.startsWith('fd')) return true; // unique-local fc00::/7
-  if (lower.startsWith('ff')) return true; // multicast
-  return false;
+  return BLOCKED_IPV6.check(ip, 'ipv6');
 }
 
 function isPrivateIp(ip) {
   if (typeof ip !== 'string') return true;
-  const addr = ip.trim();
-  if (addr.startsWith('::ffff:') && net.isIPv4(addr.slice(7))) {
-    return isPrivateIpv4(addr.slice(7));
-  }
+  const addr = ip.trim().toLowerCase();
+  const embedded = embeddedIpv4(addr);
+  if (embedded) return isPrivateIpv4(embedded);
   if (net.isIPv4(addr)) return isPrivateIpv4(addr);
   if (net.isIPv6(addr)) return isPrivateIpv6(addr);
   return true;

@@ -7,8 +7,11 @@ const logger = require('../logger');
  * Read replica support (#514).
  *
  * Routes read queries to replica databases to reduce primary DB load.
- * Write queries always go to the primary. Uses a simple round-robin
- * strategy across available replicas.
+ * Write queries always go to the primary. Reads round-robin across replicas
+ * that are currently healthy. A replica is marked unhealthy when a read on it
+ * fails with a connection-level error (#666), and marked healthy again by
+ * checkReplicaHealth(). When no replica is healthy, reads fall back to the
+ * primary.
  *
  * Configuration:
  *   DATABASE_URL          — primary (write) connection string
@@ -22,6 +25,9 @@ class ReadReplicaRouter {
     this.primary = null;
     this.replicas = [];
     this.currentReplicaIndex = 0;
+    // Replicas marked unhealthy. Keyed by object, so replicas that are not
+    // in the set count as healthy and the set survives replica list changes.
+    this.unhealthyReplicas = new WeakSet();
   }
 
   /**
@@ -57,8 +63,26 @@ class ReadReplicaRouter {
   }
 
   /**
-   * Get a replica connection for read queries (round-robin).
-   * Falls back to primary if no replicas are configured.
+   * Index of the next healthy replica in round-robin order, skipping any index
+   * in `excluded`. Returns -1 when there is none.
+   * @param {Set<number>} [excluded]
+   * @returns {number}
+   */
+  _nextHealthyIndex(excluded = new Set()) {
+    const count = this.replicas.length;
+    for (let offset = 0; offset < count; offset += 1) {
+      const index = (this.currentReplicaIndex + offset) % count;
+      if (!excluded.has(index) && !this.unhealthyReplicas.has(this.replicas[index])) {
+        this.currentReplicaIndex = (index + 1) % count;
+        return index;
+      }
+    }
+    return -1;
+  }
+
+  /**
+   * Get a replica connection for read queries (round-robin over healthy replicas).
+   * Falls back to primary if no replicas are configured or none are healthy.
    * @returns {import('knex').Knex}
    */
   getReplica() {
@@ -68,17 +92,78 @@ class ReadReplicaRouter {
       return this.primary;
     }
 
-    const replica = this.replicas[this.currentReplicaIndex];
-    this.currentReplicaIndex = (this.currentReplicaIndex + 1) % this.replicas.length;
-    return replica;
+    const index = this._nextHealthyIndex();
+    if (index === -1) {
+      logger.warn({ replicaCount: this.replicas.length }, 'No healthy read replica; routing read to primary');
+      return this.primary;
+    }
+    return this.replicas[index];
   }
 
   /**
-   * Execute a read query against a replica (falls back to primary).
+   * Mark a replica as unhealthy so reads stop going to it (#666).
+   * @param {import('knex').Knex} replica
+   * @param {Error} [err]
+   */
+  markReplicaUnhealthy(replica, err) {
+    if (this.unhealthyReplicas.has(replica)) return;
+    this.unhealthyReplicas.add(replica);
+    logger.warn({ error: err?.message }, 'Read replica marked unhealthy');
+  }
+
+  /**
+   * Mark a replica as healthy again so reads can use it.
+   * @param {import('knex').Knex} replica
+   */
+  markReplicaHealthy(replica) {
+    if (!this.unhealthyReplicas.has(replica)) return;
+    this.unhealthyReplicas.delete(replica);
+    logger.info('Read replica marked healthy');
+  }
+
+  /**
+   * Ping every replica with `select 1` and update its health (#666).
+   * Call this on a timer. Unhealthy replicas only return to rotation through it.
+   * @returns {Promise<boolean[]>} Health per replica, in configured order.
+   */
+  async checkReplicaHealth() {
+    if (!this.primary) this.init();
+    const results = [];
+    for (const replica of this.replicas) {
+      try {
+        await replica.raw('select 1');
+        this.markReplicaHealthy(replica);
+        results.push(true);
+      } catch (err) {
+        this.markReplicaUnhealthy(replica, err);
+        results.push(false);
+      }
+    }
+    return results;
+  }
+
+  /**
+   * Execute a read query against a replica. If the replica fails with a
+   * connection error it is marked unhealthy, and the read is retried on the
+   * next healthy replica, then on the primary (#666). Other errors are rethrown.
    * @param {Function} callback - Receives (db) and returns a query promise
    */
   async read(callback) {
-    return callback(this.getReplica());
+    if (!this.primary) this.init();
+    const tried = new Set();
+    for (;;) {
+      if (this.replicas.length === 0) return callback(this.primary);
+      const index = this._nextHealthyIndex(tried);
+      if (index === -1) return callback(this.primary);
+      const replica = this.replicas[index];
+      try {
+        return await callback(replica);
+      } catch (err) {
+        if (!isConnectionError(err)) throw err;
+        this.markReplicaUnhealthy(replica, err);
+        tried.add(index);
+      }
+    }
   }
 
   /**
@@ -101,7 +186,29 @@ class ReadReplicaRouter {
       await replica.destroy();
     }
     this.replicas = [];
+    this.unhealthyReplicas = new WeakSet();
   }
+}
+
+const CONNECTION_ERROR_CODES = new Set([
+  'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EPIPE', 'EHOSTUNREACH', 'ENOTFOUND',
+  // PostgreSQL: 57P01 admin_shutdown, 57P02 crash_shutdown, 57P03 cannot_connect_now.
+  '57P01', '57P02', '57P03',
+]);
+
+/**
+ * True for errors that mean the replica itself is unreachable, not that the
+ * query was bad. Only these cause a replica to be marked unhealthy.
+ * @param {Error} err
+ * @returns {boolean}
+ */
+function isConnectionError(err) {
+  if (!err) return false;
+  const code = String(err.code ?? '').toUpperCase();
+  if (CONNECTION_ERROR_CODES.has(code)) return true;
+  // PostgreSQL class 08: connection exception.
+  if (code.startsWith('08')) return true;
+  return err.name === 'KnexTimeoutError';
 }
 
 /**

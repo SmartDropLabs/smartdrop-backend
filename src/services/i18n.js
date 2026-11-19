@@ -66,13 +66,15 @@ function getLocale(req) {
   return Object.prototype.hasOwnProperty.call(translations, preferred) ? preferred : 'en';
 }
 
-function translate(code, locale = 'en') {
-  const localeTranslations = translations[locale] || translations.en;
-  return localeTranslations[code] || translations.en[code] || code;
+const DEFAULT_LOCALE = 'en';
+
+function translate(key, locale = DEFAULT_LOCALE) {
+  return translations[locale]?.[key] || translations[DEFAULT_LOCALE]?.[key] || key;
 }
 
 module.exports = {
   translate,
   getLocale,
   translations,
+  DEFAULT_LOCALE,
 };

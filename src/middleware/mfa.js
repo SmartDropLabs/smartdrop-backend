@@ -105,10 +105,54 @@ function requireMfa(userSecret) {
   };
 }
 
+// In-memory or database backup code storage (#649)
+const userBackupCodes = new Map();
+
+/**
+ * Generate a set of random backup codes for a user (#649).
+ * @param {string} userId
+ * @param {number} [count=10]
+ * @returns {string[]}
+ */
+function generateBackupCodes(userId, count = 10) {
+  const codes = [];
+  const codeSet = new Set();
+  for (let i = 0; i < count; i++) {
+    const code = crypto.randomBytes(4).toString('hex').toUpperCase();
+    codes.push(code);
+    codeSet.add(code);
+  }
+  userBackupCodes.set(userId, codeSet);
+  return codes;
+}
+
+/**
+ * Validate and consume a single-use backup code (#649).
+ * @param {string} userId
+ * @param {string} code
+ * @returns {Promise<boolean>}
+ */
+async function useBackupCode(userId, code) {
+  if (!userId || !code) return false;
+  const normalized = code.trim().toUpperCase();
+  const codes = userBackupCodes.get(userId);
+  if (!codes || !codes.has(normalized)) {
+    const error = new Error('Invalid or already used backup code');
+    error.statusCode = 401;
+    error.code = 'UNAUTHORIZED';
+    throw error;
+  }
+  codes.delete(normalized); // Consume code
+  return true;
+}
+
 module.exports = {
   generateTotpSecret,
   generateTotp,
   verifyTotp,
   generateOtpauthUri,
   requireMfa,
+  generateBackupCodes,
+  useBackupCode,
+  userBackupCodes,
 };

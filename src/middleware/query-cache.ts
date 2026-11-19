@@ -348,3 +348,22 @@ export function conditionalCache(
     next();
   };
 }
+
+/**
+ * Pre-populate the query cache on startup to avoid cold start latency (#652).
+ * @param redisClient - Redis client instance
+ * @param queries - List of popular query entries to warm
+ */
+export async function warmCache(
+  redisClient: any,
+  queries: Array<{ key: string; fetcher: () => Promise<any>; ttl?: number; tags?: string[] }> = [],
+): Promise<void> {
+  const warmer = new CacheWarmer(redisClient);
+  const entries = queries.map((q) => ({
+    key: q.key,
+    fetcher: q.fetcher,
+    ttl: q.ttl || 300,
+    tags: q.tags || [],
+  }));
+  await warmer.warmCache(entries);
+}

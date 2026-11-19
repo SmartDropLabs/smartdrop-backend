@@ -229,3 +229,39 @@ declare global {
     }
   }
 }
+
+/**
+ * Retry an operation on version conflict or OptimisticLockError (#651).
+ * @param fn - Async operation to execute
+ * @param maxRetries - Maximum retry count (defaults to 3)
+ * @param delayMs - Backoff delay in milliseconds
+ */
+export async function withRetry<T>(
+  fn: () => Promise<T>,
+  maxRetries: number = 3,
+  delayMs: number = 50,
+): Promise<T> {
+  let lastError: any;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      lastError = err;
+      const isVersionConflict =
+        err instanceof OptimisticLockError ||
+        err?.code === 'VERSION_CONFLICT' ||
+        err?.code === '409' ||
+        err?.statusCode === 409 ||
+        err?.name === 'OptimisticLockError';
+
+      if (!isVersionConflict || attempt === maxRetries - 1) {
+        throw err;
+      }
+
+      if (delayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs * Math.pow(2, attempt)));
+      }
+    }
+  }
+  throw lastError;
+}

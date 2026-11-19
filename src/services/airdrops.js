@@ -321,6 +321,40 @@ async function listRecipients(airdropId, page = 1, limit = 20) {
   return { recipients, total };
 }
 
+const AppError = require('../errors/AppError');
+
+/**
+ * Validate an individual airdrop claim object (#642).
+ * @param {Object} claim - { address, amount, id }
+ * @returns {boolean}
+ */
+function isValidClaim(claim) {
+  if (!claim || typeof claim !== 'object') return false;
+  const address = claim.address || claim.recipient;
+  if (!address || typeof address !== 'string' || address.trim().length === 0) return false;
+  const amount = Number(claim.amount);
+  if (isNaN(amount) || amount <= 0) return false;
+  return true;
+}
+
+/**
+ * Validate and process batch claim operations (#642).
+ * @param {Array<Object>} claims
+ * @returns {Array<Object>} Validated claims
+ */
+function validateBatchClaims(claims) {
+  if (!Array.isArray(claims) || claims.length === 0) {
+    throw new AppError('VALIDATION', 'Claims list must be a non-empty array', 400);
+  }
+  for (const claim of claims) {
+    if (!isValidClaim(claim)) {
+      const claimIdentifier = claim?.id || claim?.address || claim?.recipient || JSON.stringify(claim);
+      throw new AppError('VALIDATION', `Invalid claim: ${claimIdentifier}`, 400);
+    }
+  }
+  return claims;
+}
+
 module.exports = {
   create,
   list,
@@ -333,5 +367,7 @@ module.exports = {
   getCurrentLedger,
   scanIds,
   markExpired,
+  isValidClaim,
+  validateBatchClaims,
   TERMINAL_STATUSES,
 };

@@ -88,8 +88,36 @@ async function getAllAuditLogs(limit = 100, offset = 0, trx) {
   }
 }
 
+const DEFAULT_RETENTION_DAYS = 90;
+
+/**
+ * Prune audit logs older than the retention threshold (#641).
+ * @param {number} [retentionDays=90]
+ * @param {import('knex').Knex.Transaction} [trx]
+ * @returns {Promise<number>} Number of deleted rows
+ */
+async function pruneAuditLogs(retentionDays = DEFAULT_RETENTION_DAYS, trx) {
+  if (typeof retentionDays !== 'number' || retentionDays <= 0 || !Number.isFinite(retentionDays)) {
+    throw new Error('retentionDays must be greater than 0');
+  }
+  try {
+    const client = trx || getDb();
+    const cutoff = new Date(Date.now() - retentionDays * 86400000).toISOString();
+    const deletedCount = await client('api_key_audit_logs')
+      .where('created_at', '<', cutoff)
+      .del();
+    logger.info(`Pruned ${deletedCount} API key audit log entries older than ${retentionDays} days`);
+    return deletedCount;
+  } catch (err) {
+    logger.error('Failed to prune API key audit logs', { error: err.message });
+    return 0;
+  }
+}
+
 module.exports = {
   logUsage,
   getKeyAuditLog,
   getAllAuditLogs,
+  pruneAuditLogs,
+  DEFAULT_RETENTION_DAYS,
 };

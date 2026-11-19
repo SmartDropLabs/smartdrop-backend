@@ -95,8 +95,54 @@ async function invalidateQueryCache(queryPattern) {
   // For now, this is a placeholder that logs the request
 }
 
+/**
+ * Invalidate cached record by ID and optional entity name.
+ * Default key pattern: `record:${id}`.
+ */
+async function invalidateRecord(id, entity = 'record') {
+  if (!id) return;
+  const key = entity ? `${entity}:${id}` : `record:${id}`;
+  await cache.del(key);
+  if (entity !== 'record') {
+    await cache.del(`record:${id}`);
+  }
+}
+
+/**
+ * Execute write operation and invalidate cache for the affected record (#644).
+ *
+ * @param {string|number} id - Record ID
+ * @param {Object|Function} dataOrFn - Update payload or updater function
+ * @param {Object} [db] - Database client with update method (optional)
+ * @returns {Promise<*>} Result of the update
+ */
+async function updateRecord(id, dataOrFn, db) {
+  let result;
+  if (db && typeof db.update === 'function') {
+    result = await db.update(id, dataOrFn);
+  } else if (typeof dataOrFn === 'function') {
+    result = await dataOrFn(id);
+  } else if (db && typeof db.query === 'function') {
+    result = await db.query(dataOrFn, [id]);
+  }
+  await invalidateRecord(id);
+  return result;
+}
+
+/**
+ * Higher-order helper to wrap any write operation and invalidate cache.
+ */
+async function executeWriteAndInvalidate(id, writeOperation, entity = 'record') {
+  const result = await writeOperation();
+  await invalidateRecord(id, entity);
+  return result;
+}
+
 module.exports = {
   cachedQuery,
   invalidateQueryCache,
   generateCacheKey,
+  invalidateRecord,
+  updateRecord,
+  executeWriteAndInvalidate,
 };

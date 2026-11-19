@@ -179,7 +179,8 @@ router.get("/webhooks", validatePaginationQuery, async (req, res, next) => {
 
 router.get("/webhooks/:id", validateRouteIdParams, async (req, res, next) => {
   try {
-    const webhook = await webhookRepo.findById(req.params.id);
+    const webhookId = req.validated?.params?.id || req.params.id;
+    const webhook = await webhookRepo.findById(webhookId);
     if (!webhook)
       return next(new AppError("WEBHOOK_NOT_FOUND", "Webhook not found", 404));
     return res.json(publicView(webhook));
@@ -195,8 +196,9 @@ router.patch(
   validate(webhookPatchBodySchema),
   async (req, res, next) => {
     try {
+      const webhookId = req.validated?.params?.id || req.params.id;
       const patch = req.validated.body;
-      const updated = await webhookRepo.update(req.params.id, patch);
+      const updated = await webhookRepo.update(webhookId, patch);
       if (!updated)
         return next(
           new AppError("WEBHOOK_NOT_FOUND", "Webhook not found", 404),
@@ -216,7 +218,8 @@ router.delete(
   requireResourcePermission({
     resourceName: 'webhook',
     getResourceOwner: async (req) => {
-      const webhook = await webhookRepo.findById(req.params.id);
+      const webhookId = req.validated?.params?.id || req.params.id;
+      const webhook = await webhookRepo.findById(webhookId);
       return webhook?.owner_ip || null;
     },
     isAllowed: (req, ownerId) => {
@@ -226,12 +229,13 @@ router.delete(
   }),
   async (req, res, next) => {
     try {
-      const deleted = await webhookRepo.remove(req.params.id);
+      const webhookId = req.validated?.params?.id || req.params.id;
+      const deleted = await webhookRepo.remove(webhookId);
       if (!deleted)
         return next(
           new AppError("WEBHOOK_NOT_FOUND", "Webhook not found", 404),
         );
-      return res.json({ deleted: true, id: req.params.id });
+      return res.json({ deleted: true, id: webhookId });
     } catch (err) {
       return next(err);
     }
@@ -256,7 +260,8 @@ router.post(
   testLimit,
   async (req, res, next) => {
     try {
-      const delivery = await dispatcher.sendTest(req.params.id);
+      const webhookId = req.validated?.params?.id || req.params.id;
+      const delivery = await dispatcher.sendTest(webhookId);
       if (!delivery)
         return next(
           new AppError("WEBHOOK_NOT_FOUND", "Webhook not found", 404),
@@ -280,13 +285,14 @@ router.get(
   validate(webhookDeliveriesQuerySchema, "query"),
   async (req, res, next) => {
     try {
-      const webhook = await webhookRepo.findById(req.params.id);
+      const webhookId = req.validated?.params?.id || req.params.id;
+      const webhook = await webhookRepo.findById(webhookId);
       if (!webhook)
         return next(
           new AppError("WEBHOOK_NOT_FOUND", "Webhook not found", 404),
         );
       const { limit, status } = req.validated.query;
-      const deliveries = await deliveryRepo.listByWebhook(req.params.id, {
+      const deliveries = await deliveryRepo.listByWebhook(webhookId, {
         limit,
         status,
       });

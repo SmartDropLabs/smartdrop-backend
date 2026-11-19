@@ -44,7 +44,8 @@ router.post("/keys", validate(keyCreateBodySchema), async (req, res, next) => {
 
 router.delete("/keys/:id", validateRouteIdParams, async (req, res, next) => {
   try {
-    const deleted = await apiKeys.revokeKey(req.params.id);
+    const keyId = req.validated?.params?.id || req.params.id;
+    const deleted = await apiKeys.revokeKey(keyId);
     if (!deleted) {
       return next(new AppError("API_KEY_NOT_FOUND", "API key not found", 404));
     }
@@ -63,8 +64,9 @@ router.post(
   async (req, res, next) => {
     try {
       const { tier, grace_period_seconds: gracePeriodSeconds } = req.validated.body;
+      const keyId = req.validated?.params?.id || req.params.id;
 
-      const rotated = await apiKeys.rotateKey(req.params.id, {
+      const rotated = await apiKeys.rotateKey(keyId, {
         tier,
         gracePeriodSeconds,
       });

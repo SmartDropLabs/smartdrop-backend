@@ -110,6 +110,14 @@ const dbQueryRetriesTotal = registry.counter(
   'db_query_retries_total',
   'Total database query retry attempts, labelled by error code'
 );
+// Cache lookup outcomes (issue #680). cache.js keeps monotonic in-process
+// totals; updateSubsystemMetrics() adds only the delta since the last scrape.
+const cacheLookupsTotal = registry.counter(
+  'cache_lookups_total',
+  'Total cache lookups, labelled by result (hit or miss)'
+);
+let lastCacheStats = { hits: 0, misses: 0 };
+
 const dbQueryRetryDelaySeconds = registry.histogram(
   'db_query_retry_delay_seconds',
   'Backoff delay before a database query retry in seconds',
@@ -218,6 +226,20 @@ async function updateSubsystemMetrics() {
     redisQueueDepthGauge.set({}, queueDepth);
   } catch (err) {
     redisConnectedGauge.set({}, 0);
+  }
+
+  // Cache hit/miss counters (issue #680)
+  try {
+    if (typeof cache.getCacheStats === 'function') {
+      const stats = cache.getCacheStats();
+      const hitDelta = stats.hits - lastCacheStats.hits;
+      const missDelta = stats.misses - lastCacheStats.misses;
+      if (hitDelta > 0) cacheLookupsTotal.inc({ result: 'hit' }, hitDelta);
+      if (missDelta > 0) cacheLookupsTotal.inc({ result: 'miss' }, missDelta);
+      lastCacheStats = stats;
+    }
+  } catch {
+    // Cache stats are best-effort; never fail the scrape over them
   }
 
   // Circuit breaker state

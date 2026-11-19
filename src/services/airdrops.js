@@ -44,6 +44,11 @@ const horizonBreaker = new CircuitBreaker('stellar-horizon', {
   windowMs: 60000,
 });
 
+// Ledger cache state. Previously referenced by getCurrentLedger() without being
+// declared, which throws a ReferenceError on the first call.
+let cachedLedger = null;
+let cachedLedgerAt = 0;
+
 async function getCurrentLedger() {
   const now = Date.now();
   if (cachedLedger !== null && now - cachedLedgerAt < config.airdrops.ledgerCacheTtlMs) {
@@ -56,6 +61,122 @@ async function getCurrentLedger() {
   cachedLedger = ledger.records[0].sequence;
   cachedLedgerAt = now;
   return cachedLedger;
+}
+
+// ---------------------------------------------------------------------------
+// Airdrop eligibility rules (issue #690)
+//
+// Rules are read from config.airdrops.eligibilityRules and fall back to the
+// defaults below for any rule that is not set. Setting a rule to null disables
+// it. Example config override:
+//   airdrops: { eligibilityRules: { minBalance: 250, accountAge: null } }
+// ---------------------------------------------------------------------------
+
+const DAY_MS = 86400000;
+
+const DEFAULT_ELIGIBILITY_RULES = Object.freeze({
+  minBalance: 100,               // minimum balance, in the airdrop's asset units
+  minTransactions: 5,            // minimum number of prior transactions
+  accountAge: 30 * DAY_MS,       // minimum account age, in milliseconds
+});
+
+const ELIGIBILITY_RULE_NAMES = Object.keys(DEFAULT_ELIGIBILITY_RULES);
+
+/**
+ * Resolve the effective eligibility rules: defaults merged with config overrides.
+ * @returns {{minBalance: number|null, minTransactions: number|null, accountAge: number|null}}
+ * @throws {Error} if a configured rule is not a non-negative finite number or null.
+ */
+function getEligibilityRules() {
+  const configured = (config.airdrops && config.airdrops.eligibilityRules) || {};
+  const rules = { ...DEFAULT_ELIGIBILITY_RULES };
+
+  for (const name of ELIGIBILITY_RULE_NAMES) {
+    if (configured[name] !== undefined) {
+      rules[name] = configured[name];
+    }
+  }
+
+  for (const name of ELIGIBILITY_RULE_NAMES) {
+    const value = rules[name];
+    if (value === null) continue;
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+      throw new Error(
+        `Invalid eligibility rule "${name}": must be a non-negative finite number, or null to disable`,
+      );
+    }
+  }
+
+  return rules;
+}
+
+// Converts a Date, epoch-milliseconds number, or date string to epoch ms.
+// Returns NaN when the value cannot be interpreted as a date.
+function toEpochMs(value) {
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === 'number') return value;
+  if (typeof value === 'string') return Date.parse(value);
+  return NaN;
+}
+
+/**
+ * Checks a participant against the eligibility rules.
+ *
+ * @param {Object} participant
+ * @param {number|string} participant.balance - current balance (numeric)
+ * @param {number} participant.transactionCount - number of prior transactions
+ * @param {Date|number|string} participant.accountCreatedAt - account creation time
+ * @param {Object} [options]
+ * @param {Object} [options.rules] - override rules (defaults to getEligibilityRules())
+ * @param {number} [options.now] - epoch ms used as "now" (defaults to Date.now())
+ * @returns {{eligible: boolean, reason: string|null, reasons: string[]}}
+ *   `reasons` lists every failed rule; `reason` is the first one, or null when eligible.
+ */
+function checkEligibility(participant, options = {}) {
+  const rules = options.rules || getEligibilityRules();
+  const now = options.now !== undefined ? options.now : Date.now();
+  const p = participant || {};
+  const reasons = [];
+
+  if (rules.minBalance !== null && rules.minBalance !== undefined) {
+    const balance = p.balance === null || p.balance === undefined ? NaN : Number(p.balance);
+    if (!Number.isFinite(balance)) {
+      reasons.push('balance is missing or not a number');
+    } else if (balance < rules.minBalance) {
+      reasons.push(`balance ${balance} is below the minimum of ${rules.minBalance}`);
+    }
+  }
+
+  if (rules.minTransactions !== null && rules.minTransactions !== undefined) {
+    const count = p.transactionCount === null || p.transactionCount === undefined
+      ? NaN
+      : Number(p.transactionCount);
+    if (!Number.isFinite(count)) {
+      reasons.push('transactionCount is missing or not a number');
+    } else if (count < rules.minTransactions) {
+      reasons.push(`transaction count ${count} is below the minimum of ${rules.minTransactions}`);
+    }
+  }
+
+  if (rules.accountAge !== null && rules.accountAge !== undefined) {
+    const createdAt = toEpochMs(p.accountCreatedAt);
+    if (!Number.isFinite(createdAt)) {
+      reasons.push('accountCreatedAt is missing or not a valid date');
+    } else {
+      const ageMs = now - createdAt;
+      if (ageMs < rules.accountAge) {
+        reasons.push(
+          `account age ${ageMs} ms is below the minimum of ${rules.accountAge} ms (${rules.accountAge / DAY_MS} days)`,
+        );
+      }
+    }
+  }
+
+  return {
+    eligible: reasons.length === 0,
+    reason: reasons.length > 0 ? reasons[0] : null,
+    reasons,
+  };
 }
 
 async function create(data) {
@@ -370,4 +491,8 @@ module.exports = {
   isValidClaim,
   validateBatchClaims,
   TERMINAL_STATUSES,
+  // Eligibility (#690)
+  DEFAULT_ELIGIBILITY_RULES,
+  getEligibilityRules,
+  checkEligibility,
 };

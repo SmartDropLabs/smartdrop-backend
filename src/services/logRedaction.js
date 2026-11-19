@@ -104,10 +104,53 @@ const PII_PATTERNS = [
   /\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g,
 ];
 
+// Operator-supplied redaction rules (#698). They run after the built-in PII
+// patterns, in the order given. Empty by default, so behaviour is unchanged
+// until rules are set.
+let customRules = [];
+
+function compileRule(rule) {
+  if (!rule || typeof rule !== 'object') {
+    throw new Error('redaction rule must be an object');
+  }
+  const { name, pattern, replacement = '[REDACTED]' } = rule;
+  if (typeof name !== 'string' || name === '') {
+    throw new Error('redaction rule needs a non-empty name');
+  }
+  if (!(pattern instanceof RegExp)) {
+    throw new Error(`redaction rule "${name}" pattern must be a RegExp`);
+  }
+  if (typeof replacement !== 'string') {
+    throw new Error(`redaction rule "${name}" replacement must be a string`);
+  }
+  // Always global, so every match is replaced, and copied, so no lastIndex
+  // state is shared with the caller's RegExp.
+  const flags = pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`;
+  return { name, pattern: new RegExp(pattern.source, flags), replacement };
+}
+
+/**
+ * Replace the custom redaction rules. Pass an empty array to clear them.
+ * @param {Array<{name: string, pattern: RegExp, replacement?: string}>} rules
+ */
+function setCustomRedactionRules(rules) {
+  if (!Array.isArray(rules)) {
+    throw new Error('setCustomRedactionRules expects an array');
+  }
+  customRules = rules.map(compileRule);
+}
+
+function getCustomRedactionRules() {
+  return customRules.map(({ name, pattern, replacement }) => ({ name, pattern, replacement }));
+}
+
 function redactPii(value) {
   let out = value;
   for (const pattern of PII_PATTERNS) {
     out = out.replace(pattern, '[REDACTED_PII]');
+  }
+  for (const rule of customRules) {
+    out = out.replace(rule.pattern, rule.replacement);
   }
   return out;
 }
@@ -209,4 +252,6 @@ module.exports = {
   SENSITIVE_KEYS,
   PII_PATTERNS,
   redactPii,
+  setCustomRedactionRules,
+  getCustomRedactionRules,
 };

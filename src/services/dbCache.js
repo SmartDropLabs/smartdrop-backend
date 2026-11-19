@@ -16,6 +16,31 @@ const logger = require('../logger');
 
 const DEFAULT_TTL_SECONDS = 60;
 const MAX_CACHE_KEY_LENGTH = 256;
+// Most cache keys this process tracks for eviction (#700). Past this bound the
+// least recently used entry is deleted from Redis. Override with
+// DB_CACHE_MAX_ENTRIES.
+const MAX_TRACKED_ENTRIES = parseInt(process.env.DB_CACHE_MAX_ENTRIES, 10) || 10000;
+// Insertion order is recency order: a key is re-inserted on every use.
+const trackedKeys = new Map();
+
+/**
+ * Mark a cache key as most recently used, then evict the oldest tracked keys
+ * while over the limit. A failed eviction is logged and does not fail the query.
+ * @param {string} key
+ */
+async function trackKey(key) {
+  trackedKeys.delete(key);
+  trackedKeys.set(key, true);
+  while (trackedKeys.size > MAX_TRACKED_ENTRIES) {
+    const oldest = trackedKeys.keys().next().value;
+    trackedKeys.delete(oldest);
+    try {
+      await cache.del(oldest);
+    } catch (err) {
+      logger.warn('dbCache: failed to evict cache entry', { error: err.message });
+    }
+  }
+}
 
 /**
  * Generate a cache key from query and parameters.
@@ -72,7 +97,7 @@ async function cachedQuery(query, params = [], options = {}) {
 
   const cacheKey = generateCacheKey(query, params);
 
-  return fetchWithLock(
+  const result = await fetchWithLock(
     cacheKey,
     () => executor(query, params),
     {
@@ -82,6 +107,8 @@ async function cachedQuery(query, params = [], options = {}) {
       ...restOptions,
     }
   );
+  await trackKey(cacheKey);
+  return result;
 }
 
 /**
@@ -140,6 +167,7 @@ async function executeWriteAndInvalidate(id, writeOperation, entity = 'record') 
 
 module.exports = {
   cachedQuery,
+  getTrackedKeyCount: () => trackedKeys.size,
   invalidateQueryCache,
   generateCacheKey,
   invalidateRecord,

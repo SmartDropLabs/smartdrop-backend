@@ -1,5 +1,8 @@
 'use strict';
 
+const fs = require('fs');
+const zlib = require('zlib');
+const { pipeline } = require('stream/promises');
 const winston = require('winston');
 const DailyRotateFile = require('winston-daily-rotate-file');
 const logger = require('../logger');
@@ -98,4 +101,19 @@ class AuditLogger {
   }
 }
 
-module.exports = { AuditLogger, auditRotationOptions };
+/**
+ * Gzip-compress an audit log file to reduce storage overhead (#710).
+ *
+ * @param {string} sourcePath
+ * @param {string} [destPath] - Defaults to `${sourcePath}.gz`
+ * @returns {Promise<string>} Path to the compressed file
+ */
+async function compressAuditLog(sourcePath, destPath = `${sourcePath}.gz`) {
+  const source = fs.createReadStream(sourcePath);
+  const gzip = zlib.createGzip();
+  const dest = fs.createWriteStream(destPath);
+  await pipeline(source, gzip, dest);
+  return destPath;
+}
+
+module.exports = { AuditLogger, auditRotationOptions, compressAuditLog };

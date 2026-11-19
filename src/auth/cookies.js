@@ -81,6 +81,23 @@ function setCookie(res, name, value, options = {}) {
   res.cookie(name, value, opts);
 }
 
+/**
+ * Set an authentication cookie with Secure flag enforced (#646).
+ */
+function setAuthCookie(res, token, options = {}) {
+  if (!res || typeof res.cookie !== 'function') {
+    throw new Error('res.cookie is not available');
+  }
+  const opts = buildCookieOptions({
+    httpOnly: true,
+    secure: true,
+    sameSite: options.sameSite || 'strict',
+    path: options.path || DEFAULT_PATH,
+    ...options,
+  });
+  res.cookie(options.name || 'auth', token, opts);
+}
+
 function clearCookie(res, name, options = {}) {
   if (!res || typeof res.clearCookie !== 'function') {
     throw new Error('res.clearCookie is not available');
@@ -92,6 +109,7 @@ function clearCookie(res, name, options = {}) {
 module.exports = {
   buildCookieOptions,
   setCookie,
+  setAuthCookie,
   clearCookie,
   isSecure,
   DEFAULT_SAME_SITE,

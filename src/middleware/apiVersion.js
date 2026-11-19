@@ -15,6 +15,7 @@
 const SUPPORTED_VERSIONS = ['1'];
 const DEFAULT_VERSION = SUPPORTED_VERSIONS[SUPPORTED_VERSIONS.length - 1];
 const VENDOR_PREFIX = 'application/vnd.smartdrop.v';
+const MIN_SUPPORTED_VERSION = '1'; // Issue #657: Minimum supported version for deprecation warnings
 
 /**
  * Extract the version number from an Accept header value.
@@ -62,6 +63,19 @@ function negotiateVersion(req, res, next) {
 
   req.apiVersion = requested || DEFAULT_VERSION;
   res.setHeader('X-API-Version', `v${req.apiVersion}`);
+  
+  // Issue #657: Add deprecation warnings for old API versions
+  const versionNum = parseInt(req.apiVersion, 10);
+  const minVersionNum = parseInt(MIN_SUPPORTED_VERSION, 10);
+  
+  if (versionNum < minVersionNum) {
+    res.setHeader('X-API-Deprecation', `Version ${req.apiVersion} is deprecated`);
+    // Sunset date: 90 days from now
+    const sunsetDate = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toUTCString();
+    res.setHeader('Sunset', sunsetDate);
+    res.setHeader('Link', '</api/v' + DEFAULT_VERSION + '>; rel="successor-version"');
+  }
+  
   next();
 }
 

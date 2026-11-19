@@ -1,11 +1,16 @@
 'use strict';
 
 /**
- * CDN caching headers middleware (#583, #584).
+ * CDN caching headers middleware (#583, #584, #658).
  *
  * Sets CDN-specific cache headers (Surrogate-Control, CDN-Cache-Control)
  * and ensures response compression is properly configured for API responses.
+ * 
+ * Issue #658: Added CDN cache purge functionality for deployments.
  */
+
+const logger = require('../logger');
+const config = require('../config');
 
 const CDN_CACHEABLE_ROUTES = [
   { pattern: /^\/api\/prices/, maxAge: 30 },
@@ -55,8 +60,51 @@ function cdnCache(options = {}) {
   };
 }
 
+/**
+ * Issue #658: Purge CDN cache on deploy to prevent serving stale assets.
+ * Call this function during deployment/startup to clear CDN cache.
+ */
+async function purgeCDN() {
+  const cdnPurgeUrl = config.cdn?.purgeUrl || process.env.CDN_PURGE_URL;
+  const cdnApiKey = config.cdn?.apiKey || process.env.CDN_API_KEY;
+  
+  if (!cdnPurgeUrl) {
+    logger.warn('[CDN] No CDN_PURGE_URL configured, skipping cache purge');
+    return { success: false, reason: 'no_url_configured' };
+  }
+
+  try {
+    logger.info('[CDN] Purging CDN cache on deploy', { url: cdnPurgeUrl });
+    
+    const headers = {
+      'Content-Type': 'application/json',
+    };
+    
+    if (cdnApiKey) {
+      headers['Authorization'] = `Bearer ${cdnApiKey}`;
+    }
+    
+    const response = await fetch(cdnPurgeUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ purge: 'all' }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`CDN purge failed with status ${response.status}`);
+    }
+
+    logger.info('[CDN] Successfully purged CDN cache');
+    return { success: true, timestamp: new Date().toISOString() };
+  } catch (error) {
+    logger.error('[CDN] Failed to purge CDN cache', { error: error.message });
+    return { success: false, error: error.message };
+  }
+}
+
 module.exports = {
   cdnCache,
+  purgeCDN,
   CDN_CACHEABLE_ROUTES,
   NO_CDN_ROUTES,
 };

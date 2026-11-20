@@ -7,6 +7,7 @@ const buildRateLimit = require('../middleware/rateLimit');
 const priceOracle = require('../services/priceOracle');
 const AppError = require('../errors/AppError');
 const { priceParamsSchema, priceQuerySchema } = require('../validation/schemas');
+const { assertValidPriceData } = require('../validation/priceData');
 
 const router = express.Router();
 
@@ -31,7 +32,7 @@ router.get('/prices/:asset_code', validatePriceParams, validatePriceQuery, async
     const { asset_code: normalizedCode } = req.validated.params;
     const { issuer } = req.validated.query;
 
-    const priceData = await priceOracle.getPrice(normalizedCode, issuer || null);
+    const priceData = assertValidPriceData(await priceOracle.getPrice(normalizedCode, issuer || null));
 
     if (priceData.price_usd === null) {
       throw new AppError('NOT_FOUND', `No price data found for ${normalizedCode}`, 404, { asset_code: normalizedCode, issuer: issuer || null });
@@ -48,7 +49,7 @@ router.get('/prices/:asset_code/refresh', routeTimeout(), requireApiKey(), valid
     const { asset_code: normalizedCode } = req.validated.params;
     const { issuer } = req.validated.query;
 
-    const priceData = await priceOracle.fetchFreshPrice(normalizedCode, issuer || null);
+    const priceData = assertValidPriceData(await priceOracle.fetchFreshPrice(normalizedCode, issuer || null));
     if (priceData.price_usd === null) {
       throw new AppError('UPSTREAM_ERROR', 'All price sources failed', 502, { asset_code: normalizedCode, issuer: issuer || null });
     }

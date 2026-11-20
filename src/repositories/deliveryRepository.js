@@ -18,6 +18,7 @@
  *     response_status  int,
  *     trace_id         text not null,
  *     request_id       text,                 -- originating HTTP request (issue #250)
+ *     attempt_log      jsonb not null default '[]', -- per-attempt history (issue #701)
  *     created_at       timestamptz not null default now()
  *   )
  *
@@ -145,6 +146,10 @@ async function create({ webhook_id, event_id, event_type, trace_id, request_id }
     // (issue #250). Null for deliveries originated by background jobs,
     // which have no inbound request.
     request_id: request_id || null,
+    // One entry per delivery attempt — { attempt, status, response_status,
+    // error, latency_ms, timestamp } — so failures can be debugged after
+    // the top-level fields are overwritten by later attempts (issue #701).
+    attempt_log: [],
     created_at: now,
   };
 

@@ -428,6 +428,15 @@ async function postOnce(url, headers, body, timeoutMs) {
   }
 }
 
+// Cap on per-delivery attempt history so a misconfigured max_attempts can't
+// grow a delivery record without bound (#701).
+const MAX_ATTEMPT_LOG_ENTRIES = 25;
+
+function appendAttemptLog(delivery, entry) {
+  const previous = Array.isArray(delivery.attempt_log) ? delivery.attempt_log : [];
+  return [...previous, entry].slice(-MAX_ATTEMPT_LOG_ENTRIES);
+}
+
 async function attempt(deliveryId, sequence) {
   const delivery = await deliveryRepo.findById(deliveryId);
   if (!delivery) {
@@ -512,6 +521,18 @@ async function attempt(deliveryId, sequence) {
     const nowIso = new Date().toISOString();
     const latencyMs = Date.now() - deliveryStartTime;
 
+    // Per-attempt delivery history for debugging (#701). The record's
+    // top-level fields only describe the latest attempt; attempt_log keeps
+    // what every attempt saw.
+    const attemptLog = appendAttemptLog(delivery, {
+      attempt: attempts,
+      status: succeeded ? "sent" : "failed",
+      response_status: responseStatus,
+      error: succeeded ? null : networkError || `HTTP ${responseStatus}`,
+      latency_ms: latencyMs,
+      timestamp: nowIso,
+    });
+
     // Metrics will be finalized after we determine final status below
 
     if (succeeded) {
@@ -535,6 +556,7 @@ async function attempt(deliveryId, sequence) {
         next_retry_at: null,
         last_error: null,
         response_status: responseStatus,
+        attempt_log: attemptLog,
       });
     }
 
@@ -569,6 +591,7 @@ async function attempt(deliveryId, sequence) {
         next_retry_at: nextRetryAt,
         last_error: errorMessage,
         response_status: responseStatus,
+        attempt_log: attemptLog,
       });
     }
 
@@ -620,6 +643,7 @@ async function attempt(deliveryId, sequence) {
       next_retry_at: null,
       last_error: errorMessage,
       response_status: responseStatus,
+      attempt_log: attemptLog,
     });
   });
 }
@@ -876,6 +900,8 @@ module.exports = {
   sendTest,
   backoffMs,
   shouldRetry,
+  appendAttemptLog,
+  MAX_ATTEMPT_LOG_ENTRIES,
   getMetrics,
   getInFlightCount,
   hydrateMetrics,

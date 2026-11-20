@@ -59,4 +59,27 @@ router.delete('/alerts/:id', validateRouteIdParams, async (req, res, next) => {
   }
 });
 
+router.post('/alerts/:id/ack', validateRouteIdParams, async (req, res, next) => {
+  try {
+    const alertId = req.validated?.params?.id || req.params.id;
+    const alert = await alertsService.get(alertId);
+    if (!alert) {
+      return next(new AppError('ALERT_NOT_FOUND', 'Alert not found', 404));
+    }
+    // Same ownership rule as DELETE /alerts/:id (#508).
+    const clientIp = req.ip || req.connection?.remoteAddress || 'unknown';
+    if (alert.owner_ip && alert.owner_ip !== clientIp) {
+      return next(new AppError('FORBIDDEN', 'You do not have permission to acknowledge this alert', 403));
+    }
+    const updated = await alertsService.acknowledge(alertId);
+    if (!updated) {
+      return next(new AppError('ALERT_NOT_FOUND', 'Alert not found', 404));
+    }
+    return res.json({ acknowledged: true, id: alertId, acknowledged_at: updated.acknowledged_at });
+  } catch (err) {
+    logger.error('Acknowledge alert error', { error: err.message });
+    return next(err);
+  }
+});
+
 module.exports = router;

@@ -2,6 +2,7 @@ const express = require("express");
 const { requireApiKey } = require("../middleware/auth");
 const { validate } = require("../middleware/validate");
 const apiKeys = require("../services/apiKeys");
+const keyUsage = require("../analytics/keyUsage");
 const logger = require("../logger");
 const AppError = require("../errors/AppError");
 const { routeTimeout } = require("../middleware/timeout");
@@ -22,6 +23,17 @@ router.get("/keys", async (_req, res, next) => {
     return res.json({ keys });
   } catch (err) {
     logger.error("List API keys error", { error: err.message });
+    return next(err);
+  }
+});
+
+router.get("/keys/:id/usage", validateRouteIdParams, async (req, res, next) => {
+  try {
+    const keyId = req.validated?.params?.id || req.params.id;
+    const usage = await keyUsage.getKeyUsageSummary(keyId);
+    return res.json({ keyId, usage });
+  } catch (err) {
+    logger.error("Key usage analytics error", { error: err.message });
     return next(err);
   }
 });

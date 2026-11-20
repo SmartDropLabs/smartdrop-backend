@@ -72,12 +72,91 @@ function generateOtpauthUri(secret, accountName) {
   return `otpauth://totp/${encodeURIComponent(MFA_ISSUER)}:${encodeURIComponent(accountName)}?secret=${secret}&issuer=${encodeURIComponent(MFA_ISSUER)}`;
 }
 
+// Trusted device storage (#703): userId -> Map<sha256(deviceToken), expiresAtMs>
+// NOTE: For production with multiple instances, use Redis or another shared store
+const trustedDevices = new Map();
+const TRUSTED_DEVICE_TTL_MS =
+  (parseInt(process.env.MFA_TRUSTED_DEVICE_TTL_DAYS, 10) || 30) * 24 * 60 * 60 * 1000;
+
+function hashDeviceToken(deviceToken) {
+  return crypto.createHash('sha256').update(String(deviceToken)).digest('hex');
+}
+
+/**
+ * Mark a device as trusted for a user (#703).
+ * The device token is generated server-side so it can't be guessed or
+ * chosen by a client; only its hash is stored.
+ * @param {string} userId
+ * @param {Object} [options]
+ * @param {number} [options.ttlMs] - How long the device stays trusted
+ * @returns {string} Opaque device token to hand back to the client
+ */
+function trustDevice(userId, { ttlMs = TRUSTED_DEVICE_TTL_MS } = {}) {
+  if (!userId) throw new Error('trustDevice: userId is required');
+  const deviceToken = crypto.randomBytes(32).toString('hex');
+  if (!trustedDevices.has(userId)) trustedDevices.set(userId, new Map());
+  trustedDevices.get(userId).set(hashDeviceToken(deviceToken), Date.now() + ttlMs);
+  return deviceToken;
+}
+
+/**
+ * Check whether a device token is trusted for a user (#703).
+ * Expired entries are removed on lookup.
+ * @param {string} userId
+ * @param {string} deviceToken
+ * @returns {boolean}
+ */
+function isTrustedDevice(userId, deviceToken) {
+  if (!userId || !deviceToken) return false;
+  const devices = trustedDevices.get(userId);
+  if (!devices) return false;
+  const hash = hashDeviceToken(deviceToken);
+  const expiresAt = devices.get(hash);
+  if (!expiresAt) return false;
+  if (Date.now() >= expiresAt) {
+    devices.delete(hash);
+    if (devices.size === 0) trustedDevices.delete(userId);
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Revoke trust for one device, or every device when deviceToken is omitted (#703).
+ * @param {string} userId
+ * @param {string} [deviceToken]
+ */
+function revokeTrustedDevice(userId, deviceToken) {
+  if (!userId) return;
+  if (!deviceToken) {
+    trustedDevices.delete(userId);
+    return;
+  }
+  const devices = trustedDevices.get(userId);
+  if (!devices) return;
+  devices.delete(hashDeviceToken(deviceToken));
+  if (devices.size === 0) trustedDevices.delete(userId);
+}
+
 /**
  * Middleware that requires MFA verification for sensitive operations.
  * Expects X-MFA-Token header with the current TOTP code.
+ *
+ * Trusted devices (#703): a request carrying a valid X-MFA-Device-Token for
+ * the authenticated user skips the TOTP check. Sending
+ * X-MFA-Remember-Device: true (or body.rememberDevice) alongside a valid
+ * TOTP code trusts the device and returns a new token in the
+ * X-MFA-Device-Token response header.
  */
 function requireMfa(userSecret) {
   return (req, res, next) => {
+    const userId = req.user?.id || req.user?.userId || req.jwt?.sub;
+    const deviceToken = req.headers['x-mfa-device-token'];
+
+    if (isTrustedDevice(userId, deviceToken)) {
+      return next(); // Skip MFA
+    }
+
     const mfaToken = req.headers['x-mfa-token'] || req.body?.mfaToken;
 
     if (!mfaToken) {
@@ -99,6 +178,13 @@ function requireMfa(userSecret) {
         error: 'Invalid MFA token',
         message: 'The provided MFA token is invalid or expired.',
       });
+    }
+
+    const rememberDevice =
+      String(req.headers['x-mfa-remember-device']).toLowerCase() === 'true' ||
+      req.body?.rememberDevice === true;
+    if (rememberDevice && userId) {
+      res.setHeader('X-MFA-Device-Token', trustDevice(userId));
     }
 
     next();
@@ -155,4 +241,8 @@ module.exports = {
   generateBackupCodes,
   useBackupCode,
   userBackupCodes,
+  trustDevice,
+  isTrustedDevice,
+  revokeTrustedDevice,
+  trustedDevices,
 };

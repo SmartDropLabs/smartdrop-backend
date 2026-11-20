@@ -106,7 +106,51 @@ function requireResourcePermission(options) {
 }
 
 /**
- * Simple role-based permission check middleware.
+ * Role hierarchy (#704). Each role inherits every role it lists, and
+ * transitively everything those roles inherit, so an admin satisfies any
+ * route that requires a moderator or user.
+ */
+const ROLE_HIERARCHY = Object.freeze({
+  admin: Object.freeze(['moderator', 'user']),
+  moderator: Object.freeze(['user']),
+  user: Object.freeze([]),
+});
+
+/**
+ * Resolve the full set of roles a role grants, including itself (#704).
+ * @param {string} role
+ * @returns {Set<string>}
+ */
+function getEffectiveRoles(role) {
+  const effective = new Set();
+  const stack = role ? [role] : [];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (effective.has(current)) continue;
+    effective.add(current);
+    for (const inherited of ROLE_HIERARCHY[current] || []) {
+      stack.push(inherited);
+    }
+  }
+  return effective;
+}
+
+/**
+ * Whether a user's role satisfies at least one of the required roles,
+ * taking the role hierarchy into account (#704).
+ * @param {string} userRole
+ * @param {Array<string>} requiredRoles
+ * @returns {boolean}
+ */
+function hasRole(userRole, requiredRoles) {
+  if (!userRole) return false;
+  const effective = getEffectiveRoles(userRole);
+  return requiredRoles.some((role) => effective.has(role));
+}
+
+/**
+ * Role-based permission check middleware. Higher roles inherit the
+ * permissions of the roles below them via ROLE_HIERARCHY (#704).
  *
  * @param  {...string} roles - Allowed roles
  * @returns {Function} Express middleware
@@ -114,7 +158,7 @@ function requireResourcePermission(options) {
 function requireRole(...roles) {
   return (req, res, next) => {
     const userRole = req.user?.role;
-    if (!userRole || !roles.includes(userRole)) {
+    if (!hasRole(userRole, roles)) {
       logger.warn(
         `Role denied: user ${req.user?.id} with role ${userRole} tried to access route requiring ${roles.join(', ')}`,
       );
@@ -130,6 +174,9 @@ function requireRole(...roles) {
 module.exports = {
   requireResourcePermission,
   requireRole,
+  ROLE_HIERARCHY,
+  getEffectiveRoles,
+  hasRole,
   getUserPermissions,
   invalidateUserPermissions,
 };

@@ -17,7 +17,7 @@ const crypto = require('crypto');
 const cache = require('../services/cache');
 const logger = require('../logger');
 const AppError = require('../errors/AppError');
-const { base64UrlEncode } = require('../middleware/jwtAuth');
+const { base64UrlEncode, ACCESS_TOKEN_TYPE } = require('../middleware/jwtAuth');
 
 // Defaults
 const DEFAULT_ACCESS_TOKEN_TTL_SECONDS = 900; // 15 minutes
@@ -228,6 +228,8 @@ async function createTokenPair(user, options = {}) {
 
   // 1. Sign access token
   const accessPayload = {
+    // Token type claim (#702) — jwtAuth only accepts access tokens.
+    type: ACCESS_TOKEN_TYPE,
     sub: user.id,
     userId: user.id,
     email: user.email,

@@ -14,9 +14,14 @@ const logger = require("../logger");
  * - Audience validation
  * - Algorithm whitelist (prevents alg: none / alg confusion attacks)
  * - Token blacklist on logout (#661)
+ * - Token type validation (#702) — only `type: "access"` tokens are
+ *   accepted by the middleware, preventing refresh/other token confusion
  *
  * Usage: jwtAuth({ secret: '...', issuer: '...', audience: '...' })
  */
+
+const ACCESS_TOKEN_TYPE = "access";
+const REFRESH_TOKEN_TYPE = "refresh";
 
 const ALLOWED_ALGORITHMS = ["HS256", "HS384", "HS512"];
 const ALGORITHM_HASHES = {
@@ -242,6 +247,16 @@ function verifyJwt(token, secret, options = {}) {
     }
   }
 
+  // Token type validation (#702) — reject refresh or other non-access tokens
+  // so a token minted for one purpose can't be replayed as another.
+  if (options.tokenType && payload.type !== options.tokenType) {
+    logger.warn("JWT rejected: token type mismatch", {
+      expected: options.tokenType,
+      actual: payload.type,
+    });
+    throw new AppError("UNAUTHORIZED", "Invalid token type", 401);
+  }
+
   return payload;
 }
 
@@ -250,9 +265,16 @@ function verifyJwt(token, secret, options = {}) {
  *
  * Validates the Bearer token as a JWT and attaches the decoded payload
  * to `req.jwt`. Falls back to API key validation if the token is not a JWT.
+ * Only access tokens (`type: "access"`) are accepted by default (#702).
  */
 function jwtAuth(options = {}) {
-  const { secret, issuer, audience, required = true } = options;
+  const {
+    secret,
+    issuer,
+    audience,
+    required = true,
+    tokenType = ACCESS_TOKEN_TYPE,
+  } = options;
 
   return (req, res, next) => {
     const authHeader = req.get("authorization");
@@ -280,7 +302,11 @@ function jwtAuth(options = {}) {
     }
 
     try {
-      const payload = verifyJwt(token, secret, { issuer, audience });
+      const payload = verifyJwt(token, secret, {
+        issuer,
+        audience,
+        tokenType,
+      });
       req.jwt = payload;
       return next();
     } catch (err) {
@@ -294,6 +320,8 @@ function jwtAuth(options = {}) {
 }
 
 module.exports = {
+  ACCESS_TOKEN_TYPE,
+  REFRESH_TOKEN_TYPE,
   verifyJwt,
   jwtAuth,
   logout,

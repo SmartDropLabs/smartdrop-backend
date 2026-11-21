@@ -4,12 +4,16 @@ const knexFactory = require('knex');
 const config = require('../config');
 const {
   withTransaction,
+  transaction,
   sortIds,
   lockRows,
   isDeadlockOrSerializationError,
+  ISOLATION_LEVELS,
+  VALID_ISOLATION_LEVELS,
+  normalizeIsolationLevel,
 } = require('./transaction');
 const encryption = require('./encryption');
-const { PoolMonitor, defaultPoolMonitor } = require('./poolMonitor');
+const { PoolMonitor, defaultPoolMonitor, checkConnectionTimeout } = require('./poolMonitor');
 const logger = require('../logger');
 
 let db = null;
@@ -191,18 +195,6 @@ async function streamBatches(queryBuilder, onBatch, { batchSize = 100, idColumn 
   return processed;
 }
 
-/**
- * Convenience wrapper for `withTransaction(getDb(), callback, options)`
- *
- * @param {Function} callback - Async function receiving (trx)
- * @param {Object} [options]
- * @returns {Promise<*>}
- */
-async function transaction(callback, options = {}) {
-  const currentDb = getDb();
-  return withTransaction(currentDb, callback, options);
-}
-
 module.exports = {
   getDb,
   setDb,
@@ -214,11 +206,15 @@ module.exports = {
   streamBatches,
   PoolMonitor,
   defaultPoolMonitor,
+  checkConnectionTimeout,
   withTransaction,
   transaction,
   sortIds,
   lockRows,
   isDeadlockOrSerializationError,
+  ISOLATION_LEVELS,
+  VALID_ISOLATION_LEVELS,
+  normalizeIsolationLevel,
   // Encryption at rest (#519)
   encryption,
   encrypt: encryption.encrypt,

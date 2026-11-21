@@ -1,13 +1,35 @@
 "use strict";
 
 /**
- * Database Connection Pool Monitoring (#520).
+ * Database Connection Pool Monitoring (#520, #721).
  *
- * Provides real-time metrics, event tracking, utilization analysis, and
- * Prometheus formatting for the Knex (Tarn.js) database connection pool.
+ * Provides real-time metrics, event tracking, utilization analysis,
+ * connection timeout detection, and Prometheus formatting for the Knex (Tarn.js)
+ * database connection pool.
  */
 
 const logger = require("../logger");
+
+const DEFAULT_CONNECTION_TIMEOUT = 30000; // 30 seconds connection timeout (#721)
+
+/**
+ * Detect if a connection has timed out and destroy it if so (#721).
+ *
+ * @param {Object} connection - Connection object
+ * @param {number} [timeout=30000] - Timeout in milliseconds
+ * @returns {boolean} True if timed out and destroyed
+ */
+function checkConnectionTimeout(connection, timeout = DEFAULT_CONNECTION_TIMEOUT) {
+  if (!connection) return false;
+  const start = connection.start || connection.acquiredAt || Date.now();
+  if (Date.now() - start > timeout) {
+    if (typeof connection.destroy === "function") {
+      connection.destroy();
+    }
+    return true;
+  }
+  return false;
+}
 
 class PoolMonitor {
   constructor(options = {}) {
@@ -16,12 +38,13 @@ class PoolMonitor {
     this.onWarning = options.onWarning || null;
     this.onCritical = options.onCritical || null;
     this.leakDetectionThreshold = options.leakDetectionThreshold ?? 30000; // 30 seconds
+    this.connectionTimeout = options.connectionTimeout ?? options.timeout ?? DEFAULT_CONNECTION_TIMEOUT; // 30 seconds (#721)
 
     this.reset();
     this._pool = null;
     this._listeners = new Map();
     this._pendingAcquireTimers = new Map();
-    this._activeConnections = new Map(); // Track connection lifecycle for leak detection
+    this._activeConnections = new Map(); // Track connection lifecycle for leak & timeout detection
     this._leakCheckInterval = null;
   }
 
@@ -96,10 +119,16 @@ class PoolMonitor {
         this._recordAcquireDuration(duration);
         this._pendingAcquireTimers.delete(eventId);
       }
-      // Track connection for leak detection
-      if (resource && resource.__cid) {
-        this._activeConnections.set(resource.__cid, {
+      // Track connection for leak and timeout detection (#721)
+      if (resource) {
+        if (!resource.start) {
+          resource.start = Date.now();
+        }
+        const cid = resource.__cid || resource.id || eventId;
+        this._activeConnections.set(cid, {
           acquiredAt: Date.now(),
+          start: resource.start,
+          connection: resource,
           eventId,
         });
       }
@@ -122,8 +151,18 @@ class PoolMonitor {
     register("release", (resource) => {
       this.counters.releases++;
       // Remove from active connections tracking
-      if (resource && resource.__cid) {
-        this._activeConnections.delete(resource.__cid);
+      if (resource) {
+        const cid = resource.__cid || resource.id;
+        if (cid && this._activeConnections.has(cid)) {
+          this._activeConnections.delete(cid);
+        } else {
+          for (const [key, info] of this._activeConnections.entries()) {
+            if (info.connection === resource) {
+              this._activeConnections.delete(key);
+              break;
+            }
+          }
+        }
       }
       this._checkHealth();
     });
@@ -164,7 +203,7 @@ class PoolMonitor {
       this.detach();
     });
 
-    // Start periodic leak detection
+    // Start periodic leak and timeout detection
     this._startLeakDetection();
 
     return this;
@@ -209,10 +248,48 @@ class PoolMonitor {
   }
 
   /**
-   * Check for long-held connections that may indicate leaks.
+   * Detect and destroy hung connections that have exceeded the timeout (#721).
+   *
+   * @param {number} [timeout] - Timeout in milliseconds (defaults to connectionTimeout)
+   * @returns {Array} Array of timed-out connections
+   */
+  checkTimeouts(timeout = this.connectionTimeout) {
+    const now = Date.now();
+    const timedOut = [];
+
+    for (const [cid, info] of this._activeConnections.entries()) {
+      const connection = info.connection;
+      const start = (connection && connection.start) || info.start || info.acquiredAt;
+      if (now - start > timeout) {
+        this.counters.timeouts++;
+        timedOut.push(connection || info);
+        if (connection && typeof connection.destroy === "function") {
+          connection.destroy();
+        } else if (this._pool && typeof this._pool.destroy === "function" && connection) {
+          this._pool.destroy(connection);
+        }
+        this._activeConnections.delete(cid);
+      }
+    }
+
+    if (timedOut.length > 0) {
+      logger.warn("Database connection timeout detected", {
+        timedOutCount: timedOut.length,
+        timeoutMs: timeout,
+      });
+    }
+
+    return timedOut;
+  }
+
+  /**
+   * Check for long-held connections that may indicate leaks or timeouts.
    * @private
    */
   _checkForLeaks() {
+    // Run timeout check first (#721)
+    this.checkTimeouts();
+
     const now = Date.now();
     const leakedConnections = [];
 
@@ -465,6 +542,12 @@ class PoolMonitor {
     );
 
     lines.push(
+      "# HELP db_pool_timeouts_total Total connection timeouts detected",
+    );
+    lines.push("# TYPE db_pool_timeouts_total counter");
+    lines.push(`db_pool_timeouts_total ${metrics.counters.timeouts}`);
+
+    lines.push(
       "# HELP db_pool_acquire_duration_ms Average connection acquire latency in milliseconds",
     );
     lines.push("# TYPE db_pool_acquire_duration_ms gauge");
@@ -482,4 +565,6 @@ const defaultPoolMonitor = new PoolMonitor();
 module.exports = {
   PoolMonitor,
   defaultPoolMonitor,
+  checkConnectionTimeout,
+  DEFAULT_CONNECTION_TIMEOUT,
 };

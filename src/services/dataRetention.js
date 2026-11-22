@@ -1,10 +1,14 @@
 'use strict';
 
 /**
- * Data retention policies service (#567).
+ * Data retention policies service (#567, #685).
  *
  * Manages automatic cleanup of old records based on configured retention periods.
  * Prevents storage bloat and helps with compliance/privacy concerns.
+ *
+ * Retention periods are configured per table (collection) in `policies`. Each
+ * policy can be overridden with an environment variable; invalid or missing
+ * values fall back to the default for that table.
  */
 
 const cache = require('./cache');
@@ -19,8 +23,33 @@ function getEnvNumber(key, defaultValue) {
   return defaultValue;
 }
 
-const DELIVERY_RETENTION_DAYS = getEnvNumber('DELIVERY_LOG_RETENTION_DAYS', 30);
-const SESSION_RETENTION_DAYS = getEnvNumber('SESSION_RETENTION_DAYS', 7);
+/**
+ * Per-table retention policies, in days.
+ *
+ * - webhook_delivery: webhook delivery logs (DELIVERY_LOG_RETENTION_DAYS)
+ * - session: session records (SESSION_RETENTION_DAYS)
+ * - audit_logs: audit log entries (AUDIT_LOG_RETENTION_DAYS)
+ * - temp_files: temporary file records (TEMP_FILE_RETENTION_DAYS)
+ */
+const policies = Object.freeze({
+  webhook_delivery: getEnvNumber('DELIVERY_LOG_RETENTION_DAYS', 30),
+  session: getEnvNumber('SESSION_RETENTION_DAYS', 7),
+  audit_logs: getEnvNumber('AUDIT_LOG_RETENTION_DAYS', 90),
+  temp_files: getEnvNumber('TEMP_FILE_RETENTION_DAYS', 7),
+});
+
+/**
+ * Returns the retention period in days for a table.
+ *
+ * @param {string} table - Table/collection name (a key of `policies`)
+ * @returns {number|undefined} Retention period in days, or undefined for unknown tables
+ */
+function getRetentionDays(table) {
+  return Object.prototype.hasOwnProperty.call(policies, table) ? policies[table] : undefined;
+}
+
+const DELIVERY_RETENTION_DAYS = policies.webhook_delivery;
+const SESSION_RETENTION_DAYS = policies.session;
 
 const DELIVERY_TTL_MS = DELIVERY_RETENTION_DAYS * 24 * 60 * 60 * 1000;
 const SESSION_TTL_MS = SESSION_RETENTION_DAYS * 24 * 60 * 60 * 1000;
@@ -52,7 +81,7 @@ async function applyRetentionPolicy(key, ttlSeconds) {
  * @returns {Promise<void>}
  */
 async function applyDeliveryRetention(deliveryId) {
-  await applyRetentionPolicy(`webhook_delivery:${deliveryId}`, DELIVERY_RETENTION_DAYS * 24 * 60 * 60);
+  await applyRetentionPolicy(`webhook_delivery:${deliveryId}`, getRetentionDays('webhook_delivery') * 24 * 60 * 60);
 }
 
 /**
@@ -63,7 +92,7 @@ async function applyDeliveryRetention(deliveryId) {
  * @returns {Promise<void>}
  */
 async function applySessionRetention(sessionId) {
-  await applyRetentionPolicy(`session:${sessionId}`, SESSION_RETENTION_DAYS * 24 * 60 * 60);
+  await applyRetentionPolicy(`session:${sessionId}`, getRetentionDays('session') * 24 * 60 * 60);
 }
 
 /**
@@ -186,6 +215,8 @@ async function runRetention(dryRunOrOptions = false) {
 }
 
 module.exports = {
+  policies,
+  getRetentionDays,
   DELIVERY_RETENTION_DAYS,
   SESSION_RETENTION_DAYS,
   DELIVERY_TTL_MS,

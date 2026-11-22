@@ -5,6 +5,7 @@ const { routeTimeout } = require('../middleware/timeout');
 const { validate } = require('../middleware/validate');
 const buildRateLimit = require('../middleware/rateLimit');
 const priceOracle = require('../services/priceOracle');
+const alertsService = require('../services/alerts');
 const AppError = require('../errors/AppError');
 const { priceParamsSchema, priceQuerySchema } = require('../validation/schemas');
 const { assertValidPriceData } = require('../validation/priceData');
@@ -38,6 +39,7 @@ router.get('/prices/:asset_code', validatePriceParams, validatePriceQuery, async
       throw new AppError('NOT_FOUND', `No price data found for ${normalizedCode}`, 404, { asset_code: normalizedCode, issuer: issuer || null });
     }
 
+    await alertsService.evaluateForAsset(normalizedCode, priceData.price_usd);
     return res.json(priceData);
   } catch (err) {
     return next(err);
@@ -53,6 +55,7 @@ router.get('/prices/:asset_code/refresh', routeTimeout(), requireApiKey(), valid
     if (priceData.price_usd === null) {
       throw new AppError('UPSTREAM_ERROR', 'All price sources failed', 502, { asset_code: normalizedCode, issuer: issuer || null });
     }
+    await alertsService.evaluateForAsset(normalizedCode, priceData.price_usd);
     return res.json(priceData);
   } catch (err) {
     return next(err);

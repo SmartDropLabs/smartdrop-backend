@@ -273,6 +273,8 @@ The application reads configurations from the `.env` file at the root.
 | `PORT` | Server port | 3000 | No |
 | `REDIS_URL` | Redis connection URL | redis://localhost:6379 in development/test | Yes in production |
 | `DATABASE_URL` | Database connection URL reserved for persistence-backed features | postgres://localhost/smartdrop in development, postgres://localhost/smartdrop_test in test | Yes in production |
+| `DATABASE_URL_ENCRYPTED` | AES-GCM encrypted database URL; takes precedence over `DATABASE_URL` | empty | No |
+| `DB_ENCRYPTION_KEY` | Secret key used to encrypt/decrypt database values and `DATABASE_URL_ENCRYPTED` | empty | Yes in production |
 | `STELLAR_HORIZON_URL` | Horizon API URL | https://horizon.stellar.org | No |
 | `USDC_ISSUER` | USDC issuer address | GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA | No |
 | `COINGECKO_API_KEY` | CoinGecko API key | empty | No |
@@ -320,6 +322,13 @@ Each price source (`stellar_dex`, `coingecko`, `coinmarketcap`) gets one circuit
 | `METRICS_AUTH_TOKEN` | Bearer token / password for authenticating `/metrics` scrapes | empty | No |
 | `METRICS_ALLOWED_IPS` | Comma-separated list of IP addresses allowed to scrape `/metrics` | empty | No |
 
+Set `DATABASE_URL_ENCRYPTED` to an AES-GCM value produced by
+`require('./src/database').encrypt(process.env.DATABASE_URL)` in a trusted
+environment with `DB_ENCRYPTION_KEY` configured. Store the ciphertext in
+`DATABASE_URL_ENCRYPTED` and the key separately in your deployment secret
+manager; remove the plaintext `DATABASE_URL` after migration. The encrypted
+value takes precedence when both variables are present. Existing plaintext
+`DATABASE_URL` deployments continue to work.
 
 ---
 

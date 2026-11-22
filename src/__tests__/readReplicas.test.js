@@ -87,5 +87,28 @@ describe('Read replicas (#514)', () => {
       delete process.env.DATABASE_URL;
       delete process.env.DATABASE_REPLICA_URLS;
     });
+
+    it('decrypts an encrypted primary database URL', () => {
+      const config = require('../config');
+      const encryption = require('../database/encryption');
+      const originalKey = config.databaseEncryptionKey;
+      const originalDbKey = config.dbEncryptionKey;
+      config.databaseEncryptionKey = 'test-read-replica-encryption-key';
+      config.dbEncryptionKey = config.databaseEncryptionKey;
+      encryption._resetCachedKey();
+      process.env.DATABASE_URL_ENCRYPTED = encryption.encrypt('postgres://primary');
+      delete process.env.DATABASE_URL;
+
+      try {
+        const { createFromEnv } = require('../database/readReplicas');
+        const router = createFromEnv();
+        expect(router.primaryConfig).toBe('postgres://primary');
+      } finally {
+        delete process.env.DATABASE_URL_ENCRYPTED;
+        config.databaseEncryptionKey = originalKey;
+        config.dbEncryptionKey = originalDbKey;
+        encryption._resetCachedKey();
+      }
+    });
   });
 });

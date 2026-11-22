@@ -1,6 +1,7 @@
 'use strict';
 
 const knexFactory = require('knex');
+const encryption = require('./encryption');
 const logger = require('../logger');
 
 /**
@@ -215,7 +216,9 @@ function isConnectionError(err) {
  * Create a replica router from environment variables.
  */
 function createFromEnv() {
-  const primaryUrl = process.env.DATABASE_URL;
+  const primaryUrl = process.env.DATABASE_URL_ENCRYPTED
+    ? encryption.decrypt(process.env.DATABASE_URL_ENCRYPTED)
+    : process.env.DATABASE_URL;
   const replicaUrls = (process.env.DATABASE_REPLICA_URLS ?? '')
     .split(',')
     .map((url) => url.trim())

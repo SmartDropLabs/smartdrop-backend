@@ -23,14 +23,16 @@ describe('Database deadlock prevention & retry (#500)', () => {
     rollbackCalled = 0;
     completed = false;
 
-    mockTrx = jest.fn((table) => ({
+    const queryBuilder = {
       whereIn: jest.fn().mockReturnThis(),
       orderBy: jest.fn().mockReturnThis(),
       forUpdate: jest.fn().mockResolvedValue([{ id: 1 }, { id: 2 }]),
       forShare: jest.fn().mockResolvedValue([{ id: 1 }]),
       skipLocked: jest.fn().mockResolvedValue([{ id: 1 }]),
       noWait: jest.fn().mockResolvedValue([{ id: 1 }]),
-    }));
+    };
+
+    mockTrx = jest.fn((table) => queryBuilder);
 
     mockTrx.commit = jest.fn(async () => {
       commitCalled += 1;

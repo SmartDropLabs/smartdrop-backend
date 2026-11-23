@@ -3,8 +3,8 @@
 const logger = require('../logger');
 
 /**
- * #454 & #500 — Database transaction manager with guaranteed rollback, error preservation,
- * and deadlock/serialization failure prevention and automatic retry.
+ * #454, #500 & #724 — Database transaction manager with guaranteed rollback, error preservation,
+ * configurable isolation levels, and deadlock/serialization failure prevention and automatic retry.
  *
  * Causes of deadlocks & serialization failures in relational transactions:
  * 1. Inconsistent lock acquisition order across transactions touching multiple rows/tables.
@@ -16,6 +16,7 @@ const logger = require('../logger');
  * - The callback receives the transaction client `trx` for all transactional queries.
  * - Any error thrown inside the callback triggers an immediate `trx.rollback()`.
  * - The ORIGINAL error thrown by the callback is ALWAYS preserved.
+ * - Isolation level is configurable (#724) with case-insensitive normalization (e.g. 'READ COMMITTED').
  * - Automatic retry on deadlock (PostgreSQL 40P01) and serialization failure (PostgreSQL 40001)
  *   with exponential backoff, jitter, and bounded attempts.
  * - All other errors are rethrown immediately without retrying.
@@ -23,6 +24,37 @@ const logger = require('../logger');
  */
 
 const DEADLOCK_ERROR_CODES = Object.freeze(['40P01', '40001', 'DEADLOCK_DETECTED']);
+
+/**
+ * Supported SQL transaction isolation levels (#724).
+ */
+const ISOLATION_LEVELS = Object.freeze({
+  READ_UNCOMMITTED: 'read uncommitted',
+  READ_COMMITTED: 'read committed',
+  REPEATABLE_READ: 'repeatable read',
+  SERIALIZABLE: 'serializable',
+  SNAPSHOT: 'snapshot',
+});
+
+const VALID_ISOLATION_LEVELS = Object.freeze(Object.values(ISOLATION_LEVELS));
+
+/**
+ * Normalize and validate an SQL transaction isolation level (#724).
+ * Converts case-insensitively (e.g., 'READ COMMITTED' -> 'read committed').
+ *
+ * @param {string} level
+ * @returns {string|undefined}
+ */
+function normalizeIsolationLevel(level) {
+  if (!level) return undefined;
+  const normalized = String(level).trim().toLowerCase();
+  if (!VALID_ISOLATION_LEVELS.includes(normalized)) {
+    throw new Error(
+      `Invalid isolationLevel "${level}", supported isolation levels are: ${JSON.stringify(VALID_ISOLATION_LEVELS)}`
+    );
+  }
+  return normalized;
+}
 
 /**
  * Identifies if an error is a PostgreSQL deadlock or serialization failure.
@@ -168,10 +200,11 @@ async function executeSingleTransaction(db, callback, options = {}) {
     }
   }
 
-  // Start a new transaction
+  // Start a new transaction with configurable isolation level (#724)
   const trxConfig = {};
-  if (options.isolationLevel) {
-    trxConfig.isolationLevel = options.isolationLevel;
+  const isolationLevel = normalizeIsolationLevel(options.isolationLevel);
+  if (isolationLevel) {
+    trxConfig.isolationLevel = isolationLevel;
   }
 
   const trx = await db.transaction(trxConfig);
@@ -212,7 +245,7 @@ async function executeSingleTransaction(db, callback, options = {}) {
  * @param {Function} callback - Async function receiving `(trx)` to execute transactional queries
  * @param {Object} [options] - Optional transaction configuration
  * @param {import('knex').Knex.Transaction} [options.trx] - Existing transaction for nesting
- * @param {string} [options.isolationLevel] - Optional SQL isolation level
+ * @param {string} [options.isolationLevel] - Optional SQL isolation level (e.g., 'READ COMMITTED') (#724)
  * @param {number} [options.maxRetries=3] - Maximum retry attempts on deadlock
  * @param {number} [options.baseDelayMs=25] - Base delay for exponential backoff
  * @param {number} [options.maxDelayMs=500] - Maximum backoff delay cap
@@ -266,10 +299,33 @@ async function withTransaction(db, callback, options = {}) {
   }
 }
 
+/**
+ * Execute a transaction with configurable isolation level (#724).
+ * Supports both:
+ *   transaction(db, callback, options)
+ *   transaction(callback, options) (uses default database)
+ *
+ * @param {import('knex').Knex|Function} dbOrCallback
+ * @param {Function|Object} [callbackOrOptions]
+ * @param {Object} [options]
+ * @returns {Promise<*>}
+ */
+async function transaction(dbOrCallback, callbackOrOptions, options = {}) {
+  if (typeof dbOrCallback === 'function' && typeof callbackOrOptions !== 'function') {
+    const { getDb } = require('./index');
+    return withTransaction(getDb(), dbOrCallback, callbackOrOptions || {});
+  }
+  return withTransaction(dbOrCallback, callbackOrOptions, options);
+}
+
 module.exports = {
   withTransaction,
+  transaction,
   isDeadlockOrSerializationError,
   DEADLOCK_ERROR_CODES,
+  ISOLATION_LEVELS,
+  VALID_ISOLATION_LEVELS,
+  normalizeIsolationLevel,
   sortIds,
   lockRows,
 };

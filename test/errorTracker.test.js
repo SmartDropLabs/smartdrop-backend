@@ -44,7 +44,10 @@ describe('errorTracker service', () => {
   test('captures exception when initialized', () => {
     const err = new Error('Database error');
     errorTracker.captureException(err, { extraInfo: 'test' });
-    expect(Sentry.captureException).toHaveBeenCalledWith(err, { extra: { extraInfo: 'test' } });
+    expect(Sentry.captureException).toHaveBeenCalledWith(
+      err,
+      expect.objectContaining({ extra: expect.objectContaining({ extraInfo: 'test' }) })
+    );
   });
 
   test('captures message when initialized', () => {
@@ -52,6 +55,42 @@ describe('errorTracker service', () => {
     expect(Sentry.captureMessage).toHaveBeenCalledWith('Something went wrong', {
       level: 'warning',
       extra: { userId: 123 },
+    });
+  });
+
+  describe('severity levels (#686)', () => {
+    test('exposes the supported severity levels in order', () => {
+      expect(errorTracker.SEVERITY_LEVELS).toEqual(['info', 'warning', 'error', 'critical']);
+    });
+
+    test('classifies 5xx status errors as error and 4xx as warning', () => {
+      expect(errorTracker.classifyError({ message: 'boom', status: 503 })).toBe('error');
+      expect(errorTracker.classifyError({ message: 'bad', statusCode: 404 })).toBe('warning');
+    });
+
+    test('classifies fatal errors as critical', () => {
+      expect(errorTracker.classifyError({ name: 'FatalError', message: 'x' })).toBe('critical');
+      expect(errorTracker.classifyError({ message: 'x', critical: true })).toBe('critical');
+    });
+
+    test('prefers an explicit valid severity and defaults to error otherwise', () => {
+      expect(errorTracker.classifyError({ message: 'x', severity: 'info' })).toBe('info');
+      expect(errorTracker.classifyError(new Error('plain'))).toBe('error');
+      expect(errorTracker.classifyError({ message: 'x', severity: 'bogus' })).toBe('error');
+    });
+
+    test('track returns the fingerprint and sends the mapped Sentry level when initialized', () => {
+      const err = new Error('Disk full');
+      const fingerprint = errorTracker.track({ error: err, severity: 'critical' });
+      expect(fingerprint).toBe(errorTracker.hashError(err));
+      expect(Sentry.captureException).toHaveBeenCalledWith(
+        err,
+        expect.objectContaining({ level: 'fatal' })
+      );
+    });
+
+    test('track returns null when no error is given', () => {
+      expect(errorTracker.track({ severity: 'info' })).toBeNull();
     });
   });
 });

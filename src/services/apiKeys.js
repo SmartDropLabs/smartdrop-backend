@@ -6,6 +6,10 @@ const KEY_PREFIX = "api_key:";
 const HASH_PREFIX = "api_key_hash:";
 const IDS_KEY = "api_keys";
 
+// Scopes enforced by requireApiKey on the routes. Unknown scopes are rejected
+// at creation so a key cannot carry a privilege that no route checks (#687).
+const KNOWN_SCOPES = Object.freeze(["admin", "alerts", "airdrops", "default", "webhooks"]);
+
 function hashApiKey(apiKey) {
   return crypto.createHash("sha256").update(apiKey).digest("hex");
 }
@@ -67,6 +71,20 @@ function normalizeTier(tier) {
   return config.apiKeyRateLimit.defaultTier;
 }
 
+function normalizeScopes(scopes) {
+  const AppError = require("../errors/AppError");
+  const unique = [...new Set(scopes)];
+  const unknown = unique.filter((scope) => !KNOWN_SCOPES.includes(scope));
+  if (unknown.length > 0) {
+    throw new AppError(
+      "INVALID_API_KEY_SCOPE",
+      `Unknown API key scope(s): ${unknown.join(", ")}`,
+      400,
+    );
+  }
+  return unique;
+}
+
 async function createKey({ label, scopes = ["default"], tier, expiresAt, expiresIn }) {
   const apiKey = generateApiKey();
   const hashed = hashApiKey(apiKey);
@@ -80,7 +98,7 @@ async function createKey({ label, scopes = ["default"], tier, expiresAt, expires
     label,
     key_prefix: apiKey.slice(0, 8),
     key_hash: hashed,
-    scopes,
+    scopes: normalizeScopes(scopes),
     // Sizes this key's own rate limit bucket (issue #251).
     tier: normalizeTier(tier),
     created_at: now,

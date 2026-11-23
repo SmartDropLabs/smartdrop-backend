@@ -4,15 +4,42 @@ const knexFactory = require('knex');
 const encryption = require('./encryption');
 const logger = require('../logger');
 
+const DEFAULT_MAX_LAG = 30; // 30 seconds default (#723)
+const MAX_LAG = DEFAULT_MAX_LAG;
+
 /**
- * Read replica support (#514).
+ * Check replication lag in seconds for a replica database (#723).
+ * Queries PostgreSQL's pg_last_xact_replay_timestamp() against now().
+ * Returns 0 if not replicating or no transactions replayed yet.
+ * @param {import('knex').Knex} replica
+ * @returns {Promise<number>} Lag in seconds
+ */
+async function checkReplicationLag(replica) {
+  try {
+    const result = await replica.raw(
+      `SELECT EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp())) AS lag`
+    );
+    const rows = result?.rows || result;
+    if (!rows || rows.length === 0) return 0;
+    const lagVal = rows[0]?.lag;
+    if (lagVal === null || lagVal === undefined) return 0;
+    const num = Number(lagVal);
+    return Number.isFinite(num) ? Math.max(0, num) : 0;
+  } catch (err) {
+    logger.warn({ error: err?.message }, 'Failed to check replication lag');
+    throw err;
+  }
+}
+
+/**
+ * Read replica support (#514, #723).
  *
  * Routes read queries to replica databases to reduce primary DB load.
  * Write queries always go to the primary. Reads round-robin across replicas
  * that are currently healthy. A replica is marked unhealthy when a read on it
- * fails with a connection-level error (#666), and marked healthy again by
- * checkReplicaHealth(). When no replica is healthy, reads fall back to the
- * primary.
+ * fails with a connection-level error (#666), or when replication lag exceeds
+ * MAX_LAG (#723), and marked healthy again by checkReplicaHealth(). When no
+ * replica is healthy, reads fall back to the primary.
  *
  * Configuration:
  *   DATABASE_URL          — primary (write) connection string
@@ -23,6 +50,8 @@ class ReadReplicaRouter {
   constructor(options = {}) {
     this.primaryConfig = options.primary;
     this.replicaConfigs = options.replicas ?? [];
+    this.maxLag = options.maxLag ?? MAX_LAG;
+    this.checkReplicationLagFn = options.checkReplicationLag || checkReplicationLag;
     this.primary = null;
     this.replicas = [];
     this.currentReplicaIndex = 0;
@@ -102,7 +131,7 @@ class ReadReplicaRouter {
   }
 
   /**
-   * Mark a replica as unhealthy so reads stop going to it (#666).
+   * Mark a replica as unhealthy so reads stop going to it (#666, #723).
    * @param {import('knex').Knex} replica
    * @param {Error} [err]
    */
@@ -110,6 +139,13 @@ class ReadReplicaRouter {
     if (this.unhealthyReplicas.has(replica)) return;
     this.unhealthyReplicas.add(replica);
     logger.warn({ error: err?.message }, 'Read replica marked unhealthy');
+  }
+
+  /**
+   * Alias for markReplicaUnhealthy (#723).
+   */
+  markUnhealthy(replica, err) {
+    return this.markReplicaUnhealthy(replica, err);
   }
 
   /**
@@ -123,8 +159,34 @@ class ReadReplicaRouter {
   }
 
   /**
-   * Ping every replica with `select 1` and update its health (#666).
+   * Alias for markReplicaHealthy.
+   */
+  markHealthy(replica) {
+    return this.markReplicaHealthy(replica);
+  }
+
+  /**
+   * Check if a replica is currently healthy.
+   * @param {import('knex').Knex} replica
+   * @returns {boolean}
+   */
+  isHealthy(replica) {
+    return !this.unhealthyReplicas.has(replica);
+  }
+
+  /**
+   * Check replication lag for a replica (#723).
+   * @param {import('knex').Knex} replica
+   * @returns {Promise<number>} Lag in seconds
+   */
+  async checkReplicationLag(replica) {
+    return this.checkReplicationLagFn(replica);
+  }
+
+  /**
+   * Ping every replica with `select 1` and check replication lag (#666, #723).
    * Call this on a timer. Unhealthy replicas only return to rotation through it.
+   * A replica is marked unhealthy if ping fails or if replication lag > maxLag (#723).
    * @returns {Promise<boolean[]>} Health per replica, in configured order.
    */
   async checkReplicaHealth() {
@@ -133,6 +195,15 @@ class ReadReplicaRouter {
     for (const replica of this.replicas) {
       try {
         await replica.raw('select 1');
+        const lag = await this.checkReplicationLag(replica);
+        if (lag > this.maxLag) {
+          this.markReplicaUnhealthy(
+            replica,
+            new Error(`Replication lag ${lag}s exceeds threshold ${this.maxLag}s`)
+          );
+          results.push(false);
+          continue;
+        }
         this.markReplicaHealthy(replica);
         results.push(true);
       } catch (err) {
@@ -223,14 +294,21 @@ function createFromEnv() {
     .split(',')
     .map((url) => url.trim())
     .filter(Boolean);
+  const maxLag = process.env.DATABASE_MAX_REPLICATION_LAG
+    ? Number(process.env.DATABASE_MAX_REPLICATION_LAG)
+    : MAX_LAG;
 
   return new ReadReplicaRouter({
     primary: primaryUrl,
     replicas: replicaUrls,
+    maxLag,
   });
 }
 
 module.exports = {
   ReadReplicaRouter,
   createFromEnv,
+  checkReplicationLag,
+  MAX_LAG,
+  DEFAULT_MAX_LAG,
 };

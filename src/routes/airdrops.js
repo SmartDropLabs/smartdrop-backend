@@ -585,6 +585,39 @@ router.get(
       return next(err);
     }
   },
+  router.post('/airdrops/:id/claim', async (req, res, next) => {
+  try {
+    const userId = req.user.id;
+
+    // 1. Execute the claim
+    const claimResult = await airdropsService.claim({
+      userId,
+      airdropId: req.params.id,
+    });
+
+    // 2. Claim has succeeded — send confirmation email
+    try {
+      await emailService.send(userId, 'airdrop_claimed', {
+        amount: claimResult.amount,
+      });
+    } catch (emailError) {
+      logger.error('Airdrop claim confirmation email failed', {
+        userId,
+        airdropId: req.params.id,
+        amount: claimResult.amount,
+        error: emailError.message,
+      });
+    }
+
+    // 3. Preserve the existing successful claim response
+    return res.json(claimResult);
+  } catch (err) {
+    logger.error('Airdrop claim error', {
+      error: err.message,
+    });
+    return next(err);
+  }
+});
 );
 
 module.exports = router;

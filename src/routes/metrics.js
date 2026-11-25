@@ -1,128 +1,136 @@
-'use strict';
+const METRIC_HISTORY_RETENTION_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const METRIC_SAMPLE_INTERVAL_MS = 60 * 1000; // 1 minute
 
-/**
- * Metrics Router (#467).
- * Connects Express router with the Prometheus text exporter in src/metrics/.
- */
+const metricHistory = [];
 
-const express = require('express');
-const cache = require('../services/cache');
-const eventStore = require('../indexer/eventStore');
-const indexerPoller = require('../indexer/runtime');
-const webhookRepo = require('../repositories/webhookRepository');
-const deliveryRepo = require('../repositories/deliveryRepository');
-const { defaultPoolMonitor } = require('../database');
-const { requireApiKey } = require('../middleware/auth');
+let lastSampleAt = 0;
 
-const router = express.Router();
+const COUNTER_METRICS = new Set([
+  'http_requests_total',
+  'http_errors_total',
+  'webhook_deliveries_total',
+  'webhook_delivery_errors_total',
+  'price_cache_hits_total',
+  'price_cache_misses_total',
+]);
 
-// Simple in-memory counters (reset on process restart)
-const counters = {
-  http_requests_total: 0,
-  http_errors_total: 0,
-  webhook_deliveries_total: 0,
-  webhook_delivery_errors_total: 0,
-  price_cache_hits: 0,
-  price_cache_misses: 0,
-};
+function recordMetricSnapshot(values, timestamp = Date.now()) {
+  // Avoid recording samples too frequently.
+  if (timestamp - lastSampleAt < METRIC_SAMPLE_INTERVAL_MS) {
+    return;
+  }
 
-// Track request metrics via a middleware
-function requestMetricsMiddleware(req, res, next) {
-  counters.http_requests_total++;
-  const originalEnd = res.end;
-  res.end = function (...args) {
-    if (res.statusCode >= 400) {
-      counters.http_errors_total++;
-    }
-    originalEnd.apply(this, args);
-  };
-  next();
-}
+  lastSampleAt = timestamp;
 
-function incCounter(name) {
-  counters[name] = (counters[name] || 0) + 1;
-}
+  metricHistory.push({
+    timestamp,
+    values: { ...values },
+  });
 
-async function metricsHandler(_req, res) {
-  try {
-    const lines = [];
+  // Retain only the most recent seven days.
+  const cutoff = timestamp - METRIC_HISTORY_RETENTION_MS;
 
-    // HTTP metrics
-    lines.push('# HELP http_requests_total Total HTTP requests');
-    lines.push('# TYPE http_requests_total counter');
-    lines.push(`http_requests_total ${counters.http_requests_total}`);
-
-    lines.push('# HELP http_errors_total Total HTTP errors (4xx+5xx)');
-    lines.push('# TYPE http_errors_total counter');
-    lines.push(`http_errors_total ${counters.http_errors_total}`);
-
-    // Webhook metrics
-    lines.push('# HELP webhook_deliveries_total Total webhook deliveries attempted');
-    lines.push('# TYPE webhook_deliveries_total counter');
-    lines.push(`webhook_deliveries_total ${counters.webhook_deliveries_total}`);
-
-    lines.push('# HELP webhook_delivery_errors_total Total failed webhook deliveries');
-    lines.push('# TYPE webhook_delivery_errors_total counter');
-    lines.push(`webhook_delivery_errors_total ${counters.webhook_delivery_errors_total}`);
-
-    // Price cache metrics
-    lines.push('# HELP price_cache_hits_total Price cache hits');
-    lines.push('# TYPE price_cache_hits_total counter');
-    lines.push(`price_cache_hits_total ${counters.price_cache_hits}`);
-
-    lines.push('# HELP price_cache_misses_total Price cache misses');
-    lines.push('# TYPE price_cache_misses_total counter');
-    lines.push(`price_cache_misses_total ${counters.price_cache_misses}`);
-
-    // Indexer status
-    const indexerStatus = indexerPoller.getStatus();
-    lines.push('# HELP indexer_running Whether the indexer poller is running');
-    lines.push('# TYPE indexer_running gauge');
-    lines.push(`indexer_running ${indexerStatus.running ? 1 : 0}`);
-
-    lines.push('# HELP indexer_latest_ledger Latest ledger processed by indexer');
-    lines.push('# TYPE indexer_latest_ledger gauge');
-    lines.push(`indexer_latest_ledger ${indexerStatus.latest_ledger || 0}`);
-
-    // Indexer event count
-    const stats = await eventStore.getStats();
-    lines.push('# HELP indexer_events_total Total indexed events');
-    lines.push('# TYPE indexer_events_total gauge');
-    lines.push(`indexer_events_total ${stats.events_count}`);
-
-    // Active webhooks
-    const allWebhooks = await webhookRepo.listAll();
-    const activeWebhooks = allWebhooks.filter((w) => w.active);
-    lines.push('# HELP webhooks_active Number of active webhooks');
-    lines.push('# TYPE webhooks_active gauge');
-    lines.push(`webhooks_active ${activeWebhooks.length}`);
-
-    // Redis connectivity
-    const redisConnected = cache.isConnected();
-    lines.push('# HELP redis_connected Whether Redis is connected');
-    lines.push('# TYPE redis_connected gauge');
-    lines.push(`redis_connected ${redisConnected ? 1 : 0}`);
-
-    // Database connection pool metrics (#520)
-    const poolProm = defaultPoolMonitor.toPrometheusMetrics();
-    if (poolProm) {
-      lines.push(poolProm.trim());
-    }
-
-    res.setHeader('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
-    res.send(lines.join('\n') + '\n');
-  } catch (err) {
-    res.status(500).send('# Error generating metrics\n');
+  while (
+    metricHistory.length > 0 &&
+    metricHistory[0].timestamp < cutoff
+  ) {
+    metricHistory.shift();
   }
 }
 
-// Metrics expose internal operational data, so they require an admin-scoped API key (#674).
-router.get('/metrics', requireApiKey({ scopes: ['admin'] }), metricsHandler);
+function getIntervalMs(interval) {
+  const intervals = {
+    '1h': 60 * 60 * 1000,
+    '1d': 24 * 60 * 60 * 1000,
+  };
 
-module.exports = {
-  router,
-  metricsHandler,
-  requestMetricsMiddleware,
-  incCounter,
-  counters,
-};
+  const duration = intervals[interval];
+
+  if (!duration) {
+    throw new Error(`Unsupported aggregation interval: ${interval}`);
+  }
+
+  return duration;
+}
+
+function aggregate(metrics, interval) {
+  const intervalMs = getIntervalMs(interval);
+  const now = Date.now();
+  const start = now - intervalMs;
+
+  const relevantMetrics = metrics.filter(
+    (sample) => sample.timestamp >= start && sample.timestamp <= now,
+  );
+
+  const buckets = new Map();
+
+  for (const sample of relevantMetrics) {
+    const bucketStart =
+      Math.floor(sample.timestamp / intervalMs) * intervalMs;
+
+    if (!buckets.has(bucketStart)) {
+      buckets.set(bucketStart, {
+        timestamp: bucketStart,
+        counters: {},
+        gauges: {},
+        gaugeSamples: {},
+      });
+    }
+
+    const bucket = buckets.get(bucketStart);
+
+    for (const [name, value] of Object.entries(sample.values)) {
+      if (COUNTER_METRICS.has(name)) {
+        // Counters are cumulative. We store the latest snapshot per bucket,
+        // then calculate the delta from the preceding snapshot.
+        bucket.counters[name] = value;
+      } else {
+        // Gauges represent point-in-time values, so average the samples
+        // within each bucket.
+        bucket.gauges[name] = (bucket.gauges[name] || 0) + value;
+        bucket.gaugeSamples[name] =
+          (bucket.gaugeSamples[name] || 0) + 1;
+      }
+    }
+  }
+
+  const sortedBuckets = [...buckets.values()].sort(
+    (a, b) => a.timestamp - b.timestamp,
+  );
+
+  // Convert counter snapshots to bucket-level increments.
+  const previousCounters = {};
+
+  for (const bucket of sortedBuckets) {
+    for (const [name, value] of Object.entries(bucket.counters)) {
+      const previous = previousCounters[name] ?? value;
+
+      // Handle counter resets, such as a process restart.
+      bucket.counters[name] =
+        value >= previous ? value - previous : value;
+
+      previousCounters[name] = value;
+    }
+
+    // Convert gauge totals into averages.
+    for (const [name, total] of Object.entries(bucket.gauges)) {
+      const count = bucket.gaugeSamples[name];
+
+      bucket.gauges[name] = count > 0 ? total / count : 0;
+    }
+
+    delete bucket.gaugeSamples;
+  }
+
+  return {
+    interval,
+    generatedAt: new Date(now).toISOString(),
+    windowStart: new Date(start).toISOString(),
+    windowEnd: new Date(now).toISOString(),
+    buckets: sortedBuckets.map((bucket) => ({
+      timestamp: new Date(bucket.timestamp).toISOString(),
+      counters: bucket.counters,
+      gauges: bucket.gauges,
+    })),
+  };
+}

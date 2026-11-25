@@ -295,6 +295,25 @@ describe('API key management routes', () => {
     expect(res.body.error).toMatchObject({ code: 'UNAUTHORIZED', message: 'Missing or invalid API key' });
   });
 
+  test('key list marks keys older than 90 days for rotation', async () => {
+    const app = buildKeysApp();
+    const aged = await apiKeys.createKey({ label: 'aged key' });
+    const recent = await apiKeys.createKey({ label: 'recent key' });
+    const agedRecord = await apiKeys.getKey(aged.key.id);
+    mockStore.set(`api_key:${aged.key.id}`, {
+      ...agedRecord,
+      created_at: new Date(Date.now() - 91 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+
+    const res = await request(app)
+      .get('/api/v1/keys')
+      .set('Authorization', `Bearer ${process.env.ADMIN_API_KEY}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.keys.find((key) => key.id === aged.key.id).rotation_reminder_due).toBe(true);
+    expect(res.body.keys.find((key) => key.id === recent.key.id).rotation_reminder_due).toBe(false);
+  });
+
   test('create key rejects blank labels', async () => {
     const app = buildKeysApp();
     const res = await request(app)

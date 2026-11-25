@@ -92,6 +92,7 @@ const env = cleanEnv(rawEnv, {
   PORT: port({ default: 3000 }),
   REDIS_URL: url({ devDefault: 'redis://localhost:6379' }),
   DATABASE_URL: url({ devDefault: databaseDevDefault }),
+  DATABASE_URL_ENCRYPTED: str({ default: '' }),
   STELLAR_HORIZON_URL: url({ default: 'https://horizon.stellar.org' }),
   SOROBAN_RPC_URL: url({ default: 'https://soroban-rpc.mainnet.stellar.gateway.fm' }),
   USDC_ISSUER: stellarAddress({
@@ -181,6 +182,7 @@ const config = module.exports = {
     maxAgeSeconds: env.STATIC_ASSETS_MAX_AGE_SECONDS,
   },
   databaseUrl: env.DATABASE_URL,
+  databaseUrlEncrypted: env.DATABASE_URL_ENCRYPTED,
   database: {
     pool: {
       min: env.DB_POOL_MIN,
@@ -392,6 +394,7 @@ function reload() {
     PORT: port({ default: 3000 }),
     REDIS_URL: url({ devDefault: 'redis://localhost:6379' }),
     DATABASE_URL: url({ devDefault: databaseDevDefault }),
+    DATABASE_URL_ENCRYPTED: str({ default: '' }),
     STELLAR_HORIZON_URL: url({ default: 'https://horizon.stellar.org' }),
     SOROBAN_RPC_URL: url({ default: 'https://soroban-rpc.mainnet.stellar.gateway.fm' }),
     USDC_ISSUER: stellarAddress({ default: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335AX2OBFLDTQLNUEHRGPTM6RIA' }),
@@ -465,6 +468,7 @@ function reload() {
       maxAgeSeconds: reloaded.STATIC_ASSETS_MAX_AGE_SECONDS,
     },
     databaseUrl: reloaded.DATABASE_URL,
+    databaseUrlEncrypted: reloaded.DATABASE_URL_ENCRYPTED,
     redis: { url: reloaded.REDIS_URL },
     stellar: {
       horizonUrl: reloaded.STELLAR_HORIZON_URL,

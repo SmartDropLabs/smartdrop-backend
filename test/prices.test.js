@@ -19,6 +19,10 @@ jest.mock('../src/services/priceOracle', () => ({
   refreshAllCachedPrices: jest.fn(),
 }));
 
+jest.mock('../src/services/alerts', () => ({
+  evaluateForAsset: jest.fn(),
+}));
+
 jest.mock('../src/logger', () => ({
   info: jest.fn(),
   warn: jest.fn(),
@@ -37,6 +41,7 @@ process.env.ADMIN_API_KEY = 'b'.repeat(64);
 const express = require('express');
 const request = require('supertest');
 const pricesRouter = require('../src/routes/prices');
+const alertsService = require('../src/services/alerts');
 const logger = require('../src/logger');
 const { errorHandler } = require('../src/middleware/errorHandler');
 const apiKeys = require('../src/services/apiKeys');
@@ -71,6 +76,7 @@ describe('price routes', () => {
     app = buildApp();
     mockGetPrice.mockReset();
     mockFetchFreshPrice.mockReset();
+    alertsService.evaluateForAsset.mockReset();
     apiKeys.validateApiKey.mockReset();
     logger.error.mockClear();
   });
@@ -88,6 +94,7 @@ describe('price routes', () => {
         'USDC',
         'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
       );
+      expect(alertsService.evaluateForAsset).toHaveBeenCalledWith('USDC', 1.01);
       expect(res.body).toEqual({
         asset_code: 'USDC',
         issuer: 'GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
@@ -242,6 +249,7 @@ describe('price routes', () => {
         asset_code: 'XLM',
         price_usd: expect.any(Number),
       });
+      expect(alertsService.evaluateForAsset).toHaveBeenCalledWith('XLM', expect.any(Number));
     });
 
     test('valid API key + oracle throws — 500, no internal details leaked', async () => {

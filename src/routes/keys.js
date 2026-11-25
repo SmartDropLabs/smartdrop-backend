@@ -14,13 +14,25 @@ const {
 
 const router = express.Router();
 const validateRouteIdParams = validate(routeIdParamsSchema, "params");
+const KEY_ROTATION_REMINDER_AGE_MS = 90 * 24 * 60 * 60 * 1000;
 
 router.use("/keys", requireApiKey({ scopes: ["admin"] }));
 
 router.get("/keys", async (_req, res, next) => {
   try {
     const keys = await apiKeys.listKeys();
-    return res.json({ keys });
+    const now = Date.now();
+    return res.json({
+      keys: keys.map((key) => {
+        const createdAt = Date.parse(key.created_at);
+        return {
+          ...key,
+          rotation_reminder_due:
+            Number.isFinite(createdAt) &&
+            now - createdAt > KEY_ROTATION_REMINDER_AGE_MS,
+        };
+      }),
+    });
   } catch (err) {
     logger.error("List API keys error", { error: err.message });
     return next(err);

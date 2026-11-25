@@ -10,8 +10,10 @@ const { sendError } = require('./errorHandler');
  * Validates incoming webhook signatures to prevent forged webhooks.
  * Uses HMAC-SHA256 with the configured webhook secret.
  *
- * Expects the signature in the `X-Webhook-Signature` header in the format
- * `sha256=<hex digest>`. The signature is computed over the raw request body.
+ * Expects an `X-Webhook-Timestamp` (or legacy `X-Request-Timestamp`) header
+ * and a `X-Webhook-Signature` header in the format `sha256=<hex digest>`.
+ * The signature covers `<timestamp>.<raw request body>` so a valid signature
+ * cannot be replayed by replacing its timestamp.
  */
 function webhookSignatureMiddleware(req, res, next) {
   const signature = req.headers['x-webhook-signature'];
@@ -31,20 +33,25 @@ function webhookSignatureMiddleware(req, res, next) {
     return sendError(res, 400, 'WEBHOOK_RAW_BODY_MISSING', 'Raw body is required for signature verification.');
   }
 
-  // Validate timestamp if provided to prevent replay attacks (#639)
   const timestampHeader = req.headers['x-webhook-timestamp'] || req.headers['x-request-timestamp'];
-  if (timestampHeader) {
-    const ts = Number(timestampHeader);
-    const now = Math.floor(Date.now() / 1000);
-    const tsSec = ts > 1e11 ? Math.floor(ts / 1000) : ts;
-    if (isNaN(tsSec) || Math.abs(now - tsSec) > 300) {
-      return sendError(res, 401, 'WEBHOOK_SIGNATURE_EXPIRED', 'Webhook timestamp expired or outside 5-minute tolerance window.');
-    }
+  if (typeof timestampHeader !== 'string') {
+    return sendError(res, 401, 'WEBHOOK_TIMESTAMP_MISSING', 'X-Webhook-Timestamp header is required.');
+  }
+
+  if (!/^\d{1,13}$/.test(timestampHeader)) {
+    return sendError(res, 401, 'WEBHOOK_SIGNATURE_EXPIRED', 'Webhook timestamp is invalid.');
+  }
+
+  const timestamp = Number(timestampHeader);
+  const timestampSeconds = timestamp > 1e11 ? Math.floor(timestamp / 1000) : timestamp;
+  const now = Math.floor(Date.now() / 1000);
+  if (!Number.isSafeInteger(timestamp) || timestamp <= 0 || Math.abs(now - timestampSeconds) > 300) {
+    return sendError(res, 401, 'WEBHOOK_SIGNATURE_EXPIRED', 'Webhook timestamp expired or outside 5-minute tolerance window.');
   }
 
   const expectedSignature =
     'sha256=' +
-    crypto.createHmac('sha256', secret).update(rawBody).digest('hex');
+    crypto.createHmac('sha256', secret).update(`${timestampHeader}.`).update(rawBody).digest('hex');
 
   // Constant-time comparison to prevent timing attacks.
   const provided = Buffer.from(signature);
